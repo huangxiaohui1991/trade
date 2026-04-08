@@ -1,0 +1,9 @@
+.DS_Store
+*.pyc
+__pycache__/
+*.log
+*.db
+.env
+.venv/
+miaoxiang/
+筛选结果/
