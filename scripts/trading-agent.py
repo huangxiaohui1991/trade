@@ -20,7 +20,9 @@ from pathlib import Path
 SCRIPT_DIR = Path("/Users/hxh/Documents/a-stock-trading/scripts")
 PYTHON = os.path.expanduser("~/.venv/akshare/bin/python")
 
-DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN.eJ4ZSmYPZJ_tqoyXsW_WSZMRQddJG3Z0IHCnA4")
+DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_BOT_TOKEN environment variable not set")
 DISCORD_CHANNEL = os.environ.get("DISCORD_CHANNEL_ID", "1478608178621976617")
 
 

@@ -29,7 +29,7 @@ echo "=== $(date '+%Y-%m-%d %H:%M:%S') Running: $MODE ==="
 
 cd "$SCRIPT_DIR"
 
-DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN.eJ4ZSmYPZJ_tqoyXsW_WSZMRQddJG3Z0IHCnA4" \
+# DISCORD_BOT_TOKEN 由 launchd plist 的 EnvironmentVariables 传入，勿在此处硬编码
 DISCORD_CHANNEL_ID="1478608178621976617" \
 PYTHONPATH="/Users/hxh/.venv/akshare/lib/python3.9/site-packages" \
 PATH="/Users/hxh/.local/bin:$PATH" \
