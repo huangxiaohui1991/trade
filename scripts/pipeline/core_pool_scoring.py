@@ -385,7 +385,7 @@ def run() -> list:
     # 写入评分报告
     _logger.info(">> 写入评分报告...")
     report_content = _build_report_content(scores, date_str)
-    report_dir = Path(vault.vault_path) / "data" / "04-选股" / "筛选结果"
+    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
     report_dir.mkdir(parents=True, exist_ok=True)
     time_str = datetime.now().strftime("%H%M%S")
     report_path = report_dir / f"核心池_评分报告_{date_str.replace('-', '')}_{time_str}.md"

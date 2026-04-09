@@ -30,7 +30,8 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
-from scripts.parser import parse_journal_dir
+from scripts.utils.config_loader import get_stocks
+from scripts.utils.parser import parse_journal_dir, parse_md_table
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_weekly_report
 from scripts.utils.logger import get_logger
@@ -44,6 +45,34 @@ def _safe_float(v, default=0.0):
         return float(v) if v else default
     except (ValueError, TypeError):
         return default
+
+
+def _extract_report_scores(report_path: Path) -> dict:
+    """从评分报告中提取 代码 -> 总分 映射。"""
+    with open(report_path, encoding="utf-8") as f:
+        tables = parse_md_table(f.read())
+
+    scores = {}
+    for table in tables:
+        for row in table.get("rows", []):
+            code = str(row.get("代码", "")).strip()
+            if not code:
+                continue
+
+            raw_score = (
+                row.get("**总分(10)**")
+                or row.get("总分")
+                or row.get("四维总分")
+                or ""
+            )
+            if isinstance(raw_score, str):
+                raw_score = raw_score.replace("**", "").strip()
+            try:
+                scores[code] = float(raw_score)
+            except (ValueError, TypeError):
+                continue
+
+    return scores
 
 
 def _build_weekly_report(vault: ObsidianVault, stats: dict,
@@ -123,8 +152,8 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         if _safe_float(j.get("trades", 0)) > 0:
             has_trades = True
             date = j.get("_date", "")
-            pnl = j.get("daily_pnl", 0)
-            lines.append(f"| {date} | — | — | — | — | ¥{pnl:+,} | 详见日志 |")
+            pnl = _safe_float(j.get("daily_pnl", 0))
+            lines.append(f"| {date} | — | — | — | — | ¥{pnl:+,.2f} | 详见日志 |")
     if not has_trades:
         lines.append("| — | — | — | — | — | — | 本周无交易 |")
 
@@ -222,6 +251,17 @@ def run() -> dict:
     _logger.info(">> 检查核心池变化...")
     core_pool_changes = []
     try:
+        stock_name_map = {
+            str(item.get("code", "")).strip(): str(item.get("name", "")).strip()
+            for item in get_stocks().get("core_pool", [])
+            if str(item.get("code", "")).strip()
+        }
+        for row in vault.read_core_pool():
+            code = str(row.get("代码", "")).strip()
+            name = str(row.get("股票", "")).strip()
+            if code and name:
+                stock_name_map.setdefault(code, name)
+
         reports_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
         if reports_dir.exists():
             # 找最近两份评分报告
@@ -230,28 +270,8 @@ def run() -> dict:
                 prev_report = reports[-2]  # 上周的
                 curr_report = reports[-1]  # 本周的
 
-                from scripts.parser import parse_md_table
-                prev_data = parse_md_table(open(prev_report, encoding='utf-8').read())
-                curr_data = parse_md_table(open(curr_report, encoding='utf-8').read())
-
-                prev_scores = {}
-                curr_scores = {}
-
-                for t in prev_data:
-                    for row in t.get("rows", []):
-                        code = str(row.get("代码", "")).strip()
-                        try:
-                            prev_scores[code] = float(row.get("总分", 0))
-                        except (ValueError, TypeError):
-                            pass
-
-                for t in curr_data:
-                    for row in t.get("rows", []):
-                        code = str(row.get("代码", "")).strip()
-                        try:
-                            curr_scores[code] = float(row.get("总分", 0))
-                        except (ValueError, TypeError):
-                            pass
+                prev_scores = _extract_report_scores(prev_report)
+                curr_scores = _extract_report_scores(curr_report)
 
                 all_codes = set(list(prev_scores.keys()) + list(curr_scores.keys()))
                 for code in all_codes:
@@ -264,7 +284,7 @@ def run() -> dict:
                         else:
                             reason.append("评分上升")
                         core_pool_changes.append({
-                            "name": code,  # name 需从 stocks.yaml 映射
+                            "name": stock_name_map.get(code, code),
                             "old_score": old,
                             "new_score": new,
                             "reason": ", ".join(reason),
@@ -290,7 +310,7 @@ def run() -> dict:
     )
 
     # 写文件
-    review_dir = Path(vault.vault_path) / "data" / "03-复盘" / "周"
+    review_dir = Path(vault.vault_path) / "03-复盘" / "周"
     review_dir.mkdir(parents=True, exist_ok=True)
     review_path = review_dir / f"{week_str}.md"
     with open(review_path, 'w', encoding='utf-8') as f:

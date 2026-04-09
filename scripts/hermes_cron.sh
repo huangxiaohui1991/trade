@@ -27,7 +27,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VAULT_PATH="${AStockVault:-$HOME/Documents/a-stock-trading}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VAULT_PATH="${AStockVault:-$REPO_ROOT}"
 PYTHON="${HOME}/.venv/akshare/bin/python"
 
 # 确保 vault 的 scripts 在 PYTHONPATH

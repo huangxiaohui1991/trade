@@ -27,6 +27,7 @@ engine/composite.py — 综合决策引擎
 """
 
 import os
+import re
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ warnings.filterwarnings("ignore")
 from scripts.engine.market_timer import MarketTimer, get_signal as get_market_signal
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.obsidian import ObsidianVault
 
 _logger = get_logger("composite")
 
@@ -267,8 +269,50 @@ class CompositeDecider:
 
     def _get_current_exposure(self) -> float:
         """获取当前已用仓位占总资金比例（简化版）"""
-        # TODO: 从 ObsidianVault 读取 portfolio.md 计算实时仓位
-        return 0.0
+        try:
+            vault = ObsidianVault()
+            portfolio = vault.read_portfolio()
+            holdings = portfolio.get("holdings", [])
+        except Exception as e:
+            _logger.warning(f"[composite] 读取持仓失败，按空仓处理: {e}")
+            return 0.0
+
+        def _safe_float(value) -> float:
+            if value is None:
+                return 0.0
+            if isinstance(value, (int, float)):
+                return float(value)
+            cleaned = re.sub(r"[^\d.\-]", "", str(value))
+            if not cleaned:
+                return 0.0
+            try:
+                return float(cleaned)
+            except ValueError:
+                return 0.0
+
+        exposure_amount = 0.0
+        for row in holdings:
+            code = str(row.get("代码", "")).strip()
+            name = str(row.get("股票", "")).strip()
+            if not code.isdigit() or len(code) != 6:
+                continue
+            if name in ["", "—", "空仓"]:
+                continue
+
+            shares = int(_safe_float(row.get("持有股数", 0)))
+            if shares <= 0:
+                continue
+
+            market_value = _safe_float(row.get("持仓市值", row.get("市值", 0)))
+            if market_value <= 0:
+                price = _safe_float(row.get("最新价", row.get("平均成本", 0)))
+                market_value = price * shares
+
+            exposure_amount += market_value
+
+        if self.total_capital <= 0:
+            return 0.0
+        return min(exposure_amount / self.total_capital, 1.0)
 
 
 # ---------------------------------------------------------------------------

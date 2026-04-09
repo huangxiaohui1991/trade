@@ -142,6 +142,7 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
         changes.append({
             "name": name,
             "code": code,
+            "shares": shares,
             "old_price": old_price,
             "new_price": new_price,
             "chg_pct": chg_pct,

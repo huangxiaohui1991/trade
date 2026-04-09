@@ -8,6 +8,7 @@ import os
 import shutil
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 # 导入 parser 模块的解析函数
@@ -24,10 +25,14 @@ class ObsidianVault:
         初始化 Obsidian vault
 
         Args:
-            vault_path: vault 根目录，默认为 ~/Documents/a-stock-trading
+            vault_path: vault 根目录，默认按以下优先级解析：
+                1. 显式传入 vault_path
+                2. 环境变量 AStockVault
+                3. 当前仓库根目录
         """
         if vault_path is None:
-            vault_path = os.path.expanduser("~/Documents/a-stock-trading")
+            project_root = Path(__file__).resolve().parent.parent.parent
+            vault_path = os.environ.get("AStockVault") or str(project_root)
         self.vault_path = os.path.abspath(vault_path)
 
         # 文件路径映射（Obsidian vault 根目录直接存放）
@@ -185,63 +190,65 @@ class ObsidianVault:
         if not tables:
             return
 
-        # 建立代码到新评分的映射
-        score_map = {str(s.get('代码', '')): s for s in scores}
+        # 建立代码到新评分的映射，兼容 code / 代码 两种字段
+        score_map = {}
+        for score in scores:
+            code = str(score.get("code", score.get("代码", ""))).strip()
+            if code:
+                score_map[code] = score
 
-        # 更新表格中的评分
-        for table in tables:
-            for row in table.get('rows', []):
-                code = str(row.get('代码', ''))
-                if code in score_map:
-                    new_score = score_map[code]
-                    for key, value in new_score.items():
-                        if key != '代码':
-                            row[key] = value
+        headers = tables[0].get("headers", [])
+        rows = tables[0].get("rows", [])
 
-        # 重新构建表格内容
-        lines = content.split('\n')
-        result_lines = []
-        in_table = False
-        table_idx = 0
-
-        for line in lines:
-            # 检测表格开始
-            if '|' in line and not line.startswith('|---') and not result_lines:
-                # 可能是在表头行
-                if table_idx < len(tables) and tables[table_idx].get('headers'):
-                    headers = tables[table_idx]['headers']
-                    result_lines.append(line)
-                    in_table = True
-                    continue
-
-            # 检测分隔线
-            if re.match(r'\s*\|[\s\-:|]+\|', line):
-                result_lines.append(line)
+        # 更新核心池主表，其他表格保持原样
+        for row in rows:
+            code = str(row.get("代码", "")).strip()
+            if code not in score_map:
                 continue
 
-            # 表格数据行
-            if in_table and '|' in line:
-                cells = [c.strip() for c in line.split('|') if c.strip()]
-                if table_idx < len(tables):
-                    rows = tables[table_idx].get('rows', [])
-                    if rows:
-                        row = rows.pop(0)
-                        new_cells = []
-                        for h in headers:
-                            new_cells.append(str(row.get(h, '')))
-                        result_lines.append("| " + " | ".join(new_cells) + " |")
-                        continue
-                result_lines.append(line)
-                continue
+            new_score = score_map[code]
+            total_score = float(new_score.get("total_score", row.get("四维总分", 0)) or 0)
+            fundamental_score = float(new_score.get("fundamental_score", row.get("基本面", 0)) or 0)
+            technical_score = float(new_score.get("technical_score", row.get("技术", 0)) or 0)
+            flow_score = float(new_score.get("flow_score", row.get("主力", 0)) or 0)
+            veto_signals = new_score.get("veto_signals", [])
 
-            # 表格结束检测
-            if in_table and not line.strip().startswith('|'):
-                in_table = False
-                table_idx += 1
+            if veto_signals:
+                suggestion = "❌"
+                note = "veto:" + ",".join(veto_signals)
+            elif total_score >= 7:
+                suggestion = "✅"
+                note = "可买入"
+            elif total_score >= 5:
+                suggestion = "🟡"
+                note = "观察"
+            else:
+                suggestion = "❌"
+                note = "规避"
 
-            result_lines.append(line)
+            row["四维总分"] = f"{total_score:.1f}"
+            if "基本面" in headers:
+                row["基本面"] = f"{fundamental_score:.1f}"
+            if "技术" in headers:
+                row["技术"] = f"{technical_score:.1f}"
+            if "主力" in headers:
+                row["主力"] = f"{flow_score:.1f}"
+            if "通过" in headers:
+                row["通过"] = suggestion
+            if "备注" in headers:
+                row["备注"] = note
 
-        self.write(self.core_pool_path, '\n'.join(result_lines))
+        rendered_table = [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join(["---"] * len(headers)) + " |",
+        ]
+        for row in rows:
+            rendered_table.append("| " + " | ".join(str(row.get(header, "")) for header in headers) + " |")
+
+        table_pattern = r'^\|.*\|\n\|[\-\|\s:]+\|\n(?:\|.*\|\n?)*'
+        replacement = "\n".join(rendered_table) + "\n"
+        new_content = re.sub(table_pattern, replacement, content, count=1, flags=re.MULTILINE)
+        self.write(self.core_pool_path, new_content)
 
     def get_journal_path(self, date: str) -> str:
         """
