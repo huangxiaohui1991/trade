@@ -12,6 +12,7 @@ from scripts.state.service import (
     record_trade_event,
     save_market_snapshot,
     save_pool_snapshot,
+    sync_activity_state,
     sync_portfolio_state,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "record_trade_event",
     "save_market_snapshot",
     "save_pool_snapshot",
+    "sync_activity_state",
     "sync_portfolio_state",
 ]

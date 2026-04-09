@@ -216,6 +216,26 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _extract_realized_pnl(value: Any, default: float = 0.0) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return default
+
+    loss_match = re.search(r"亏[^0-9\-]*([0-9][0-9,]*(?:\.\d+)?)", text)
+    if loss_match:
+        return -abs(_safe_float(loss_match.group(1), default))
+
+    gain_match = re.search(r"(?:盈|赚)[^0-9\-]*([0-9][0-9,]*(?:\.\d+)?)", text)
+    if gain_match:
+        return abs(_safe_float(gain_match.group(1), default))
+
+    pnl_match = re.search(r"(?:pnl|profit)[^0-9\-]*([-+]?[0-9][0-9,]*(?:\.\d+)?)", text, re.IGNORECASE)
+    if pnl_match:
+        return _safe_float(pnl_match.group(1), default)
+
+    return default
+
+
 def _normalize_code(value: Any) -> str:
     if value is None:
         return ""
@@ -366,34 +386,55 @@ def _write_positions(conn: sqlite3.Connection, positions: Iterable[dict]) -> Non
 def _replace_trade_events(conn: sqlite3.Connection, events: Iterable[dict]) -> None:
     conn.execute("DELETE FROM trade_events")
     for event in events:
-        conn.execute(
-            """
-            INSERT INTO trade_events(
-              external_id, scope, market, code, name, side, event_type, shares, price,
-              amount, realized_pnl, event_date, reason_code, reason_text, source,
-              metadata_json, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.get("external_id"),
-                event.get("scope", PRIMARY_SCOPE),
-                event.get("market", ""),
-                event.get("code", ""),
-                event.get("name", ""),
-                event.get("side", ""),
-                event.get("event_type", event.get("side", "")),
-                event.get("shares", 0),
-                event.get("price", 0.0),
-                event.get("amount", 0.0),
-                event.get("realized_pnl", 0.0),
-                event.get("event_date", _today_str()),
-                event.get("reason_code", ""),
-                event.get("reason_text", ""),
-                event.get("source", "bootstrap"),
-                _json_dumps(event.get("metadata", {})),
-                event.get("created_at", _now_ts()),
-            ),
-        )
+        _upsert_trade_event(conn, event)
+
+
+def _upsert_trade_event(conn: sqlite3.Connection, event: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO trade_events(
+          external_id, scope, market, code, name, side, event_type, shares, price,
+          amount, realized_pnl, event_date, reason_code, reason_text, source,
+          metadata_json, created_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(external_id) DO UPDATE SET
+          scope = excluded.scope,
+          market = excluded.market,
+          code = excluded.code,
+          name = excluded.name,
+          side = excluded.side,
+          event_type = excluded.event_type,
+          shares = excluded.shares,
+          price = excluded.price,
+          amount = excluded.amount,
+          realized_pnl = excluded.realized_pnl,
+          event_date = excluded.event_date,
+          reason_code = excluded.reason_code,
+          reason_text = excluded.reason_text,
+          source = excluded.source,
+          metadata_json = excluded.metadata_json,
+          created_at = excluded.created_at
+        """,
+        (
+            event.get("external_id"),
+            event.get("scope", PRIMARY_SCOPE),
+            event.get("market", ""),
+            event.get("code", ""),
+            event.get("name", ""),
+            event.get("side", ""),
+            event.get("event_type", event.get("side", "")),
+            event.get("shares", 0),
+            event.get("price", 0.0),
+            event.get("amount", 0.0),
+            event.get("realized_pnl", 0.0),
+            event.get("event_date", _today_str()),
+            event.get("reason_code", ""),
+            event.get("reason_text", ""),
+            event.get("source", "bootstrap"),
+            _json_dumps(event.get("metadata", {})),
+            event.get("created_at", _now_ts()),
+        ),
+    )
 
 
 def _project_stocks_yaml(snapshot: dict) -> str:
@@ -609,7 +650,7 @@ def _bootstrap_portfolio_snapshot() -> tuple[list[dict], list[dict], str]:
     return positions, balances, as_of_date
 
 
-def _bootstrap_trade_events() -> list[dict]:
+def _portfolio_weekly_trade_events(source: str = "bootstrap:weekly_record") -> list[dict]:
     vault = ObsidianVault()
     portfolio = vault.read_portfolio()
     meta = portfolio.get("meta", {})
@@ -627,7 +668,7 @@ def _bootstrap_trade_events() -> list[dict]:
         event_date = _parse_mmdd_date(str(row.get("日期", "")).strip(), default_year)
         events.append(
             {
-                "external_id": f"bootstrap:weekly:{idx}:{event_date}:{stock_code or stock_name}",
+                "external_id": f"weekly:{event_date}:{scope}:{side}:{stock_code or stock_name}:{idx}",
                 "scope": scope,
                 "market": market,
                 "code": stock_code,
@@ -637,15 +678,21 @@ def _bootstrap_trade_events() -> list[dict]:
                 "shares": _safe_int(row.get("数量", 0)),
                 "price": _safe_float(row.get("价格", 0)),
                 "amount": _safe_float(row.get("金额", 0)),
-                "realized_pnl": _safe_float(note, 0.0),
+                "realized_pnl": _extract_realized_pnl(note, 0.0),
                 "event_date": event_date,
                 "reason_code": _reason_code_from_text(side, note or record_type, scope),
                 "reason_text": note or record_type,
-                "source": "bootstrap:weekly_record",
+                "source": source,
                 "metadata": row,
                 "created_at": _now_ts(),
             }
         )
+    return events
+
+
+def _bootstrap_trade_events() -> list[dict]:
+    vault = ObsidianVault()
+    events = _portfolio_weekly_trade_events(source="bootstrap:weekly_record")
 
     shadow_path = Path(vault.vault_path) / "03-复盘" / "模拟盘" / "交易记录.md"
     if shadow_path.exists():
@@ -670,7 +717,7 @@ def _bootstrap_trade_events() -> list[dict]:
                     "shares": _safe_int(row.get("数量", 0)),
                     "price": _safe_float(row.get("价格", 0)),
                     "amount": _safe_float(row.get("金额", 0)),
-                    "realized_pnl": _safe_float(reason_text, 0.0),
+                    "realized_pnl": _extract_realized_pnl(reason_text, 0.0),
                     "event_date": event_date,
                     "reason_code": _reason_code_from_text(side, reason_text, PAPER_SCOPE),
                     "reason_text": reason_text,
@@ -730,6 +777,36 @@ def sync_portfolio_state() -> dict:
         "positions": len(positions),
         "scopes": [balance.get("scope", "") for balance in balances],
         "as_of_date": as_of_date,
+    }
+
+
+def sync_activity_state() -> dict:
+    """Refresh structured non-paper trade events from portfolio weekly records."""
+    weekly_events = _portfolio_weekly_trade_events(source="sync:weekly_record")
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        conn.execute(
+            "DELETE FROM trade_events WHERE source IN (?, ?)",
+            ("bootstrap:weekly_record", "sync:weekly_record"),
+        )
+        for event in weekly_events:
+            _upsert_trade_event(conn, event)
+        _meta_set(conn, "activity_sync_at", _now_ts())
+        _meta_set(conn, "activity_sync_count", str(len(weekly_events)))
+
+    counts = {
+        PRIMARY_SCOPE: 0,
+        SECONDARY_SCOPE: 0,
+        PAPER_SCOPE: 0,
+    }
+    for event in weekly_events:
+        scope = event.get("scope", PRIMARY_SCOPE)
+        counts[scope] = counts.get(scope, 0) + 1
+    return {
+        "status": "success",
+        "db_path": str(_db_path()),
+        "imported_events": len(weekly_events),
+        "counts_by_scope": counts,
     }
 
 
@@ -1048,34 +1125,7 @@ def record_trade_event(event: dict) -> dict:
     }
     with _connect() as conn:
         _ensure_bootstrapped(conn)
-        conn.execute(
-            """
-            INSERT INTO trade_events(
-              external_id, scope, market, code, name, side, event_type, shares, price,
-              amount, realized_pnl, event_date, reason_code, reason_text, source,
-              metadata_json, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload.get("external_id"),
-                payload["scope"],
-                payload["market"],
-                payload["code"],
-                payload["name"],
-                payload["side"],
-                payload["event_type"],
-                payload["shares"],
-                payload["price"],
-                payload["amount"],
-                payload["realized_pnl"],
-                payload["event_date"],
-                payload["reason_code"],
-                payload["reason_text"],
-                payload["source"],
-                _json_dumps(payload["metadata"]),
-                payload["created_at"],
-            ),
-        )
+        _upsert_trade_event(conn, payload)
     return payload
 
 

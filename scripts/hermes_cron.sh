@@ -60,6 +60,16 @@ echo "=== [Hermes Cron] $(date '+%Y-%m-%d %H:%M:%S') MODE=$MODE ==="
 
 cd "$SCRIPT_DIR"
 
+echo ">> 同步结构化状态"
+SYNC_JSON=$("$PYTHON" -m scripts.cli.trade state sync --target all --json)
+echo "$SYNC_JSON"
+
+SYNC_STATUS=$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status","error"))' "$SYNC_JSON")
+if [[ "$SYNC_STATUS" == "error" ]]; then
+    echo ">> state sync 失败，阻断执行"
+    exit 2
+fi
+
 echo ">> 运行 doctor 检查"
 DOCTOR_JSON=$("$PYTHON" -m scripts.cli.trade doctor --json)
 echo "$DOCTOR_JSON"

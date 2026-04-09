@@ -58,6 +58,22 @@ class P0StateTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["holding_count"], 0)
         self.assertEqual(snapshot["summary"]["current_exposure"], 0.0)
 
+    def test_sync_activity_state_imports_weekly_records_by_scope(self):
+        from scripts.state import load_activity_summary, sync_activity_state
+
+        result = sync_activity_state()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["imported_events"], 3)
+
+        primary_summary = load_activity_summary("week", scope="cn_a_system")
+        self.assertEqual(primary_summary["trade_count"], 0)
+        self.assertEqual(primary_summary["buy_count"], 0)
+
+        secondary_summary = load_activity_summary("week", scope="hk_legacy")
+        self.assertEqual(secondary_summary["sell_count"], 3)
+        self.assertEqual(secondary_summary["trade_count"], 3)
+        self.assertEqual(secondary_summary["realized_pnl"], -62452.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,10 @@ def sync_portfolio_state() -> dict:
     return _get_state_module().sync_portfolio_state()
 
 
+def sync_activity_state() -> dict:
+    return _get_state_module().sync_activity_state()
+
+
 def load_pool_snapshot() -> dict:
     """兼容 pool_manager 的 {entries, metadata, updated_at} 形态。"""
     snapshot = _get_state_module().load_pool_snapshot()

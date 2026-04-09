@@ -42,6 +42,8 @@ from scripts.state import (
     load_market_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
+    sync_activity_state,
+    sync_portfolio_state,
 )
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_strategy
@@ -324,6 +326,15 @@ def doctor() -> dict:
 def state_command(action: str, args) -> dict:
     if action == "bootstrap":
         result = bootstrap_state(force=getattr(args, "force", False))
+    elif action == "sync":
+        target = getattr(args, "target", "all")
+        result = {"status": "success", "target": target, "steps": []}
+        if target in {"portfolio", "all"}:
+            portfolio_result = sync_portfolio_state()
+            result["steps"].append({"step": "portfolio", **portfolio_result})
+        if target in {"activity", "all"}:
+            activity_result = sync_activity_state()
+            result["steps"].append({"step": "activity", **activity_result})
     else:
         result = audit_state()
     return sanitize_for_json({
@@ -673,6 +684,8 @@ def main():
     state_sub = state_parser.add_subparsers(dest="action", required=True)
     state_bootstrap = state_sub.add_parser("bootstrap")
     state_bootstrap.add_argument("--force", action="store_true", help="Rebuild ledger from current markdown/config")
+    state_sync = state_sub.add_parser("sync")
+    state_sync.add_argument("--target", choices=["portfolio", "activity", "all"], default="all")
     state_sub.add_parser("audit")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
