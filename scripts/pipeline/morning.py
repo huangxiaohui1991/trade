@@ -180,7 +180,11 @@ def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
             price = tech.get("current_price", 0)
             ma20 = tech.get("ma", {}).get("MA20", 0)
             above_ma20 = price >= ma20 if ma20 else False
-            score = float(item.get("四维总分", item.get("总分", 0)))
+            raw_score = str(item.get("四维总分", item.get("总分", 0))).replace("**", "").strip()
+            try:
+                score = float(raw_score) if raw_score else 0.0
+            except (TypeError, ValueError):
+                score = 0.0
 
             if not above_ma20:
                 status = "跌破MA20，需观察"

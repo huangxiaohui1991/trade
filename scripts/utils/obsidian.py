@@ -190,6 +190,14 @@ class ObsidianVault:
         if not tables:
             return
 
+        def _safe_float(value, default=0.0) -> float:
+            try:
+                if isinstance(value, str):
+                    value = value.replace("**", "").replace(",", "").strip()
+                return float(value) if value not in [None, ""] else default
+            except (TypeError, ValueError):
+                return default
+
         # 建立代码到新评分的映射，兼容 code / 代码 两种字段
         score_map = {}
         for score in scores:
@@ -207,10 +215,10 @@ class ObsidianVault:
                 continue
 
             new_score = score_map[code]
-            total_score = float(new_score.get("total_score", row.get("四维总分", 0)) or 0)
-            fundamental_score = float(new_score.get("fundamental_score", row.get("基本面", 0)) or 0)
-            technical_score = float(new_score.get("technical_score", row.get("技术", 0)) or 0)
-            flow_score = float(new_score.get("flow_score", row.get("主力", 0)) or 0)
+            total_score = _safe_float(new_score.get("total_score", row.get("四维总分", 0)))
+            fundamental_score = _safe_float(new_score.get("fundamental_score", row.get("基本面", 0)))
+            technical_score = _safe_float(new_score.get("technical_score", row.get("技术", 0)))
+            flow_score = _safe_float(new_score.get("flow_score", row.get("主力", 0)))
             veto_signals = new_score.get("veto_signals", [])
 
             if veto_signals:
