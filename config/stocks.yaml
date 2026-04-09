@@ -1,0 +1,16 @@
+core_pool:
+  - code: "002487"
+    name: 大金重工
+    added: 2026-04-08
+  - code: "002353"
+    name: 杰瑞股份
+    added: 2026-04-09
+  - code: "300870"
+    name: 欧陆通
+    added: 2026-04-09
+
+watch_pool: []
+
+blacklist:
+  permanent: []
+  temporary: []

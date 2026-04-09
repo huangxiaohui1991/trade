@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""
+engine/financial.py — 基本面数据模块
+
+职责：
+  - get_financial: ROE / 营收增长 / 现金流
+
+数据源（按优先级）：
+  - 东方财富（优先，重试 3 次）
+  - 新浪财经（fallback）
+"""
+
+import os
+import sys
+import time
+import warnings
+from datetime import datetime
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+os.environ["TQDM_DISABLE"] = "1"
+warnings.filterwarnings("ignore")
+
+import pandas as pd
+import akshare as ak
+
+try:
+    from scripts.utils.logger import get_logger
+except ImportError:
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    def get_logger(name):
+        return logging.getLogger(name)
+
+_logger = get_logger("financial")
+
+
+def _now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _sina_symbol(code: str) -> str:
+    """转换代码为新浪格式"""
+    code = str(code).zfill(6)
+    if code.startswith(("6", "9")):
+        return "sh" + code
+    else:
+        return "sz" + code
+
+
+# ── 新浪财务数据（东财被封时的 fallback）───────────────────────────────────
+
+def _sina_financial(code: str) -> dict:
+    """通过新浪接口获取财务数据"""
+    sym = _sina_symbol(code)
+
+    result = {}
+    try:
+        # 利润表
+        df_pl = ak.stock_financial_report_sina(stock=sym, symbol="利润表")
+        if df_pl is not None and not df_pl.empty:
+            # 找营业收入
+            rev_col = next((c for c in df_pl.columns if "营业总收入" in c or "营业收入" in c), None)
+            profit_col = next((c for c in df_pl.columns if "净利润" in c and "归属" in c), None)
+            if rev_col:
+                result["revenues"] = df_pl[rev_col].dropna().head(8).tolist()
+            if profit_col:
+                result["profits"] = df_pl[profit_col].dropna().head(8).tolist()
+    except Exception as e:
+        _logger.warning(f"[_sina_financial] 利润表失败: {e}")
+
+    try:
+        # 现金流量表
+        df_cf = ak.stock_financial_report_sina(stock=sym, symbol="现金流量表")
+        if df_cf is not None and not df_cf.empty:
+            cash_col = next((c for c in df_cf.columns if "经营活动产生的现金流量净额" in c or ("经营活动" in c and "净额" in c)), None)
+            if cash_col:
+                result["cash_flows"] = df_cf[cash_col].dropna().head(4).tolist()
+    except Exception as e:
+        _logger.warning(f"[_sina_financial] 现金流量表失败: {e}")
+
+    return result
+
+
+# ── 主接口 ─────────────────────────────────────────────────────────────────
+
+def get_financial(code: str) -> dict:
+    """
+    获取基本面数据（东财优先带重试，失败则新浪 fallback）
+
+    Returns:
+        {
+            "code": str,
+            "name": str,
+            "roe": float (%),
+            "roe_recent": [float],
+            "revenue_growth": float (最近一季同比%),
+            "revenue_growth_detail": [str],
+            "operating_cash_flow": float,
+            "cash_flow_positive": bool,
+            "source": str,
+            "error": str,
+        }
+    """
+    from scripts.engine.technical import normalize_code, get_stock_name
+
+    code = normalize_code(code)
+    result = {
+        "code": code,
+        "timestamp": _now_ts(),
+        "stale": False,
+        "source": None,
+    }
+
+    try:
+        result["name"] = get_stock_name(code)
+    except Exception:
+        result["name"] = code
+
+    missing_fields = []  # 哪些字段东财没有拿到
+
+    # ── ROE（东财）───────────────────────────────────────────────────────────
+    for attempt in range(3):
+        try:
+            df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2024")
+            if df is not None and not df.empty:
+                roe_col = next((c for c in df.columns if "净资产收益率" in str(c)), None)
+                if roe_col:
+                    roe_values = df[roe_col].dropna().head(4).tolist()
+                    result["roe_recent"] = roe_values
+                    result["roe"] = round(float(roe_values[0]), 2)
+                    break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2)
+                _logger.info(f"[get_financial] ROE东财重试 ({attempt+2}/3) code={code}")
+            else:
+                _logger.warning(f"[get_financial] ROE获取失败 code={code}: {e}")
+                missing_fields.append("roe")
+
+    # ── 营收增长（东财，重试失败则记为缺失）─────────────────────────────────
+    for attempt in range(3):
+        try:
+            df_profit = ak.stock_profit_sheet_by_report_em(symbol=code)
+            if df_profit is not None and not df_profit.empty:
+                rev_col = next((c for c in df_profit.columns if "营业总收入" in c or "营业收入" in c), None)
+                if rev_col:
+                    revenues = df_profit[rev_col].dropna().head(4).tolist()
+                    result["revenue_recent_quarters"] = revenues
+                    if len(revenues) >= 2 and revenues[1] and revenues[1] != 0:
+                        growth = (revenues[0] - revenues[1]) / abs(revenues[1])
+                        result["revenue_growth"] = round(growth * 100, 2)
+                        result["revenue_growth_detail"] = [
+                            f"{(revenues[i] - revenues[i+1]) / abs(revenues[i+1]) * 100:.1f}%"
+                            if i + 1 < len(revenues) and revenues[i+1] else "N/A"
+                            for i in range(min(2, len(revenues) - 1))
+                        ]
+                    break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2)
+                _logger.info(f"[get_financial] 营收东财重试 ({attempt+2}/3) code={code}")
+            else:
+                _logger.warning(f"[get_financial] 营收获取失败 code={code}: {e}")
+        break
+    if "revenue_growth" not in result:
+        missing_fields.append("revenue")
+
+    # ── 现金流（东财，重试失败则记为缺失）─────────────────────────────────
+    for attempt in range(3):
+        try:
+            df_cash = ak.stock_cash_flow_sheet_by_report_em(symbol=code)
+            if df_cash is not None and not df_cash.empty:
+                cash_col = next((c for c in df_cash.columns if "经营活动" in c and "现金流" in c), None)
+                if cash_col:
+                    result["operating_cash_flow"] = float(df_cash[cash_col].iloc[0])
+                    result["cash_flow_positive"] = result["operating_cash_flow"] > 0
+                    break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2)
+            else:
+                _logger.warning(f"[get_financial] 现金流获取失败 code={code}: {e}")
+        break
+    if "operating_cash_flow" not in result:
+        missing_fields.append("cash_flow")
+
+    # ── 新浪 fallback：补充东财缺失的字段 ────────────────────────────────
+    if missing_fields:
+        _logger.warning(f"[get_financial] 东财缺失字段 {missing_fields}，尝试新浪 fallback code={code}")
+        try:
+            sina = _sina_financial(code)
+            if sina:
+                if "revenue" in missing_fields and "revenues" in sina and sina["revenues"]:
+                    result["revenue_recent_quarters"] = sina["revenues"]
+                    revs = sina["revenues"]
+                    if len(revs) >= 2 and revs[1] and revs[1] != 0:
+                        growth = (revs[0] - revs[1]) / abs(revs[1])
+                        result["revenue_growth"] = round(growth * 100, 2)
+                        result["revenue_growth_detail"] = [
+                            f"{(revs[i] - revs[i+1]) / abs(revs[i+1]) * 100:.1f}%"
+                            if i + 1 < len(revs) and revs[i+1] else "N/A"
+                            for i in range(min(2, len(revs) - 1))
+                        ]
+                if "cash_flow" in missing_fields and "cash_flows" in sina and sina["cash_flows"]:
+                    result["operating_cash_flow"] = float(sina["cash_flows"][0])
+                    result["cash_flow_positive"] = result["operating_cash_flow"] > 0
+                if "roe" in missing_fields and "profits" in sina:
+                    revs = sina.get("revenues", [])
+                    profits = sina["profits"]
+                    if revs and profits and revs[0] and profits[0] and revs[0] > 0:
+                        result["roe_estimate"] = round(profits[0] / revs[0] * 100, 2)
+        except Exception as e:
+            _logger.warning(f"[get_financial] 新浪 fallback 失败 code={code}: {e}")
+
+    result["source"] = "eastmoney" + ("+sina" if missing_fields else "")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 验证
+# ------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    for code in ["002487", "002353", "300870"]:
+        r = get_financial(code)
+        print(f"\n{code} ({r.get('name')}):")
+        print(f"  source={r.get('source')}  roe={r.get('roe')}  rev_growth={r.get('revenue_growth')}%")
+        print(f"  现金流={r.get('operating_cash_flow')}  正={r.get('cash_flow_positive')}")
+        if "error" in r:
+            print(f"  ERROR: {r['error']}")
