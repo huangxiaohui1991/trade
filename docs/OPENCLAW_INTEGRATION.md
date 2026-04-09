@@ -14,6 +14,7 @@
 统一走 CLI：
 
 ```bash
+bin/trade workflows --json
 bin/trade doctor --json
 bin/trade status today --json
 bin/trade orchestrate morning_brief --json
@@ -33,7 +34,35 @@ bin/trade run screener --universe market --pool all --json
 python3 -m scripts.cli.trade --json doctor
 ```
 
+建议先看共享 workflow：
+
+```bash
+bin/trade workflows --json
+```
+
 ## CLI 契约
+
+### 0. `workflows`
+
+用途：
+- 返回 Hermes-Agent / OpenClaw 可共用的 workflow 列表
+- 给外层提供推荐超时和可重试步骤
+
+返回关键字段：
+
+```json
+{
+  "command": "workflows",
+  "items": [
+    {
+      "name": "close_review",
+      "steps": ["status", "evening", "scoring"],
+      "timeout_seconds": 180,
+      "retryable_steps": ["evening", "scoring"]
+    }
+  ]
+}
+```
 
 ### 1. `doctor`
 

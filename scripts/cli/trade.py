@@ -66,17 +66,68 @@ PIPELINE_ALIASES = {
 }
 
 WORKFLOWS = {
-    "morning_brief": ["status", "morning"],
-    "noon_check": ["status", "noon"],
-    "close_review": ["status", "evening", "scoring"],
-    "weekly_review": ["status", "weekly"],
-    "tracked_scan": ["status", "screener"],
-    "market_scan": ["status", "screener"],
+    "morning_brief": {
+        "steps": ["status", "morning"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 90,
+        "retryable_steps": ["morning"],
+        "notes": "盘前摘要，优先读取今日状态再执行盘前流程。",
+    },
+    "noon_check": {
+        "steps": ["status", "noon"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 90,
+        "retryable_steps": ["noon"],
+        "notes": "午休检查，适合定时巡检和会话内补跑。",
+    },
+    "close_review": {
+        "steps": ["status", "evening", "scoring"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 180,
+        "retryable_steps": ["evening", "scoring"],
+        "notes": "收盘更新 + 核心池评分，适合作为日终主工作流。",
+    },
+    "weekly_review": {
+        "steps": ["status", "weekly"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 120,
+        "retryable_steps": ["weekly"],
+        "notes": "周报汇总，外层可直接消费 artifacts 生成摘要。",
+    },
+    "tracked_scan": {
+        "steps": ["status", "screener"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 240,
+        "retryable_steps": ["screener"],
+        "notes": "已跟踪池扫描，稳定性高于全市场模式。",
+        "default_args": {"pool": "all", "universe": "tracked"},
+    },
+    "market_scan": {
+        "steps": ["status", "screener"],
+        "preferred_for": ["Hermes-Agent", "OpenClaw"],
+        "timeout_seconds": 360,
+        "retryable_steps": ["screener"],
+        "notes": "全市场扫描，依赖外部接口，建议外层保留超时和重试。",
+        "default_args": {"pool": "all", "universe": "market"},
+    },
 }
 
 
 def _json_print(payload: dict):
     print(json.dumps(sanitize_for_json(payload), ensure_ascii=False, indent=2))
+
+
+def list_workflows() -> dict:
+    return {
+        "command": "workflows",
+        "items": [
+            {
+                "name": name,
+                **spec,
+            }
+            for name, spec in WORKFLOWS.items()
+        ],
+    }
 
 
 def _check_path_writable(path: Path) -> dict:
@@ -392,9 +443,11 @@ def status_today() -> dict:
 def orchestrate_workflow(name: str, args) -> dict:
     started = datetime.now()
     workflow = WORKFLOWS[name]
+    workflow_steps = workflow["steps"]
     payload = {
         "command": "orchestrate",
         "workflow": name,
+        "workflow_spec": workflow,
         "status": "success",
         "started_at": started.strftime("%Y-%m-%dT%H:%M:%S"),
         "retryable": False,
@@ -424,14 +477,15 @@ def orchestrate_workflow(name: str, args) -> dict:
     }
     payload["steps"].append({"step": "status_before", "status": "success"})
 
-    run_targets = workflow[1:]
+    run_targets = workflow_steps[1:]
     for target in run_targets:
         if target == "screener":
+            default_args = workflow.get("default_args", {})
             run_args = argparse.Namespace(
                 command="run",
                 pipeline="screener",
-                pool=getattr(args, "pool", "all"),
-                universe="market" if name == "market_scan" else getattr(args, "universe", "tracked"),
+                pool=getattr(args, "pool", default_args.get("pool", "all")),
+                universe=getattr(args, "universe", default_args.get("universe", "tracked")),
                 json=getattr(args, "json", False),
             )
         else:
@@ -480,6 +534,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor", help="Run health checks")
+    sub.add_parser("workflows", help="List shared workflows for Hermes/OpenClaw")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -512,6 +567,8 @@ def main():
             with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
                 if args.command == "doctor":
                     result = doctor()
+                elif args.command == "workflows":
+                    result = list_workflows()
                 elif args.command == "run":
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
@@ -533,6 +590,8 @@ def main():
     else:
         if args.command == "doctor":
             result = doctor()
+        elif args.command == "workflows":
+            result = list_workflows()
         elif args.command == "run":
             result = run_pipeline(args.pipeline, args)
         elif args.command == "orchestrate":
@@ -549,6 +608,9 @@ def main():
                 print("hard_fail:", ", ".join(result["hard_fail"]))
             if result.get("warning"):
                 print("warning:", ", ".join(result["warning"]))
+        elif result.get("command") == "workflows":
+            for item in result.get("items", []):
+                print(f"{item['name']}: {', '.join(item.get('steps', []))}")
         elif result.get("command") == "status":
             print(f"status today: {result.get('date')}")
             print(f"today_decision: {result.get('today_decision', {}).get('decision')}")
