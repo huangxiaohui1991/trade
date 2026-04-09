@@ -27,6 +27,11 @@ risk:
     t1_drawdown: 0.05  # 回撤 5% 卖第二批
     t2_drawdown: 0.08 # 回撤 8% 清仓
   time_stop_days: 15
+  portfolio:
+    daily_loss_limit_pct: 0.03        # 单日已实现亏损达总资金 3% 后停止新开仓
+    consecutive_loss_days_limit: 2    # 连续 2 个亏损交易日后进入冷却
+    cooldown_days: 2                  # 冷却持续 2 天
+    max_single_position_warn_pct: 0.25 # 单票超过 25% 给出集中度预警
   position:
     total_max: 0.60   # 总仓位上限
     single_max: 0.20  # 单只上限

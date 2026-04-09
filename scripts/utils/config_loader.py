@@ -61,3 +61,11 @@ def get_stocks() -> dict:
 def get_notification() -> dict:
     """Return the notification configuration (cached)."""
     return _load_file("notification")
+
+
+def clear_config_cache(name: str | None = None) -> None:
+    """Clear one cached config or the full config cache."""
+    if name is None:
+        _cache.clear()
+        return
+    _cache.pop(name, None)

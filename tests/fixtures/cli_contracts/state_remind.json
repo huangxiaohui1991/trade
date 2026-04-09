@@ -1,0 +1,23 @@
+{
+  "command": "state",
+  "action": "remind",
+  "status": "ok",
+  "db_path": "/tmp/trade_state.sqlite3",
+  "scope_filter": "paper_mx",
+  "pending_count": 1,
+  "send": false,
+  "discord_ok": false,
+  "discord_error": "",
+  "pending": [
+    {
+      "external_id": "paper:order:001",
+      "name": "艾比森",
+      "code": "300389",
+      "type": "止损",
+      "price": 20.3,
+      "currency": "¥",
+      "status": "pending"
+    }
+  ],
+  "content": "提醒内容"
+}

@@ -28,16 +28,35 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
+from scripts.backtest import list_backtest_history, run_backtest, run_parameter_sweep, run_walk_forward
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
 from scripts.pipeline.morning import run as run_morning
 from scripts.pipeline.noon import run as run_noon
 from scripts.pipeline.stock_screener import run as run_screener
 from scripts.pipeline.weekly_review import run as run_weekly
+from scripts.state.reason_codes import build_signal_bus_summary
+from scripts.state import (
+    AUTOMATED_RULES,
+    LEDGER_DB_PATH,
+    apply_order_reply,
+    audit_state,
+    bootstrap_state,
+    load_market_snapshot,
+    load_alert_snapshot,
+    load_pool_action_history,
+    load_order_snapshot,
+    load_pool_snapshot,
+    load_portfolio_snapshot,
+    load_trade_review,
+    pending_condition_order_items,
+    sync_activity_state,
+    sync_portfolio_state,
+)
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_strategy
+from scripts.utils.discord_push import render_condition_order_reminder, send_condition_order_reminder
 from scripts.utils.obsidian import ObsidianVault
-from scripts.utils.pool_manager import POOL_STATE_PATH, load_pool_state
 from scripts.utils.run_context import (
     LOCK_DIR,
     RUNS_DIR,
@@ -219,6 +238,233 @@ def _requests_ok(url: str, timeout: int = 8) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _shadow_trade_snapshot() -> dict:
+    empty_advisory = {
+        "triggered_signal_count": 0,
+        "triggered_position_count": 0,
+        "triggered_rules": [],
+        "positions": [],
+    }
+    try:
+        from scripts.pipeline.shadow_trade import get_status, paper_trade_consistency_snapshot
+
+        consistency = paper_trade_consistency_snapshot(window=180)
+        shadow_status = get_status()
+        actual_positions = [
+            {
+                "code": str(item.get("code", "")).strip(),
+                "name": str(item.get("name", "")).strip(),
+                "shares": int(float(item.get("shares", 0) or 0)),
+            }
+            for item in shadow_status.get("positions", [])
+            if str(item.get("code", "")).strip() and int(float(item.get("shares", 0) or 0)) > 0
+        ]
+        return {
+            "ok": True,
+            "status": consistency["status"],
+            "timestamp": shadow_status.get("timestamp", ""),
+            "automation_scope": shadow_status.get("automation_scope", ""),
+            "automated_rules": shadow_status.get("automated_rules", []),
+            "advisory_rules": shadow_status.get("advisory_rules", []),
+            "positions_count": len(actual_positions),
+            "positions": actual_positions,
+            "advisory_summary": shadow_status.get("advisory_summary", empty_advisory),
+            "consistency": consistency,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "error": str(e),
+            "timestamp": "",
+            "automation_scope": "",
+            "automated_rules": [],
+            "advisory_rules": [],
+            "positions_count": 0,
+            "positions": [],
+            "advisory_summary": empty_advisory,
+            "consistency": {
+                "ok": False,
+                "status": "error",
+                "error": str(e),
+                "inferred_open_codes": [],
+                "actual_open_codes": [],
+                "event_only_codes": [],
+                "broker_only_codes": [],
+                "event_trade_count": 0,
+            },
+        }
+
+
+def _order_count_from_statuses(status_counts: dict, statuses: list[str]) -> int:
+    total = 0
+    for status in statuses:
+        total += int(status_counts.get(status, 0) or 0)
+    return total
+
+
+def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> dict:
+    orders = order_snapshot.get("orders", []) if isinstance(order_snapshot, dict) else []
+    summary = dict(order_snapshot.get("summary", {}) if isinstance(order_snapshot, dict) else {})
+    status_counts = dict(summary.get("status_counts", {}) or {})
+
+    pending_count = _order_count_from_statuses(status_counts, ["candidate", "pending", "confirm_pending"])
+    open_count = _order_count_from_statuses(status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"])
+    exception_count = _order_count_from_statuses(status_counts, ["exception", "rejected", "failed", "cancel_failed"])
+
+    condition_orders = []
+    for order in orders:
+        order_class = str(order.get("order_class", "")).strip()
+        condition_type = str(order.get("condition_type", "")).strip()
+        if order_class == "condition" or condition_type:
+            condition_orders.append(order)
+
+    condition_status_counts: dict[str, int] = {}
+    condition_type_counts: dict[str, int] = {}
+    for order in condition_orders:
+        status = str(order.get("status", "")).strip() or "unknown"
+        condition_status_counts[status] = condition_status_counts.get(status, 0) + 1
+        condition_type = str(order.get("condition_type", "")).strip() or "unknown"
+        condition_type_counts[condition_type] = condition_type_counts.get(condition_type, 0) + 1
+
+    compact_condition_orders = {
+        "count": len(condition_orders),
+        "pending_count": _order_count_from_statuses(condition_status_counts, ["candidate", "pending", "confirm_pending"]),
+        "open_count": _order_count_from_statuses(condition_status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"]),
+        "exception_count": _order_count_from_statuses(condition_status_counts, ["exception", "rejected", "failed", "cancel_failed"]),
+        "status_counts": condition_status_counts,
+        "condition_type_counts": condition_type_counts,
+        "sample": [],
+    }
+    for order in condition_orders[:sample_size]:
+        compact_condition_orders["sample"].append({
+            "external_id": order.get("external_id", ""),
+            "code": order.get("code", ""),
+            "name": order.get("name", ""),
+            "side": order.get("side", ""),
+            "status": order.get("status", ""),
+            "condition_type": order.get("condition_type", ""),
+            "requested_shares": order.get("requested_shares", 0),
+            "filled_shares": order.get("filled_shares", 0),
+            "trigger_price": order.get("trigger_price", 0.0),
+            "limit_price": order.get("limit_price", 0.0),
+            "confirm_status": order.get("confirm_status", ""),
+        })
+
+    return {
+        "scope": order_snapshot.get("scope", "all") if isinstance(order_snapshot, dict) else "all",
+        "status": order_snapshot.get("status", "all") if isinstance(order_snapshot, dict) else "all",
+        "db_path": order_snapshot.get("db_path", str(LEDGER_DB_PATH)) if isinstance(order_snapshot, dict) else str(LEDGER_DB_PATH),
+        "summary": {
+            **summary,
+            "pending_count": pending_count,
+            "open_count": open_count,
+            "exception_count": exception_count,
+        },
+        "condition_orders": compact_condition_orders,
+    }
+
+
+def _build_alert_snapshot(today_decision: dict, pool_sync_state: dict, shadow_snapshot: dict,
+                          order_snapshot: dict, signal_bus: dict, pool_snapshot: dict | None = None) -> dict:
+    alerts = []
+
+    def add_alert(level: str, code: str, summary: str, details: dict | None = None):
+        alerts.append({
+            "level": level,
+            "code": code,
+            "summary": summary,
+            "details": details or {},
+        })
+
+    if pool_sync_state.get("status") not in {"", "ok"}:
+        add_alert("warning", "POOL_SYNC_DRIFT", "池子投影存在漂移", {
+            "status": pool_sync_state.get("status", ""),
+            "snapshot_date": pool_sync_state.get("snapshot_date", ""),
+        })
+
+    consistency = shadow_snapshot.get("consistency", {}) or {}
+    if consistency.get("status") not in {"", "ok"} or not consistency.get("ok", True):
+        add_alert("warning", "TRADE_PAPER_RECONCILE_DRIFT", "模拟盘事件流与 broker 状态不一致", {
+            "event_only_codes": consistency.get("event_only_codes", []),
+            "broker_only_codes": consistency.get("broker_only_codes", []),
+        })
+
+    order_summary = order_snapshot.get("summary", {}) if isinstance(order_snapshot, dict) else {}
+    if int(order_summary.get("pending_count", 0) or 0) > 0:
+        add_alert("info", "ORDER_CONFIRM_PENDING", "存在待确认条件单", {
+            "pending_count": order_summary.get("pending_count", 0),
+            "condition_orders": order_snapshot.get("condition_orders", {}),
+        })
+    if int(order_summary.get("exception_count", 0) or 0) > 0:
+        add_alert("warning", "ORDER_EXCEPTION", "存在异常订单", {
+            "exception_count": order_summary.get("exception_count", 0),
+        })
+
+    portfolio_risk = today_decision.get("portfolio_risk", {}) if isinstance(today_decision, dict) else {}
+    if portfolio_risk.get("state") == "block":
+        add_alert("warning", "PORTFOLIO_RISK_BLOCK", "组合级风控阻断交易", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+    elif portfolio_risk.get("state") == "warning":
+        add_alert("info", "PORTFOLIO_RISK_WARNING", "组合级风控预警", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+
+    market_signal = str(today_decision.get("market_signal", "")).strip().upper()
+    if market_signal in {"RED", "CLEAR"}:
+        add_alert("info", f"MARKET_{market_signal}", "当前市场状态不支持主动开仓", {
+            "market_signal": market_signal,
+        })
+
+    advisory_summary = shadow_snapshot.get("advisory_summary", {}) or {}
+    if int(advisory_summary.get("triggered_signal_count", 0) or 0) > 0:
+        add_alert("info", "SHADOW_ADVISORY", "影子盘存在 advisory 风控提示", {
+            "triggered_rules": advisory_summary.get("triggered_rules", []),
+            "triggered_position_count": advisory_summary.get("triggered_position_count", 0),
+        })
+
+    levels = [item["level"] for item in alerts]
+    overall = "ok"
+    if "warning" in levels:
+        overall = "warning"
+    elif "info" in levels:
+        overall = "info"
+
+    return {
+        "status": overall,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+        "signal_bus_state": signal_bus.get("state", ""),
+        "pool_snapshot_date": (pool_snapshot or {}).get("snapshot_date", ""),
+    }
+
+
+def _combined_state_audit() -> dict:
+    base_audit = audit_state()
+    shadow_snapshot = _shadow_trade_snapshot()
+    checks = dict(base_audit.get("checks", {}))
+    checks["paper_trade_consistency"] = shadow_snapshot.get("consistency", {})
+
+    pool_ok = base_audit.get("status") == "ok"
+    paper_check = shadow_snapshot.get("consistency", {})
+    paper_ok = bool(paper_check.get("ok"))
+    if pool_ok and paper_ok:
+        status = "ok"
+    elif pool_ok and paper_check.get("status") == "error":
+        status = "warning"
+    else:
+        status = "drift"
+
+    return {
+        "status": status,
+        "snapshot_date": base_audit.get("snapshot_date", ""),
+        "checks": checks,
+    }
+
+
 def doctor() -> dict:
     started_at = now_ts()
     vault = ObsidianVault()
@@ -255,6 +501,7 @@ def doctor() -> dict:
         "runtime": _check_path_writable(RUNTIME_DIR),
         "runs": _check_path_writable(RUNS_DIR),
         "locks": _check_path_writable(LOCK_DIR),
+        "ledger": _check_path_writable(Path(LEDGER_DB_PATH).parent),
         "screening": _check_path_writable(vault_path / "04-选股" / "筛选结果"),
     }
 
@@ -271,6 +518,17 @@ def doctor() -> dict:
         }
     except Exception as e:
         checks["daily_state"] = {"ok": False, "error": str(e)}
+
+    try:
+        state_audit = _combined_state_audit()
+        checks["state_audit"] = {
+            "ok": state_audit.get("status") == "ok",
+            "status": state_audit.get("status", "drift"),
+            "snapshot_date": state_audit.get("snapshot_date", ""),
+            "checks": state_audit.get("checks", {}),
+        }
+    except Exception as e:
+        checks["state_audit"] = {"ok": False, "error": str(e)}
 
     checks["mx_connectivity"] = _requests_ok("https://mkapi2.dfcfs.com/")
     checks["akshare_connectivity"] = _requests_ok("https://push2.eastmoney.com/")
@@ -293,6 +551,8 @@ def doctor() -> dict:
         warning.append("mx_connectivity")
     if not checks["akshare_connectivity"]["ok"]:
         warning.append("akshare_connectivity")
+    if not checks["state_audit"]["ok"]:
+        warning.append("state_audit")
 
     status = "success"
     if hard_fail:
@@ -312,6 +572,118 @@ def doctor() -> dict:
     }
 
 
+def _preflight_state_sync(target: str = "all") -> dict:
+    result = {"status": "success", "target": target, "steps": []}
+    if target in {"portfolio", "all"}:
+        result["steps"].append({"step": "portfolio", **sync_portfolio_state()})
+    if target in {"activity", "all"}:
+        result["steps"].append({"step": "activity", **sync_activity_state()})
+    return sanitize_for_json(result)
+
+
+def state_command(action: str, args) -> dict:
+    if action == "bootstrap":
+        result = bootstrap_state(force=getattr(args, "force", False))
+    elif action == "sync":
+        target = getattr(args, "target", "all")
+        result = {"status": "success", "target": target, "steps": []}
+        if target in {"portfolio", "all"}:
+            portfolio_result = sync_portfolio_state()
+            result["steps"].append({"step": "portfolio", **portfolio_result})
+        if target in {"activity", "all"}:
+            activity_result = sync_activity_state()
+            result["steps"].append({"step": "activity", **activity_result})
+    elif action == "reconcile":
+        from scripts.pipeline.shadow_trade import reconcile_trade_state
+
+        result = reconcile_trade_state(
+            apply=getattr(args, "apply", False),
+            window=getattr(args, "window", 180),
+        )
+    elif action == "orders":
+        snapshot = _compact_order_snapshot(
+            load_order_snapshot(
+                scope=getattr(args, "scope", None),
+                status=getattr(args, "status", None),
+            )
+        )
+        result = {
+            **snapshot,
+            "status": "ok",
+            "scope_filter": snapshot.get("scope", "all"),
+            "order_status_filter": snapshot.get("status", "all"),
+        }
+    elif action == "confirm":
+        result = apply_order_reply(
+            reply_text=getattr(args, "reply", ""),
+            scope=getattr(args, "scope", "paper_mx"),
+        )
+        result["scope_filter"] = getattr(args, "scope", "paper_mx")
+    elif action == "remind":
+        scope = getattr(args, "scope", "paper_mx")
+        pending = pending_condition_order_items(scope=scope)
+        content = render_condition_order_reminder(pending)
+        send = bool(getattr(args, "send", False))
+        discord_ok = False
+        discord_error = ""
+        if send:
+            discord_ok, discord_error = send_condition_order_reminder(pending)
+        result = {
+            "status": "ok" if (not send or discord_ok) else "warning",
+            "scope_filter": scope,
+            "pending_count": len(pending),
+            "pending": pending,
+            "send": send,
+            "discord_ok": discord_ok,
+            "discord_error": discord_error,
+            "content": content,
+        }
+    elif action == "pool-actions":
+        result = load_pool_action_history(
+            limit=getattr(args, "limit", 50),
+            snapshot_date=getattr(args, "snapshot_date", None),
+        )
+        result["status"] = "ok"
+    elif action == "trade-review":
+        result = load_trade_review(
+            window=getattr(args, "window", 90),
+            scope=getattr(args, "scope", "cn_a_system"),
+        )
+        result["status"] = "ok"
+    elif action == "alerts":
+        strategy = get_strategy()
+        today_decision = build_today_decision(strategy=strategy)
+        pool_snapshot = load_pool_snapshot()
+        pool_sync_state = audit_state()
+        market_snapshot = load_market_snapshot()
+        shadow_snapshot = _shadow_trade_snapshot()
+        order_snapshot = _compact_order_snapshot(load_order_snapshot(scope="paper_mx"))
+        signal_bus = build_signal_bus_summary(
+            market_snapshot=market_snapshot,
+            pool_snapshot=pool_snapshot,
+            pool_audit=pool_sync_state,
+            today_decision=today_decision,
+            shadow_snapshot=shadow_snapshot,
+        )
+        result = load_alert_snapshot(context={
+            "today_decision": today_decision,
+            "pool_sync_state": pool_sync_state,
+            "shadow_snapshot": shadow_snapshot,
+            "order_snapshot": order_snapshot,
+            "signal_bus": signal_bus,
+            "pool_snapshot": pool_snapshot,
+            "market_snapshot": market_snapshot,
+        })
+    else:
+        result = _combined_state_audit()
+    return sanitize_for_json({
+        "command": "state",
+        "action": action,
+        "db_path": str(LEDGER_DB_PATH),
+        **result,
+    })
+
+
 def run_pipeline(name: str, args) -> dict:
     started = datetime.now()
     run_id = make_run_id(name)
@@ -326,6 +698,20 @@ def run_pipeline(name: str, args) -> dict:
     }
 
     try:
+        state_sync = _preflight_state_sync("all")
+        payload["state_sync"] = state_sync
+        if state_sync.get("status") == "error":
+            payload["status"] = "blocked"
+            payload["error"] = "state_sync_failed"
+            payload["details"] = {"state_sync": state_sync}
+            payload["next_actions"] = _recommend_next_actions(
+                status=payload["status"],
+                workflow_name=None,
+                error=payload["error"],
+                retryable=payload["retryable"],
+            )
+            return _finalize_run(payload, started)
+
         doctor_result = doctor()
         payload["doctor"] = {
             "status": doctor_result["status"],
@@ -388,8 +774,9 @@ def _summarize_pipeline_result(name: str, result, args) -> dict:
         for key in ["review_path", "tomorrow_date", "weekly_bought"]:
             if key in result:
                 summary[key] = result.get(key)
-        if "market_data" in result:
-            summary["market_signal"] = result["market_data"].get("market_signal", "")
+        market_data = result.get("market_data") or result.get("market_snapshot")
+        if isinstance(market_data, dict):
+            summary["market_signal"] = market_data.get("signal", market_data.get("market_signal", ""))
     elif isinstance(result, list):
         summary["count"] = len(result)
     return summary
@@ -490,11 +877,60 @@ def _artifact_paths_from_run(run_result: dict) -> list:
     return deduped
 
 
-def status_today() -> dict:
+def status_today(sync_state: bool = True) -> dict:
+    if sync_state:
+        _preflight_state_sync("all")
     today = load_daily_state()
     strategy = get_strategy()
     today_decision = build_today_decision(strategy=strategy)
-    pool_state = load_pool_state()
+    portfolio_snapshot = load_portfolio_snapshot(scope="cn_a_system")
+    pool_snapshot = load_pool_snapshot()
+    pool_sync_state = audit_state()
+    market_snapshot = load_market_snapshot()
+    shadow_snapshot = _shadow_trade_snapshot()
+    try:
+        order_snapshot = _compact_order_snapshot(load_order_snapshot(scope="paper_mx"))
+    except Exception as e:
+        order_snapshot = {
+            "scope": "paper_mx",
+            "status": "error",
+            "db_path": str(LEDGER_DB_PATH),
+            "summary": {
+                "order_count": 0,
+                "pending_count": 0,
+                "open_count": 0,
+                "exception_count": 0,
+                "status_counts": {},
+                "scope_counts": {},
+                "class_counts": {},
+            },
+            "condition_orders": {
+                "count": 0,
+                "pending_count": 0,
+                "open_count": 0,
+                "exception_count": 0,
+                "status_counts": {},
+                "condition_type_counts": {},
+                "sample": [],
+                "error": str(e),
+            },
+        }
+    signal_bus = build_signal_bus_summary(
+        market_snapshot=market_snapshot,
+        pool_snapshot=pool_snapshot,
+        pool_audit=pool_sync_state,
+        today_decision=today_decision,
+        shadow_snapshot=shadow_snapshot,
+    )
+    alert_snapshot = load_alert_snapshot(context={
+        "today_decision": today_decision,
+        "pool_sync_state": pool_sync_state,
+        "shadow_snapshot": shadow_snapshot,
+        "order_snapshot": order_snapshot,
+        "signal_bus": signal_bus,
+        "pool_snapshot": pool_snapshot,
+        "market_snapshot": market_snapshot,
+    })
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -512,11 +948,33 @@ def status_today() -> dict:
         "pipelines": normalized,
         "updated_at": today.get("updated_at", ""),
         "today_decision": today_decision,
+        "positions_summary": portfolio_snapshot.get("summary", {}),
+        "market_snapshot": market_snapshot,
+        "market_signal": market_snapshot.get("signal", market_snapshot.get("market_signal", "")),
+        "market_snapshot_source": {
+            "source": market_snapshot.get("source", ""),
+            "source_chain": market_snapshot.get("source_chain", []),
+            "as_of_date": market_snapshot.get("as_of_date", ""),
+        },
+        "signal_bus": signal_bus,
+        "alert_snapshot": alert_snapshot,
+        "pool_sync_state": pool_sync_state,
+        "paper_trade_audit": shadow_snapshot.get("consistency", {}),
+        "order_snapshot": order_snapshot,
+        "shadow_trade_state": {
+            "status": shadow_snapshot.get("status", "error"),
+            "timestamp": shadow_snapshot.get("timestamp", ""),
+            "positions_count": shadow_snapshot.get("positions_count", 0),
+            "automation_scope": shadow_snapshot.get("automation_scope", ""),
+            "advisory_summary": shadow_snapshot.get("advisory_summary", {}),
+        },
+        "rule_automation_scope": AUTOMATED_RULES,
         "pool_management": {
-            "updated_at": pool_state.get("updated_at", ""),
-            "last_eval_date": pool_state.get("last_eval_date", ""),
-            "summary": pool_state.get("last_summary", {}),
-            "state_path": str(POOL_STATE_PATH),
+            "updated_at": pool_snapshot.get("updated_at", ""),
+            "last_eval_date": pool_snapshot.get("snapshot_date", ""),
+            "summary": pool_snapshot.get("summary", {}),
+            "action_history_summary": pool_snapshot.get("action_history_summary", {}),
+            "state_path": str(LEDGER_DB_PATH),
         },
     }
 
@@ -535,6 +993,38 @@ def orchestrate_workflow(name: str, args) -> dict:
         "steps": [],
         "artifacts": [],
     }
+
+    try:
+        state_sync = _preflight_state_sync("all")
+        payload["state_sync"] = state_sync
+        payload["steps"].append({"step": "state_sync", "status": state_sync.get("status", "success")})
+        if state_sync.get("status") == "error":
+            payload["status"] = "blocked"
+            payload["error"] = "state_sync_failed"
+            payload["next_actions"] = _recommend_next_actions(
+                status=payload["status"],
+                workflow_name=name,
+                error=payload["error"],
+                retryable=payload["retryable"],
+            )
+            finished = datetime.now()
+            payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+            payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+            return sanitize_for_json(payload)
+    except Exception as e:
+        payload["status"] = "blocked"
+        payload["error"] = "state_sync_failed"
+        payload["steps"].append({"step": "state_sync", "status": "error", "error": str(e)})
+        payload["next_actions"] = _recommend_next_actions(
+            status=payload["status"],
+            workflow_name=name,
+            error=payload["error"],
+            retryable=payload["retryable"],
+        )
+        finished = datetime.now()
+        payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+        payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+        return sanitize_for_json(payload)
 
     doctor_result = doctor()
     payload["doctor"] = {
@@ -557,7 +1047,7 @@ def orchestrate_workflow(name: str, args) -> dict:
         payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
         return sanitize_for_json(payload)
 
-    status_before = status_today()
+    status_before = status_today(sync_state=False)
     payload["status_before"] = {
         "today_decision": status_before.get("today_decision", {}),
         "pool_management": status_before.get("pool_management", {}),
@@ -601,7 +1091,7 @@ def orchestrate_workflow(name: str, args) -> dict:
         if step_result.get("status") == "warning" and payload["status"] == "success":
             payload["status"] = "warning"
 
-    status_after = status_today()
+    status_after = status_today(sync_state=False)
     payload["status_after"] = {
         "today_decision": status_after.get("today_decision", {}),
         "pool_management": status_after.get("pool_management", {}),
@@ -622,6 +1112,9 @@ def orchestrate_workflow(name: str, args) -> dict:
 
 
 def main():
+    argv = [arg for arg in sys.argv[1:] if arg != "--json"]
+    json_output = any(arg == "--json" for arg in sys.argv[1:])
+
     parser = argparse.ArgumentParser(description="Trade system unified CLI")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -629,6 +1122,63 @@ def main():
     sub.add_parser("doctor", help="Run health checks")
     sub.add_parser("workflows", help="List shared workflows for Hermes/OpenClaw")
     sub.add_parser("templates", help="List agent response templates")
+
+    state_parser = sub.add_parser("state", help="Manage structured ledger state")
+    state_sub = state_parser.add_subparsers(dest="action", required=True)
+    state_bootstrap = state_sub.add_parser("bootstrap")
+    state_bootstrap.add_argument("--force", action="store_true", help="Rebuild ledger from current markdown/config")
+    state_sync = state_sub.add_parser("sync")
+    state_sync.add_argument("--target", choices=["portfolio", "activity", "all"], default="all")
+    state_sub.add_parser("audit")
+    state_reconcile = state_sub.add_parser("reconcile")
+    state_reconcile.add_argument("--apply", action="store_true", help="Write reconcile events into paper ledger/log")
+    state_reconcile.add_argument("--window", type=int, default=180, help="Lookback window for paper event inference")
+    state_orders = state_sub.add_parser("orders")
+    state_orders.add_argument("--scope", default=None, help="Optional scope filter for structured orders")
+    state_orders.add_argument("--status", default=None, help="Optional status filter for structured orders")
+    state_confirm = state_sub.add_parser("confirm")
+    state_confirm.add_argument("--reply", required=True, help="Discord/manual reply text for condition-order confirmation")
+    state_confirm.add_argument("--scope", default="paper_mx", help="Scope for structured order confirmation")
+    state_remind = state_sub.add_parser("remind")
+    state_remind.add_argument("--scope", default="paper_mx", help="Scope for pending condition-order reminders")
+    state_remind.add_argument("--send", action="store_true", help="Send reminder to Discord webhook")
+    state_pool_actions = state_sub.add_parser("pool-actions")
+    state_pool_actions.add_argument("--limit", type=int, default=50, help="Maximum number of pool actions to return")
+    state_pool_actions.add_argument("--snapshot-date", default=None, help="Optional YYYY-MM-DD snapshot date filter")
+    state_trade_review = state_sub.add_parser("trade-review")
+    state_trade_review.add_argument("--window", type=int, default=90, help="Lookback window for structured trade review")
+    state_trade_review.add_argument("--scope", default="cn_a_system", help="Scope for structured trade review")
+    state_sub.add_parser("alerts")
+
+    backtest_parser = sub.add_parser("backtest", help="Run structured backtest and walk-forward summaries")
+    backtest_sub = backtest_parser.add_subparsers(dest="action", required=True)
+    backtest_run = backtest_sub.add_parser("run")
+    backtest_run.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_run.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_run.add_argument("--scope", default="cn_a_system", help="Scope for backtest")
+    backtest_run.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_run.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_run.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_run.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_sweep = backtest_sub.add_parser("sweep")
+    backtest_sweep.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_sweep.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_sweep.add_argument("--scope", default="cn_a_system", help="Scope for sweep")
+    backtest_sweep.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_sweep.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_sweep.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_sweep.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_walk = backtest_sub.add_parser("walk-forward")
+    backtest_walk.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_walk.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_walk.add_argument("--scope", default="cn_a_system", help="Scope for walk-forward")
+    backtest_walk.add_argument("--folds", type=int, default=3, help="Walk-forward folds")
+    backtest_walk.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_walk.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_walk.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_walk.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_history = backtest_sub.add_parser("history")
+    backtest_history.add_argument("--limit", type=int, default=10, help="Number of historical backtest entries")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -649,9 +1199,10 @@ def main():
     orch_parser.add_argument("--pool", choices=["core", "watch", "all"], default="all")
     orch_parser.add_argument("--universe", choices=["tracked", "market"], default="tracked")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    args.json = json_output
 
-    if args.json:
+    if json_output:
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
         previous_disable = logging.root.manager.disable
@@ -669,6 +1220,42 @@ def main():
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
                     result = orchestrate_workflow(args.workflow, args)
+                elif args.command == "state":
+                    result = state_command(args.action, args)
+                elif args.command == "backtest":
+                    if args.action == "run":
+                        result = run_backtest(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
+                        )
+                    elif args.action == "sweep":
+                        result = run_parameter_sweep(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
+                        )
+                    elif args.action == "history":
+                        result = list_backtest_history(limit=args.limit)
+                    else:
+                        result = run_walk_forward(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            folds=args.folds,
+                            fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
+                        )
                 else:
                     result = status_today()
         finally:
@@ -694,6 +1281,42 @@ def main():
             result = run_pipeline(args.pipeline, args)
         elif args.command == "orchestrate":
             result = orchestrate_workflow(args.workflow, args)
+        elif args.command == "state":
+            result = state_command(args.action, args)
+        elif args.command == "backtest":
+            if args.action == "run":
+                result = run_backtest(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
+                )
+            elif args.action == "sweep":
+                result = run_parameter_sweep(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
+                )
+            elif args.action == "history":
+                result = list_backtest_history(limit=args.limit)
+            else:
+                result = run_walk_forward(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    folds=args.folds,
+                    fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
+                )
         else:
             result = status_today()
 
@@ -715,7 +1338,47 @@ def main():
         elif result.get("command") == "status":
             print(f"status today: {result.get('date')}")
             print(f"today_decision: {result.get('today_decision', {}).get('decision')}")
+            print(f"market_signal: {result.get('market_signal', '')}")
             print("pipelines:", ", ".join(sorted(result.get("pipelines", {}).keys())))
+        elif result.get("command") == "state":
+            print(f"state {result.get('action')}: {result.get('status', 'ok')}")
+            print(f"db_path: {result.get('db_path', '')}")
+            if result.get("action") == "orders":
+                summary = result.get("summary", {})
+                print(
+                    "orders: "
+                    f"total={summary.get('order_count', 0)} "
+                    f"pending={summary.get('pending_count', 0)} "
+                    f"open={summary.get('open_count', 0)} "
+                    f"exception={summary.get('exception_count', 0)}"
+                )
+            elif result.get("action") == "confirm":
+                print(f"reply: {result.get('reply', {}).get('raw', '')}")
+                print(f"matched_order_count: {result.get('matched_order_count', 0)}")
+                print(f"trade_event_recorded: {result.get('trade_event_recorded', False)}")
+            elif result.get("action") == "remind":
+                print(f"pending_count: {result.get('pending_count', 0)}")
+                print(f"send: {result.get('send', False)} discord_ok={result.get('discord_ok', False)}")
+            elif result.get("action") == "pool-actions":
+                print(f"pool_actions: {result.get('action_count', 0)}")
+            elif result.get("action") == "trade-review":
+                print(f"closed_trades: {result.get('closed_trade_count', 0)} win_rate={result.get('win_rate', 0)}")
+            elif result.get("action") == "alerts":
+                print(f"alerts: {result.get('alert_count', 0)} status={result.get('status', 'ok')}")
+        elif result.get("command") == "backtest":
+            print(f"backtest {result.get('action')}: {result.get('status', 'ok')}")
+            if result.get("action") == "history":
+                print(f"item_count: {result.get('item_count', 0)}")
+                print(f"index_path: {result.get('index_path', '')}")
+            else:
+                print(f"sample_count: {result.get('sample_count', 0)}")
+                print(
+                    "score_summary: "
+                    f"win_rate={result.get('score_summary', {}).get('win_rate', result.get('score_summary', {}).get('mean_win_rate', 0))} "
+                    f"pnl={result.get('score_summary', {}).get('total_realized_pnl', 0)}"
+                )
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")

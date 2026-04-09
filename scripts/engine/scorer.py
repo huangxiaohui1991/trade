@@ -31,6 +31,7 @@ from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 
 _logger = get_logger("scorer")
+WARNING_ONLY_SIGNALS = {"consecutive_outflow_warn"}
 
 
 # ---------------------------------------------------------------------------
@@ -274,16 +275,39 @@ def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
     return veto_signals
 
 
+def split_veto_signals(veto_signals: list | None) -> tuple[list, list]:
+    """将硬性 veto 和仅预警信号分开。"""
+    hard_veto = []
+    warnings = []
+    for signal in veto_signals or []:
+        if signal in WARNING_ONLY_SIGNALS:
+            warnings.append(signal)
+        else:
+            hard_veto.append(signal)
+    return hard_veto, warnings
+
+
+def describe_risk_flags(score_result: dict) -> str:
+    """给评分结果生成简短风险描述。"""
+    hard_veto, warnings = split_veto_signals(score_result.get("veto_signals", []))
+    if hard_veto:
+        return f"一票否决：{','.join(hard_veto)}"
+    if warnings:
+        return f"预警：{','.join(warnings)}"
+    return ""
+
+
 def get_recommendation(score_result: dict) -> str:
     """根据统一评分结果生成建议文案。"""
     total = float(score_result.get("total_score", 0) or 0)
-    if score_result.get("veto_triggered") or score_result.get("veto_signals"):
+    hard_veto, warnings = split_veto_signals(score_result.get("veto_signals", []))
+    if score_result.get("veto_triggered") or hard_veto:
         return "❌ 一票否决"
     if total >= 7:
-        return "✅ 可买入"
+        return "✅ 可买入" + ("（流出预警）" if warnings else "")
     if total >= 5:
-        return "🟡 观察"
-    return "❌ 规避"
+        return "🟡 观察" + ("（流出预警）" if warnings else "")
+    return "❌ 规避" + ("（流出预警）" if warnings else "")
 
 
 def score(code: str, name: Optional[str] = None) -> dict:
@@ -319,8 +343,7 @@ def score(code: str, name: Optional[str] = None) -> dict:
 
     # 一票否决
     veto_signals = apply_veto(tech, flow, strategy)
-    # consecutive_outflow_warn 是警告不是否决，从 veto 中分离
-    hard_veto = [s for s in veto_signals if s != "consecutive_outflow_warn"]
+    hard_veto, warning_signals = split_veto_signals(veto_signals)
     veto_triggered = len(hard_veto) > 0
 
     # 加权总分（满分 10）
@@ -352,6 +375,8 @@ def score(code: str, name: Optional[str] = None) -> dict:
         "flow_detail": flow_s["detail"],
         "sentiment_detail": sentiment["detail"],
         "veto_signals": veto_signals,
+        "warning_signals": warning_signals,
+        "hard_veto_signals": hard_veto,
         "veto_triggered": veto_triggered,
         "weights": weights,
         # 原始数据
@@ -628,7 +653,8 @@ def _score_from_mx_data(code: str, name: str, mx_row: dict,
     if _check_earnings_bomb(code, name):
         veto_signals.append("earnings_bomb")
 
-    veto_triggered = len(veto_signals) > 0
+    hard_veto, warning_signals = split_veto_signals(veto_signals)
+    veto_triggered = len(hard_veto) > 0
 
     # ── 加权总分 ──
     raw = (
@@ -652,6 +678,8 @@ def _score_from_mx_data(code: str, name: str, mx_row: dict,
         "flow_detail": flow_detail,
         "sentiment_detail": sentiment["detail"],
         "veto_signals": veto_signals,
+        "warning_signals": warning_signals,
+        "hard_veto_signals": hard_veto,
         "veto_triggered": veto_triggered,
         "weights": weights,
     }
@@ -695,7 +723,10 @@ def batch_score(stocks: list) -> list:
                 first_pass.append({
                     "code": code, "name": name or code,
                     "total_score": 0, "veto_triggered": True,
-                    "veto_signals": ["score_error"], "error": str(e),
+                    "veto_signals": ["score_error"],
+                    "hard_veto_signals": ["score_error"],
+                    "warning_signals": [],
+                    "error": str(e),
                 })
 
         # 按三维分数排序（不含舆情）
@@ -711,7 +742,7 @@ def batch_score(stocks: list) -> list:
                     f"[scorer] {name}({code}): "
                     f"技术{r.get('technical_score',0):.1f} 基本面{r.get('fundamental_score',0):.1f} "
                     f"资金{r.get('flow_score',0):.1f} 舆情1.5(跳过) "
-                    f"→ 总分0.0 ❌ veto:{','.join(r.get('veto_signals',[]))}"
+                    f"→ 总分0.0 ❌ veto:{','.join(r.get('hard_veto_signals', r.get('veto_signals',[])))}"
                 )
                 continue
 
@@ -761,15 +792,18 @@ def batch_score(stocks: list) -> list:
                     "technical_score": tech_s["score"],
                     "fundamental_score": 0, "flow_score": 0, "sentiment_score": 1.5,
                     "total_score": 0,
-                    "technical_detail": tech_s["detail"],
-                    "fundamental_detail": "跳过（below_ma20 veto）",
-                    "flow_detail": "跳过", "sentiment_detail": "跳过",
-                    "veto_signals": ["below_ma20"], "veto_triggered": True,
-                    "weights": weights,
-                }
-                results.append(r)
-                _logger.info(f"[scorer] {r['name']}({code}): 技术{tech_s['score']:.1f} → 总分0.0 ❌ veto:below_ma20")
-                continue
+                "technical_detail": tech_s["detail"],
+                "fundamental_detail": "跳过（below_ma20 veto）",
+                "flow_detail": "跳过", "sentiment_detail": "跳过",
+                "veto_signals": ["below_ma20"],
+                "hard_veto_signals": ["below_ma20"],
+                "warning_signals": [],
+                "veto_triggered": True,
+                "weights": weights,
+            }
+            results.append(r)
+            _logger.info(f"[scorer] {r['name']}({code}): 技术{tech_s['score']:.1f} → 总分0.0 ❌ veto:below_ma20")
+            continue
 
             r = score(code, name)
             results.append(r)
@@ -778,14 +812,17 @@ def batch_score(stocks: list) -> list:
                 f"技术{r.get('technical_score',0):.1f} 基本面{r.get('fundamental_score',0):.1f} "
                 f"资金{r.get('flow_score',0):.1f} 舆情{r.get('sentiment_score',0):.1f} "
                 f"→ 总分{r.get('total_score',0):.1f}"
-                + (f" ❌ veto:{','.join(r.get('veto_signals',[]))}" if r.get('veto_triggered') else "")
+                + (f" ❌ veto:{','.join(r.get('hard_veto_signals', r.get('veto_signals',[])))}" if r.get('veto_triggered') else "")
             )
         except Exception as e:
             _logger.error(f"[scorer] 评分失败 {code}: {e}")
             results.append({
                 "code": code, "name": name or code,
                 "total_score": 0, "veto_triggered": True,
-                "veto_signals": ["score_error"], "error": str(e),
+                "veto_signals": ["score_error"],
+                "hard_veto_signals": ["score_error"],
+                "warning_signals": [],
+                "error": str(e),
             })
 
     results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
@@ -806,7 +843,7 @@ if __name__ == "__main__":
     results = batch_score(test_stocks)
     print()
     for r in results:
-        veto = f" ❌ veto:{','.join(r['veto_signals'])}" if r.get('veto_triggered') else " ✅"
+        veto = f" ❌ veto:{','.join(r.get('hard_veto_signals', r.get('veto_signals', [])))}" if r.get('veto_triggered') else " ✅"
         print(f"{r['name']}({r['code']}): 总分={r['total_score']:.1f}{veto}")
         print(f"  技术={r['technical_score']:.1f} 基本面={r['fundamental_score']:.1f} "
               f"资金={r['flow_score']:.1f} 舆情={r['sentiment_score']:.1f}")

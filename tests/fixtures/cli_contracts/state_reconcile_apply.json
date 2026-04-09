@@ -1,0 +1,38 @@
+{
+  "command": "state",
+  "action": "reconcile",
+  "status": "ok",
+  "db_path": "/tmp/trade_state.sqlite3",
+  "apply": true,
+  "planned_action_count": 1,
+  "planned_actions": [
+    {
+      "action": "flatten_missing_broker_position",
+      "side": "sell",
+      "code": "300389",
+      "shares": 1000,
+      "reason_code": "PAPER_RECONCILE_FLATTEN"
+    }
+  ],
+  "applied_actions": [
+    {
+      "action": "flatten_missing_broker_position",
+      "side": "sell",
+      "code": "300389",
+      "shares": 1000,
+      "reason_code": "PAPER_RECONCILE_FLATTEN"
+    }
+  ],
+  "consistency_before": {
+    "status": "drift",
+    "event_only_codes": [
+      "300389"
+    ],
+    "broker_only_codes": []
+  },
+  "consistency_after": {
+    "status": "ok",
+    "event_only_codes": [],
+    "broker_only_codes": []
+  }
+}

@@ -36,7 +36,7 @@ from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
-from scripts.utils.pool_manager import evaluate_pool_actions
+from scripts.utils.pool_manager import evaluate_pool_actions, load_pool_snapshot, save_pool_snapshot
 from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.stock_screener")
@@ -131,26 +131,61 @@ def _dedupe_candidates(candidates: list) -> list:
     return deduped
 
 
-def _tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set) -> tuple[list, str]:
+def _tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set, current_snapshot: dict | None = None) -> tuple[list, str]:
     """返回现有核心池/观察池候选集。"""
-    if pool == "core":
-        candidates = stocks_cfg.get("core_pool", [])
-        pool_name = "核心"
-    elif pool == "watch":
-        candidates = stocks_cfg.get("watch_pool", [])
-        pool_name = "观察"
+    snapshot_entries = []
+    if current_snapshot:
+        snapshot_entries = current_snapshot.get("entries", [])
+
+    if snapshot_entries:
+        if pool == "core":
+            candidates = [
+                {"code": item.get("code", ""), "name": item.get("name", "")}
+                for item in snapshot_entries
+                if str(item.get("bucket", "")).strip() == "core"
+            ]
+            pool_name = "核心"
+        elif pool == "watch":
+            candidates = [
+                {"code": item.get("code", ""), "name": item.get("name", "")}
+                for item in snapshot_entries
+                if str(item.get("bucket", "")).strip() == "watch"
+            ]
+            pool_name = "观察"
+        else:
+            candidates = [
+                {"code": item.get("code", ""), "name": item.get("name", "")}
+                for item in snapshot_entries
+                if str(item.get("bucket", "")).strip() in {"core", "watch"}
+            ]
+            pool_name = "综合"
     else:
-        candidates = stocks_cfg.get("core_pool", []) + stocks_cfg.get("watch_pool", [])
-        pool_name = "综合"
+        if pool == "core":
+            candidates = stocks_cfg.get("core_pool", [])
+            pool_name = "核心"
+        elif pool == "watch":
+            candidates = stocks_cfg.get("watch_pool", [])
+            pool_name = "观察"
+        else:
+            candidates = stocks_cfg.get("core_pool", []) + stocks_cfg.get("watch_pool", [])
+            pool_name = "综合"
 
     candidates = [c for c in candidates if c.get("code") not in blacklist]
     return _dedupe_candidates(candidates), pool_name
 
 
-def _fallback_tracked_candidates(stocks_cfg: dict, blacklist: set) -> list:
+def _fallback_tracked_candidates(stocks_cfg: dict, blacklist: set, current_snapshot: dict | None = None) -> list:
     """tracked 模式下的 fallback，直接回退到已跟踪股票池。"""
     _logger.info("[fallback] 使用已跟踪股票池作为候选")
-    candidates = stocks_cfg.get("core_pool", []) + stocks_cfg.get("watch_pool", [])
+    snapshot_entries = current_snapshot.get("entries", []) if current_snapshot else []
+    if snapshot_entries:
+        candidates = [
+            {"code": item.get("code", ""), "name": item.get("name", "")}
+            for item in snapshot_entries
+            if str(item.get("bucket", "")).strip() in {"core", "watch"}
+        ]
+    else:
+        candidates = stocks_cfg.get("core_pool", []) + stocks_cfg.get("watch_pool", [])
     candidates = [c for c in candidates if c.get("code") not in blacklist]
     candidates = _dedupe_candidates(candidates)
     _logger.info(f"[fallback] 候选股票: {len(candidates)} 只")
@@ -437,9 +472,10 @@ def _resolve_market_candidates(default_query: str, select_type: str,
 
 
 def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
-                                default_query: str, select_type: str) -> tuple[list, str, str]:
+                                default_query: str, select_type: str,
+                                current_snapshot: dict | None = None) -> tuple[list, str, str]:
     """已跟踪模式：先从 core/watch 取池子，再做命中筛选。"""
-    base_candidates, pool_name = _tracked_candidates(pool, stocks_cfg, blacklist)
+    base_candidates, pool_name = _tracked_candidates(pool, stocks_cfg, blacklist, current_snapshot=current_snapshot)
     _logger.info(f">> 候选股票: {len(base_candidates)} 只")
     if not base_candidates:
         return [], pool_name, ""
@@ -456,7 +492,7 @@ def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
         else:
             _logger.warning(">> mx-screener 调用失败，fallback 到 akshare")
 
-    return _fallback_tracked_candidates(stocks_cfg, blacklist), pool_name, "akshare 原生接口"
+    return _fallback_tracked_candidates(stocks_cfg, blacklist, current_snapshot=current_snapshot), pool_name, "akshare 原生接口"
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +576,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         vault = ObsidianVault()
         stocks_cfg = get_stocks()
         strategy_cfg = get_strategy()
+        current_snapshot = load_pool_snapshot()
 
         blacklist = _get_blacklist(stocks_cfg)
 
@@ -547,7 +584,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         default_query = screening_cfg.get("mx_query", "")
         select_type = screening_cfg.get("mx_select_type", "A股")
 
-        tracked_fallback = _fallback_tracked_candidates(stocks_cfg, blacklist)
+        tracked_fallback = _fallback_tracked_candidates(stocks_cfg, blacklist, current_snapshot=current_snapshot)
         resolution_meta = {"source_chain": []}
 
         if universe == "market":
@@ -558,7 +595,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
             _logger.info(f">> 市场扫描候选: {len(candidates)} 只")
         else:
             candidates, pool_name, source = _resolve_tracked_candidates(
-                pool, stocks_cfg, blacklist, default_query, select_type
+                pool, stocks_cfg, blacklist, default_query, select_type, current_snapshot=current_snapshot
             )
             resolution_meta = {
                 "source_chain": ["tracked_pool"],
@@ -587,7 +624,30 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         scored = batch_score(candidates)
         actionable = [r for r in scored if not r.get("veto_triggered", False)]
         today_decision = build_today_decision(strategy_cfg)
-        pool_suggestions, pool_meta = evaluate_pool_actions(scored, stocks_cfg, strategy_cfg)
+        pool_suggestions, pool_meta = evaluate_pool_actions(
+            scored,
+            stocks_cfg,
+            strategy_cfg,
+            current_snapshot=current_snapshot,
+            source=source,
+        )
+        snapshot_entries = pool_meta.get("snapshot_entries", [])
+        snapshot_path = ""
+        if snapshot_entries:
+            snapshot_path = save_pool_snapshot(snapshot_entries, {
+                **pool_meta,
+                "pool": pool,
+                "universe": universe,
+                "source": source,
+            })
+            try:
+                vault.sync_pool_projection(snapshot_entries, {
+                    **pool_meta,
+                    "source": source,
+                    "updated_at": datetime.now().strftime("%Y-%m-%d"),
+                })
+            except Exception as e:
+                _logger.warning(f">> 池子投影同步失败: {e}")
 
         _logger.info(">> 写入筛选报告...")
         report_path = _write_screening_result(scored, pool_name, source)
@@ -640,6 +700,9 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 },
                 "pool_state_path": pool_meta.get("state_path", ""),
                 "pool_rules": pool_meta.get("rules", {}),
+                "pool_snapshot_path": snapshot_path,
+                "pool_snapshot_summary": pool_meta.get("snapshot_summary", {}),
+                "pool_snapshot_count": len(snapshot_entries),
             },
             today_str,
         )

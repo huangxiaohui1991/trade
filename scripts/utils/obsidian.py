@@ -15,6 +15,7 @@ from typing import Optional
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from scripts.utils.parser import parse_frontmatter, parse_md_table, parse_portfolio as parse_portfolio_file
+from scripts.engine.scorer import split_veto_signals
 
 
 class ObsidianVault:
@@ -84,6 +85,11 @@ class ObsidianVault:
         # 写入新内容
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
+
+    def sync_portfolio_state(self) -> dict:
+        """将 portfolio.md 当前内容同步到结构化账本。"""
+        from scripts.state import sync_portfolio_state
+        return sync_portfolio_state()
 
     def read_portfolio(self) -> dict:
         """
@@ -158,6 +164,7 @@ class ObsidianVault:
                 new_content = new_frontmatter + "\n" + new_content[end_marker + 4:]
 
         self.write(self.portfolio_path, new_content)
+        self.sync_portfolio_state()
 
     def read_core_pool(self) -> list:
         """
@@ -173,6 +180,110 @@ class ObsidianVault:
         if tables:
             return tables[0].get('rows', [])
         return []
+
+    def _render_pool_table(self, entries: list, bucket: str) -> str:
+        """将结构化 pool entries 渲染成 markdown 表格。"""
+        rows = [
+            "| # | 股票 | 代码 | 四维总分 | 技术 | 基本面 | 资金 | 舆情 | 通过 | 备注 |",
+            "|---|------|------|---------|------|--------|------|------|------|------|",
+        ]
+        for idx, entry in enumerate(entries, 1):
+            hard_veto, warnings = split_veto_signals(entry.get("veto_signals", []))
+            score = float(entry.get("total_score", 0) or 0)
+            if hard_veto:
+                status = "❌"
+            elif score >= 7:
+                status = "✅"
+            elif score >= 5:
+                status = "🟡"
+            else:
+                status = "❌"
+            note = str(entry.get("note", "") or "").strip()
+            if not note and warnings:
+                note = f"预警:{','.join(warnings)}"
+            rows.append(
+                f"| {idx} | {entry.get('name', '')} | {entry.get('code', '')} | "
+                f"**{score:.1f}** | {float(entry.get('technical_score', 0) or 0):.1f} | "
+                f"{float(entry.get('fundamental_score', 0) or 0):.1f} | "
+                f"{float(entry.get('flow_score', 0) or 0):.1f} | "
+                f"{float(entry.get('sentiment_score', 0) or 0):.1f} | {status} | {note or bucket} |"
+            )
+        if len(rows) == 2:
+            rows.append("| — | — | — | — | — | — | — | — | 暂无 | 暂无 |")
+        return "\n".join(rows)
+
+    def sync_pool_projection(self, entries: list, metadata: Optional[dict] = None) -> dict:
+        """
+        同步核心池/观察池投影。
+
+        entries 需要包含 bucket/core|watch|avoid，以及统一评分字段。
+        """
+        metadata = metadata or {}
+        updated_at = metadata.get("updated_at") or datetime.now().strftime("%Y-%m-%d")
+        source = metadata.get("source", "pool_snapshot")
+
+        core_entries = [entry for entry in entries if str(entry.get("bucket", "")).strip() == "core"]
+        watch_entries = [entry for entry in entries if str(entry.get("bucket", "")).strip() == "watch"]
+        avoid_entries = [entry for entry in entries if str(entry.get("bucket", "")).strip() == "avoid"]
+
+        core_content = "\n".join([
+            "---",
+            f"date: {updated_at}",
+            "type: watchlist_core",
+            "tags: [核心池, 选股]",
+            f"updated_at: {updated_at}",
+            "---",
+            "",
+            "# 核心池（结构化投影）",
+            "",
+            f"> 来源：{source}",
+            "",
+            self._render_pool_table(core_entries, "core"),
+            "",
+        ])
+        watch_content = "\n".join([
+            "---",
+            f"date: {updated_at}",
+            "type: watchlist_observe",
+            "tags: [观察池, 选股]",
+            f"updated_at: {updated_at}",
+            "---",
+            "",
+            "# 观察池（结构化投影）",
+            "",
+            f"> 来源：{source}",
+            "",
+            f"## 当前观察池（{len(watch_entries)}只）",
+            "",
+            self._render_pool_table(watch_entries, "watch"),
+            "",
+            f"## 被淘汰（{len(avoid_entries)}只）",
+            "",
+            "| 股票 | 代码 | 总分 | 原因 |",
+            "|------|------|------|------|",
+        ])
+        if avoid_entries:
+            for entry in avoid_entries:
+                hard_veto, warnings = split_veto_signals(entry.get("veto_signals", []))
+                reason = str(entry.get("note", "") or "").strip()
+                if not reason:
+                    if hard_veto:
+                        reason = f"veto:{','.join(hard_veto)}"
+                    elif warnings:
+                        reason = f"预警:{','.join(warnings)}"
+                    else:
+                        reason = "规避"
+                watch_content += "\n" + f"| {entry.get('name', '')} | {entry.get('code', '')} | {float(entry.get('total_score', 0) or 0):.1f} | {reason} |"
+        else:
+            watch_content += "\n| — | — | — | 暂无 |"
+        watch_content += "\n"
+
+        self.write(self.core_pool_path, core_content)
+        self.write(self.watch_pool_path, watch_content)
+        return {
+            "core_pool_path": self._full_path(self.core_pool_path),
+            "watch_pool_path": self._full_path(self.watch_pool_path),
+        }
 
     def update_core_pool_scores(self, scores: list) -> None:
         """
@@ -220,10 +331,11 @@ class ObsidianVault:
             technical_score = _safe_float(new_score.get("technical_score", row.get("技术", 0)))
             flow_score = _safe_float(new_score.get("flow_score", row.get("主力", 0)))
             veto_signals = new_score.get("veto_signals", [])
+            hard_veto, warning_signals = split_veto_signals(veto_signals)
 
-            if veto_signals:
+            if hard_veto:
                 suggestion = "❌"
-                note = "veto:" + ",".join(veto_signals)
+                note = "veto:" + ",".join(hard_veto)
             elif total_score >= 7:
                 suggestion = "✅"
                 note = "可买入"
@@ -233,6 +345,9 @@ class ObsidianVault:
             else:
                 suggestion = "❌"
                 note = "规避"
+
+            if warning_signals and not hard_veto:
+                note = f"预警:{','.join(warning_signals)}"
 
             row["四维总分"] = f"{total_score:.1f}"
             if "基本面" in headers:

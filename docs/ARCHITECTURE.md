@@ -13,7 +13,7 @@
 - cron 调度、Discord 推送、舆情评分全在同一套流程里
 - 东方财富妙想 API（mx-skills）作为优先数据源，akshare/新浪作为 fallback
 - 对外部脆弱数据源补本地缓存，避免自动化空跑
-- Obsidian 是唯一事实来源，所有数据读写都通过它
+- 结构化 ledger（SQLite）是自动化真相源，Obsidian 作为双写投影与人工复核入口
 - 每日运行状态单独落盘，便于排障和回溯
 - 统一通过 CLI 对外暴露给 Hermes / OpenClaw
 
@@ -30,7 +30,7 @@
 ┌──────────────────────────▼──────────────────────────┐
 │          Hermes-Agent / OpenClaw / trade CLI         │
 │                                                     │
-│   doctor / run / status 统一入口                     │
+│   doctor / run / status / state 统一入口             │
 │   Discord 推送（格式化报告）                         │
 │   自然语言处理（选股/评分/查询/复盘）                 │
 │   妙想 API 调用（mx-data/search/xuangu/zixuan/moni）│
@@ -140,6 +140,7 @@ trade/
 │   ├── runs/                   # 单次运行结果（不纳入 Git）
 │   ├── locks/                  # 运行锁（不纳入 Git）
 │   ├── runtime/                # 每日状态文件（不纳入 Git）
+│   ├── ledger/                 # SQLite 结构化账本（不纳入 Git）
 │   ├── prices/                 # 价格快照
 │   ├── backtest/               # 回测结果
 │   └── cron.log                # cron 执行日志

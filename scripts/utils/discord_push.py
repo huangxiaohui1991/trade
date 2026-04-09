@@ -505,3 +505,8 @@ def send_condition_order_reminder(pending: list) -> Tuple[bool, str]:
     """
     content = _build_condition_order_reminder(pending)
     return _post_to_discord(content)
+
+
+def render_condition_order_reminder(pending: list) -> str:
+    """Render the condition-order reminder content without sending it."""
+    return _build_condition_order_reminder(pending)

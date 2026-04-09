@@ -30,10 +30,11 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
-from scripts.engine.scorer import batch_score, get_recommendation
+from scripts.engine.scorer import batch_score, get_recommendation, split_veto_signals
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks
 from scripts.utils.logger import get_logger
+from scripts.utils.pool_manager import build_pool_snapshot_entries, load_pool_snapshot, save_pool_snapshot
 from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.core_pool_scoring")
@@ -64,8 +65,6 @@ def _build_report_content(scores: list, date_str: str) -> str:
         flow = s.get("flow_score", 0)
         sentiment = s.get("sentiment_score", 0)
         total = s.get("total_score", 0)
-        veto_signals = s.get("veto_signals", [])
-
         suggestion = get_recommendation(s)
 
         lines.append(
@@ -86,8 +85,11 @@ def _build_report_content(scores: list, date_str: str) -> str:
         lines.append(f"- 基本面：{s.get('fundamental_detail', '')}")
         lines.append(f"- 资金流：{s.get('flow_detail', '')}")
         lines.append(f"- 舆情：{s.get('sentiment_detail', '')}")
-        if s.get("veto_signals"):
-            lines.append(f"- **一票否决：{', '.join(s['veto_signals'])}**")
+        hard_veto, warning_signals = split_veto_signals(s.get("veto_signals", []))
+        if hard_veto:
+            lines.append(f"- **一票否决：{', '.join(hard_veto)}**")
+        elif warning_signals:
+            lines.append(f"- **预警：{', '.join(warning_signals)}**")
         lines.append("")
 
     return "\n".join(lines)
@@ -109,15 +111,22 @@ def run() -> list:
     try:
         vault = ObsidianVault()
         stocks_cfg = get_stocks()
+        current_snapshot = load_pool_snapshot()
 
-        core_pool = stocks_cfg.get("core_pool", [])
+        core_pool = [
+            {
+                "code": str(item.get("code", "")).strip(),
+                "name": str(item.get("name", "")).strip(),
+            }
+            for item in current_snapshot.get("entries", [])
+            if str(item.get("bucket", "")).strip() == "core"
+        ]
         if not core_pool:
-            _logger.warning("核心池为空，从 vault 读取")
-            vault_pool = vault.read_core_pool()
+            _logger.warning("结构化核心池为空，从 config/stocks.yaml 回退")
             core_pool = [
-                {"code": str(row.get("代码", "")).strip(), "name": str(row.get("股票", "")).strip()}
-                for row in vault_pool
-                if str(row.get("代码", "")).strip() not in ["", "—"]
+                {"code": str(item.get("code", "")).strip(), "name": str(item.get("name", "")).strip()}
+                for item in stocks_cfg.get("core_pool", [])
+                if str(item.get("code", "")).strip()
             ]
 
         if not core_pool:
@@ -139,6 +148,19 @@ def run() -> list:
                 _logger.info(f">> 评分 {name}({code})...")
 
         scores = batch_score(core_pool)
+        snapshot_entries, snapshot_meta = build_pool_snapshot_entries(
+            scores,
+            current_snapshot=current_snapshot,
+            strategy_cfg=None,
+            source="core_pool_scoring",
+        )
+        snapshot_meta.update({
+            "pipeline": "core_pool_scoring",
+            "scored_count": len(scores),
+            "source": "core_pool_scoring",
+        })
+        snapshot_path = save_pool_snapshot(snapshot_entries, snapshot_meta)
+        snapshot_meta["snapshot_path"] = snapshot_path
 
         _logger.info(">> 写入评分报告...")
         report_content = _build_report_content(scores, date_str)
@@ -150,14 +172,14 @@ def run() -> list:
             f.write(report_content)
         _logger.info(f"  已写入: {report_path.name}")
 
-        _logger.info(">> 更新核心池.md 评分列...")
+        _logger.info(">> 同步核心池/观察池投影...")
         core_pool_updated = False
         try:
-            vault.update_core_pool_scores(scores)
+            vault.sync_pool_projection(snapshot_entries, snapshot_meta)
             core_pool_updated = True
-            _logger.info("  核心池.md 已更新")
+            _logger.info("  核心池/观察池 投影已更新")
         except Exception as e:
-            _logger.warning(f"  更新核心池.md 失败: {e}")
+            _logger.warning(f"  更新池子投影失败: {e}")
 
         _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
 
@@ -168,6 +190,8 @@ def run() -> list:
                 "scored_count": len(scores),
                 "report_path": str(report_path),
                 "core_pool_updated": core_pool_updated,
+                "snapshot_path": snapshot_path,
+                "pool_snapshot_summary": snapshot_meta.get("summary", {}),
             },
             date_str,
         )

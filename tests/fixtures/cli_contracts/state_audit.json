@@ -1,0 +1,23 @@
+{
+  "command": "state",
+  "action": "audit",
+  "status": "drift",
+  "db_path": "/tmp/trade_state.sqlite3",
+  "snapshot_date": "2026-04-09",
+  "checks": {
+    "stocks_yaml": {
+      "ok": true
+    },
+    "obsidian_projection": {
+      "ok": true
+    },
+    "paper_trade_consistency": {
+      "ok": false,
+      "status": "drift",
+      "event_only_codes": [
+        "300389"
+      ],
+      "broker_only_codes": []
+    }
+  }
+}

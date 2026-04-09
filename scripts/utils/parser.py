@@ -122,6 +122,57 @@ def parse_md_table(content: str, header_match: Optional[str] = None) -> list:
     return tables
 
 
+def split_markdown_sections(content: str, level: int = 2) -> dict:
+    """按标题级别拆分 Markdown 内容，返回 title -> section body。"""
+    prefix = "#" * max(level, 1) + " "
+    sections = {}
+    current_title = None
+    current_lines = []
+
+    for line in content.split("\n"):
+        if line.startswith(prefix):
+            if current_title is not None:
+                sections[current_title] = "\n".join(current_lines).strip()
+            current_title = line[len(prefix):].strip()
+            current_lines = []
+            continue
+        if current_title is not None:
+            current_lines.append(line)
+
+    if current_title is not None:
+        sections[current_title] = "\n".join(current_lines).strip()
+    return sections
+
+
+def _coerce_table_value(value):
+    if not isinstance(value, str):
+        return value
+    try:
+        if "." in value and re.match(r'^-?\d+(\.\d+)?$', value):
+            return float(value)
+        if value.isdigit():
+            return int(value)
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _coerce_table_rows(rows: list) -> list:
+    normalized = []
+    for row in rows:
+        normalized.append({key: _coerce_table_value(value) for key, value in row.items()})
+    return normalized
+
+
+def _find_first_section_table(sections: dict, title_prefix: str) -> list:
+    for title, body in sections.items():
+        if title.startswith(title_prefix):
+            tables = parse_md_table(body)
+            if tables:
+                return _coerce_table_rows(tables[0].get("rows", []))
+    return []
+
+
 def parse_portfolio(file_path: str) -> dict:
     """解析持仓汇总文件"""
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -129,26 +180,35 @@ def parse_portfolio(file_path: str) -> dict:
 
     frontmatter = parse_frontmatter(content)
     tables = parse_md_table(content)
+    sections = split_markdown_sections(content, level=2)
 
-    holdings = []
-    for table in tables:
-        for row in table["rows"]:
-            holding = {}
-            for key, value in row.items():
-                # 尝试转换数字
-                try:
-                    if '.' in value:
-                        holding[key] = float(value)
-                    elif value.isdigit():
-                        holding[key] = int(value)
-                    else:
-                        holding[key] = value
-                except (ValueError, AttributeError):
-                    holding[key] = value
-            holdings.append(holding)
+    account_overview = _find_first_section_table(sections, "账户概览")
+    cn_a_holdings = _find_first_section_table(sections, "A股持仓明细")
+    legacy_cn_holdings = _find_first_section_table(sections, "A股遗留仓位")
+    hk_legacy_holdings = _find_first_section_table(sections, "港股持仓明细")
+    weekly_records = _find_first_section_table(sections, "本周交易记录")
+
+    holdings = [
+        row for row in cn_a_holdings
+        if str(row.get("股票", "")).strip() not in ("", "—", "空仓")
+        and str(row.get("代码", "")).strip() not in ("", "—")
+    ]
 
     return {
         "meta": frontmatter,
+        "sections": sections,
+        "account_overview": account_overview,
+        "cn_a_holdings": cn_a_holdings,
+        "legacy_cn_holdings": legacy_cn_holdings,
+        "hk_legacy_holdings": hk_legacy_holdings,
+        "weekly_records": weekly_records,
+        "all_tables": [
+            {
+                "headers": table.get("headers", []),
+                "rows": _coerce_table_rows(table.get("rows", [])),
+            }
+            for table in tables
+        ],
         "holdings": holdings,
         "count": len(holdings)
     }

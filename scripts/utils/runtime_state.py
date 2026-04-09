@@ -74,3 +74,59 @@ def update_pipeline_state(name: str, status: str, details: Optional[dict] = None
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
     return str(path)
+
+
+def _get_state_module():
+    from scripts import state
+    return state
+
+
+def load_portfolio_snapshot(scope: Optional[str] = None) -> dict:
+    return _get_state_module().load_portfolio_snapshot(scope=scope)
+
+
+def load_market_snapshot(refresh: bool = False) -> dict:
+    return _get_state_module().load_market_snapshot(refresh=refresh)
+
+
+def load_activity_summary(window="week", scope: str = "cn_a_system") -> dict:
+    return _get_state_module().load_activity_summary(window=window, scope=scope)
+
+
+def bootstrap_state(force: bool = False) -> dict:
+    return _get_state_module().bootstrap_state(force=force)
+
+
+def audit_state() -> dict:
+    return _get_state_module().audit_state()
+
+
+def sync_portfolio_state() -> dict:
+    return _get_state_module().sync_portfolio_state()
+
+
+def sync_activity_state() -> dict:
+    return _get_state_module().sync_activity_state()
+
+
+def load_pool_snapshot() -> dict:
+    """兼容 pool_manager 的 {entries, metadata, updated_at} 形态。"""
+    snapshot = _get_state_module().load_pool_snapshot()
+    entries = list(snapshot.get("entries", []))
+    if not entries:
+        entries.extend(snapshot.get("core_pool", []))
+        entries.extend(snapshot.get("watch_pool", []))
+        entries.extend(snapshot.get("other_entries", []))
+    return {
+        "entries": entries,
+        "metadata": snapshot.get("metadata", {}),
+        "updated_at": snapshot.get("updated_at", ""),
+        "summary": snapshot.get("summary", {}),
+        "snapshot_date": snapshot.get("snapshot_date", ""),
+        "source": snapshot.get("source", ""),
+    }
+
+
+def save_pool_snapshot(entries: list, metadata: Optional[dict] = None) -> str:
+    result = _get_state_module().save_pool_snapshot(entries, metadata or {})
+    return str(result.get("db_path", _get_state_module().LEDGER_DB_PATH))

@@ -1,5 +1,6 @@
 .DS_Store
 *.pyc
+*.bak
 __pycache__/
 *.log
 *.db
@@ -12,5 +13,7 @@ data/runtime/
 data/cache/
 data/runs/
 data/locks/
+data/ledger/
+data/backtest/
 交易记录/
 每日快照/

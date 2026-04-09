@@ -3,8 +3,8 @@
 pipeline/weekly_review.py — 周报生成（周日 20:00 执行）
 
 职责：
-  1. 解析本周所有日志（parse_journal_dir）
-  2. 统计：本周 P&L + 胜率 + 盈亏比
+  1. 读取结构化活动摘要（load_activity_summary）
+  2. 统计：本周买入次数 + 卖出次数 + P&L + 胜率 + 盈亏比
   3. 计算：核心池变化
   4. 输出到 vault/03-复盘/周/YYYY-W##.md
   5. Discord 推送周报
@@ -31,11 +31,13 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.utils.config_loader import get_stocks
-from scripts.utils.parser import parse_journal_dir, parse_md_table
+from scripts.utils.parser import parse_md_table
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_weekly_report
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
+from scripts.engine.trading_record import load_activity_summary
+from scripts.state import load_trade_review
 
 _logger = get_logger("pipeline.weekly_review")
 
@@ -78,9 +80,24 @@ def _extract_report_scores(report_path: Path) -> dict:
     return scores
 
 
+def _safe_date_key(event: dict) -> str:
+    """从事件里提取 YYYY-MM-DD 作为分组键。"""
+    trade_date = str(
+        event.get("trade_date")
+        or event.get("date")
+        or event.get("timestamp")
+        or ""
+    ).strip()
+    if len(trade_date) >= 10:
+        return trade_date[:10]
+    return trade_date
+
+
 def _build_weekly_report(vault: ObsidianVault, stats: dict,
-                          core_pool_changes: list, position_changes: list,
-                          year: int, week_num: int) -> str:
+                         core_pool_changes: list, trade_events: list,
+                         year: int, week_num: int,
+                         shadow_advisories: list | None = None,
+                         trade_review: dict | None = None) -> str:
     """生成周报 markdown 内容"""
     week_str = f"{year}-W{week_num:02d}"
 
@@ -89,20 +106,32 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
     monday = now - timedelta(days=now.weekday())
     friday = monday + timedelta(days=4)
 
-    pnl_abs = stats.get("total_pnl", 0)
-    win_days = stats.get("win_days", 0)
-    loss_days = stats.get("loss_days", 0)
+    trade_events = trade_events or stats.get("trade_events", [])
+    pnl_abs = _safe_float(stats.get("realized_pnl", stats.get("total_pnl", 0)))
+    buy_count = int(stats.get("weekly_buy_count", stats.get("buy_count", 0)) or 0)
+    sell_count = int(stats.get("weekly_sell_count", stats.get("sell_count", 0)) or 0)
+    trade_count = int(stats.get("trade_count", len(trade_events)) or 0)
+
+    day_pnl = {}
+    for event in trade_events:
+        day_key = _safe_date_key(event)
+        if not day_key:
+            continue
+        pnl = _safe_float(event.get("realized_pnl", event.get("pnl", 0)))
+        if event.get("action") == "SELL":
+            day_pnl[day_key] = day_pnl.get(day_key, 0.0) + pnl
+
+    win_days = sum(1 for pnl in day_pnl.values() if pnl > 0)
+    loss_days = sum(1 for pnl in day_pnl.values() if pnl < 0)
     total_days = win_days + loss_days
     win_rate = (win_days / total_days * 100) if total_days > 0 else 0
 
     # 盈亏比（简化：平均盈利日 vs 平均亏损日）
-    journals = stats.get("journals", [])
     avg_win = 0.0
     avg_loss = 0.0
     win_count = 0
     loss_count = 0
-    for j in journals:
-        pnl = _safe_float(j.get("daily_pnl", 0))
+    for pnl in day_pnl.values():
         if pnl > 0:
             avg_win += pnl
             win_count += 1
@@ -115,11 +144,7 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         avg_loss /= loss_count
     profit_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
 
-    total_trades = stats.get("total_trades", 0)
-
-    # 总收益率（需要手动填写资产）
-    # pnl_pct 需要资产数据，这里留空让用户填写
-    pnl_pct = 0.0  # 待计算
+    active_days = len(day_pnl)
 
     lines = [
         f"# {week_str} 周复盘（{monday.strftime('%m/%d')} - {friday.strftime('%m/%d')}）",
@@ -134,31 +159,55 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         f"| 周末资产 | ¥（手动填写） |",
         f"| 本周盈亏 | ¥{pnl_abs:+,.2f}（自动统计） |",
         f"| 收益率 | %（需填写资产后计算） |",
-        f"| 主动买入次数 | {total_trades} 次（自动统计） |",
-        f"| 盈利天数 / 亏损天数 | {win_days} / {loss_days}（自动统计） |",
+        f"| 主动买入次数 | {buy_count} 次（结构化事件） |",
+        f"| 主动卖出次数 | {sell_count} 次（结构化事件） |",
+        f"| 交易事件数 | {trade_count} 条（结构化事件） |",
+        f"| 盈利交易日 / 亏损交易日 | {win_days} / {loss_days}（结构化事件） |",
         f"| 胜率 | {win_rate:.0f}%（自动统计） |",
         f"| 盈亏比 | {profit_loss_ratio:.2f} |",
         "",
-        "> 周初/周末资产需手动填写（券商APP截图），其余由系统从日志自动统计。",
+        "> 周初/周末资产需手动填写（券商APP截图），其余由系统从结构化交易事件自动统计。",
         "",
         "---",
         "",
-        "## 本周交易明细（自动从日志提取）",
+        "## 本周交易明细（自动从结构化事件提取）",
         "",
-        "| 日期 | 股票 | 操作 | 价格 | 数量 | 盈亏 | 备注 |",
-        "|------|------|------|------|------|------|------|",
+        "| 日期 | 股票 | 代码 | 操作 | 价格 | 数量 | 盈亏 | 备注 |",
+        "|------|------|------|------|------|------|------|------|",
     ]
 
-    # 从日志提取交易
-    has_trades = False
-    for j in journals:
-        if _safe_float(j.get("trades", 0)) > 0:
-            has_trades = True
-            date = j.get("_date", "")
-            pnl = _safe_float(j.get("daily_pnl", 0))
-            lines.append(f"| {date} | — | — | — | — | ¥{pnl:+,.2f} | 详见日志 |")
-    if not has_trades:
-        lines.append("| — | — | — | — | — | — | 本周无交易 |")
+    if trade_events:
+        for event in trade_events:
+            reason = str(event.get("reason", "")).strip()
+            reason_code = str(event.get("reason_code", "")).strip()
+            remark = reason
+            if reason_code:
+                remark = f"{reason_code} {remark}".strip()
+            lines.append(
+                f"| {_safe_date_key(event)} | {event.get('name', '—')} | "
+                f"{event.get('code', '—')} | {event.get('action', '—')} | "
+                f"¥{_safe_float(event.get('price', 0)):.2f} | {int(event.get('shares', 0) or 0)} | "
+                f"¥{_safe_float(event.get('realized_pnl', 0)):+,.2f} | {remark or '—'} |"
+            )
+    else:
+        lines.append("| — | — | — | — | — | — | — | 本周无交易事件 |")
+
+    lines.extend(["", "---", "", "## Advisory 风控提示（影子盘）", ""])
+    lines.append("")
+    lines.append("> 时间止损 / 回撤止盈目前仅做提示，不自动执行。")
+    lines.append("")
+    if shadow_advisories:
+        lines.append("| 股票 | 代码 | 持有天数 | 回撤 | 提示 |")
+        lines.append("|------|------|----------|------|------|")
+        for item in shadow_advisories:
+            drawdown_pct = _safe_float(item.get("drawdown_pct", 0))
+            lines.append(
+                f"| {item.get('name', '—')} | {item.get('code', '—')} | "
+                f"{item.get('hold_days', '—')} | {drawdown_pct*100:.1f}% | "
+                f"{item.get('summary', '—')} |"
+            )
+    else:
+        lines.append("（当前无时间止损 / 回撤止盈提示）")
 
     lines.extend(["", "---", "", "## 规则执行检查", ""])
     lines.extend([
@@ -172,6 +221,37 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         "",
         "",
     ])
+
+    lines.extend(["", "---", "", "## 复盘归因（结构化闭合交易）", ""])
+    closed_trades = list((trade_review or {}).get("closed_trades", []))
+    review_summary = dict((trade_review or {}).get("summary_stats", {}))
+    lines.append("| 指标 | 数值 |")
+    lines.append("|------|------|")
+    lines.append(f"| 平均持有天数 | {float(review_summary.get('avg_holding_days', 0.0)):.1f} 天 |")
+    lines.append(f"| 平均盈利单笔 | ¥{_safe_float(review_summary.get('avg_win', 0.0)):+,.2f} |")
+    lines.append(f"| 平均亏损单笔 | ¥{_safe_float(review_summary.get('avg_loss', 0.0)):+,.2f} |")
+    lines.append(f"| 规则违例数 | {int(review_summary.get('rule_break_count', 0) or 0)} |")
+    lines.append("")
+    if closed_trades:
+        lines.append("| 股票 | 开始 | 结束 | 持有天数 | 入场原因 | 出场原因 | 已实现盈亏 | 标签 |")
+        lines.append("|------|------|------|----------|----------|----------|------------|------|")
+        for item in closed_trades:
+            entry_reason = (
+                ",".join(item.get("entry_reason_codes", [])[:2])
+                or item.get("entry_reason_code", "")
+                or "—"
+            )
+            exit_reason = ",".join(item.get("exit_reason_codes", [])[:2]) or "—"
+            tags = ",".join(item.get("rule_tags", [])) or "—"
+            lines.append(
+                f"| {item.get('name', '—')} | {item.get('entry_date', '—')} | {item.get('exit_date', '—')} | "
+                f"{item.get('holding_days', '—')} | {entry_reason} | {exit_reason} | "
+                f"¥{_safe_float(item.get('realized_pnl', 0)):+,.2f} | {tags} |"
+            )
+        lines.append("")
+        lines.append(f"> MFE/MAE 暂未接入历史行情，当前状态：{(trade_review or {}).get('mfe_mae_status', 'pending')}")
+    else:
+        lines.append("（本周无闭合交易可归因）")
 
     # 核心池变化
     lines.extend(["", "---", "", "## 核心池变化", ""])
@@ -233,7 +313,11 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         "pnl_abs": pnl_abs,
         "win_rate": win_rate,
         "profit_loss_ratio": profit_loss_ratio,
-        "total_trades": total_trades,
+        "weekly_buy_count": buy_count,
+        "weekly_sell_count": sell_count,
+        "trade_count": trade_count,
+        "realized_pnl": pnl_abs,
+        "active_days": active_days,
     }
 
 
@@ -251,23 +335,36 @@ def run() -> dict:
 
     try:
         vault = ObsidianVault()
-        journal_dir = os.path.join(vault.vault_path, vault.journal_dir)
 
         # 1. 统计本周数据
-        _logger.info(">> 解析本周日志...")
-        stats = parse_journal_dir(journal_dir, days=7)
+        _logger.info(">> 读取结构化活动摘要...")
+        stats = load_activity_summary(7, scope="cn_a_system")
+        trade_events = stats.get("trade_events", [])
 
-        win_days = stats.get("win_days", 0)
-        loss_days = stats.get("loss_days", 0)
+        win_days = 0
+        loss_days = 0
+        day_pnl = {}
+        for event in trade_events:
+            day_key = _safe_date_key(event)
+            if not day_key or event.get("action") != "SELL":
+                continue
+            day_pnl[day_key] = day_pnl.get(day_key, 0.0) + _safe_float(
+                event.get("realized_pnl", event.get("pnl", 0))
+            )
+        win_days = sum(1 for pnl in day_pnl.values() if pnl > 0)
+        loss_days = sum(1 for pnl in day_pnl.values() if pnl < 0)
         total_days = win_days + loss_days
         win_rate = (win_days / total_days * 100) if total_days > 0 else 0
+        buy_count = int(stats.get("weekly_buy_count", stats.get("buy_count", 0)) or 0)
+        sell_count = int(stats.get("weekly_sell_count", stats.get("sell_count", 0)) or 0)
+        realized_pnl = _safe_float(stats.get("realized_pnl", 0))
 
         _logger.info(
-            f"  本周交易日: {stats.get('count', 0)} | "
+            f"  结构化交易事件: {len(trade_events)} | "
             f"盈利{win_days}/亏损{loss_days} | "
             f"胜率{win_rate:.0f}% | "
-            f"总盈亏: ¥{stats.get('total_pnl', 0):+.2f} | "
-            f"交易次数: {stats.get('total_trades', 0)}"
+            f"总盈亏: ¥{realized_pnl:+.2f} | "
+            f"买入{buy_count}/卖出{sell_count}"
         )
 
         # 2. 核心池变化（从评分报告目录对比）
@@ -310,17 +407,34 @@ def run() -> dict:
             _logger.warning(f"  核心池变化检测失败: {e}")
 
         position_changes = []
-        journals = stats.get("journals", [])
-        for j in journals:
-            if _safe_float(j.get("trades", 0)) > 0:
-                position_changes.append({
-                    "action": "trade",
-                    "date": j.get("_date", ""),
-                })
+        for event in trade_events:
+            position_changes.append({
+                "action": event.get("action", ""),
+                "name": event.get("name", ""),
+                "shares": event.get("shares", 0),
+                "price": event.get("price", 0),
+                "currency": "¥",
+                "reason_code": event.get("reason_code", ""),
+            })
+
+        shadow_advisories = []
+        trade_review = {}
+        try:
+            from scripts.pipeline.shadow_trade import get_status as get_shadow_status
+            shadow_status = get_shadow_status()
+            shadow_advisories = shadow_status.get("advisory_summary", {}).get("positions", [])
+            if shadow_advisories:
+                _logger.info(f"  影子盘 advisory 提示: {len(shadow_advisories)} 只")
+        except Exception as e:
+            _logger.warning(f"  影子盘 advisory 汇总失败: {e}")
+        try:
+            trade_review = load_trade_review(window=7, scope="cn_a_system")
+        except Exception as e:
+            _logger.warning(f"  交易归因汇总失败: {e}")
 
         _logger.info(">> 生成周报文件...")
         report_content, summary_stats = _build_weekly_report(
-            vault, stats, core_pool_changes, position_changes, year, week_num
+            vault, stats, core_pool_changes, trade_events, year, week_num, shadow_advisories, trade_review
         )
 
         review_dir = Path(vault.vault_path) / "03-复盘" / "周"
@@ -337,10 +451,10 @@ def run() -> dict:
             "pnl_pct": 0.0,
             "pnl_abs": summary_stats["pnl_abs"],
             "win_rate": summary_stats["win_rate"],
-            "trades": summary_stats["total_trades"],
+            "trades": summary_stats["trade_count"],
             "profit_loss_ratio": summary_stats["profit_loss_ratio"],
-            "position_changes": [
-                {"action": "trade", "name": "（见日志）", "shares": 0, "price": 0, "currency": "¥"}
+            "position_changes": position_changes[:10] if position_changes else [
+                {"action": "trade", "name": "（无）", "shares": 0, "price": 0, "currency": "¥"}
             ],
             "core_pool_changes": core_pool_changes,
             "next_week_plan": [
@@ -366,7 +480,12 @@ def run() -> dict:
                 "discord_ok": ok,
                 "discord_error": err,
                 "core_pool_change_count": len(core_pool_changes),
-                "trade_count": stats.get("total_trades", 0),
+                "trade_event_count": len(trade_events),
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+                "realized_pnl": realized_pnl,
+                "shadow_advisory_count": len(shadow_advisories),
+                "closed_trade_review_count": int(trade_review.get("closed_trade_count", 0) or 0),
             },
         )
 

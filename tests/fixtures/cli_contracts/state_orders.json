@@ -1,0 +1,54 @@
+{
+  "command": "state",
+  "action": "orders",
+  "status": "ok",
+  "db_path": "/tmp/trade_state.sqlite3",
+  "scope_filter": "all",
+  "order_status_filter": "all",
+  "summary": {
+    "order_count": 2,
+    "pending_count": 1,
+    "open_count": 0,
+    "exception_count": 0,
+    "terminal_count": 1,
+    "status_counts": {
+      "candidate": 1,
+      "filled": 1
+    },
+    "scope_counts": {
+      "paper_mx": 1,
+      "cn_a_system": 1
+    },
+    "class_counts": {
+      "condition": 1,
+      "manual": 1
+    }
+  },
+  "condition_orders": {
+    "count": 1,
+    "pending_count": 1,
+    "open_count": 0,
+    "exception_count": 0,
+    "status_counts": {
+      "candidate": 1
+    },
+    "condition_type_counts": {
+      "take_profit_t1": 1
+    },
+    "sample": [
+      {
+        "external_id": "paper:order:001",
+        "code": "300389",
+        "name": "艾比森",
+        "side": "sell",
+        "status": "candidate",
+        "condition_type": "take_profit_t1",
+        "requested_shares": 1000,
+        "filled_shares": 0,
+        "trigger_price": 20.5,
+        "limit_price": 20.45,
+        "confirm_status": "pending"
+      }
+    ]
+  }
+}

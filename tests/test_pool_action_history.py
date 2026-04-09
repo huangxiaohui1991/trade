@@ -1,0 +1,71 @@
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+
+class PoolActionHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self._old_db_path = os.environ.get("TRADE_STATE_DB_PATH")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        os.environ["TRADE_STATE_DB_PATH"] = os.path.join(self._tmpdir.name, "trade_state.sqlite3")
+
+    def tearDown(self):
+        if self._old_db_path is None:
+            os.environ.pop("TRADE_STATE_DB_PATH", None)
+        else:
+            os.environ["TRADE_STATE_DB_PATH"] = self._old_db_path
+        self._tmpdir.cleanup()
+
+    def _bootstrap_empty(self):
+        from scripts.state.service import bootstrap_state
+
+        with mock.patch(
+            "scripts.state.service._bootstrap_portfolio_snapshot",
+            return_value=([], [], "2026-04-09"),
+        ), mock.patch(
+            "scripts.state.service._bootstrap_trade_events",
+            return_value=[],
+        ), mock.patch(
+            "scripts.state.service._bootstrap_pool_entries",
+            return_value=[],
+        ):
+            bootstrap_state(force=True)
+
+    def test_save_pool_snapshot_records_action_history(self):
+        from scripts.state import load_pool_action_history, save_pool_snapshot
+
+        self._bootstrap_empty()
+        with mock.patch("scripts.state.service._project_stocks_yaml", return_value="/tmp/stocks.yaml"), mock.patch(
+            "scripts.state.service.ObsidianVault",
+            return_value=mock.Mock(sync_pool_projection=mock.Mock(return_value={})),
+        ):
+            save_pool_snapshot(
+                [
+                    {"code": "300389", "name": "艾比森", "bucket": "watch", "total_score": 6.2},
+                    {"code": "603063", "name": "禾望电气", "bucket": "core", "total_score": 7.3},
+                ],
+                metadata={"snapshot_date": "2026-04-09", "source": "unit_test"},
+            )
+            save_pool_snapshot(
+                [
+                    {"code": "300389", "name": "艾比森", "bucket": "core", "total_score": 7.6},
+                    {"code": "603063", "name": "禾望电气", "bucket": "watch", "total_score": 5.4},
+                    {"code": "000612", "name": "焦作万方", "bucket": "watch", "total_score": 5.8},
+                ],
+                metadata={"snapshot_date": "2026-04-10", "source": "unit_test"},
+            )
+
+        history = load_pool_action_history(snapshot_date="2026-04-10")
+        actions = {item["code"]: item["action"] for item in history["actions"]}
+
+        self.assertEqual(history["snapshot_date"], "2026-04-10")
+        self.assertEqual(actions["300389"], "promote")
+        self.assertEqual(actions["603063"], "demote")
+        self.assertEqual(actions["000612"], "keep")
+        self.assertEqual(history["action_counts"]["promote"], 1)
+        self.assertEqual(history["action_counts"]["demote"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
