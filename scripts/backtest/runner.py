@@ -12,6 +12,11 @@ from scripts.engine.composite import build_today_decision
 from scripts.state import audit_state, load_market_snapshot, load_pool_snapshot, load_trade_review
 from scripts.utils.config_loader import get_strategy
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+BACKTEST_SAMPLE_DIR = PROJECT_ROOT / "data" / "backtest" / "samples"
+BACKTEST_REPORT_DIR = PROJECT_ROOT / "data" / "backtest" / "reports"
+BACKTEST_INDEX_PATH = PROJECT_ROOT / "data" / "backtest" / "index.json"
+
 
 def _parse_date(value: str) -> date:
     try:
@@ -152,6 +157,184 @@ def _filter_closed_trades(trade_review: dict[str, Any], start: date, end: date) 
         for item in trade_review.get("closed_trades", [])
         if _date_in_range(str(item.get("exit_date", "")), start, end)
     ]
+
+
+def _build_history_samples(
+    trades: list[dict[str, Any]],
+    *,
+    scope: str,
+    start: str,
+    end: str,
+    source_mode: str,
+) -> dict[str, Any]:
+    generated_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    items = []
+    for trade in trades:
+        items.append({
+            "code": str(trade.get("code", "")).strip(),
+            "name": str(trade.get("name", "")).strip(),
+            "entry_date": str(trade.get("entry_date", "")).strip(),
+            "exit_date": str(trade.get("exit_date", "")).strip(),
+            "entry_price": _safe_float(trade.get("entry_price"), 0.0),
+            "exit_price": _safe_float(trade.get("exit_price"), 0.0),
+            "realized_pnl": _safe_float(trade.get("realized_pnl"), 0.0),
+            "mfe_pct": trade.get("mfe_pct"),
+            "mae_pct": trade.get("mae_pct"),
+            "excursion_source": trade.get("excursion_source", "proxy_market_history"),
+            "exit_reason_codes": list(trade.get("exit_reason_codes", [])),
+        })
+    return {
+        "scope": scope,
+        "start": start,
+        "end": end,
+        "source_mode": source_mode,
+        "generated_at": generated_at,
+        "sample_count": len(items),
+        "samples": items,
+    }
+
+
+def _persist_history_samples(payload: dict[str, Any]) -> str:
+    BACKTEST_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+    scope = str(payload.get("scope", "unknown")).strip() or "unknown"
+    start = str(payload.get("start", "")).strip() or "unknown"
+    end = str(payload.get("end", "")).strip() or "unknown"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = BACKTEST_SAMPLE_DIR / f"{scope}_{start}_{end}_{stamp}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def _build_artifacts(result_path: str, report_path: str, sample_path: str) -> list[dict[str, str]]:
+    artifacts = []
+    if report_path:
+        artifacts.append({"type": "report", "path": report_path})
+    if result_path:
+        artifacts.append({"type": "result", "path": result_path})
+    if sample_path:
+        artifacts.append({"type": "sample_store", "path": sample_path})
+    return artifacts
+
+
+def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
+    parameters = payload.get("parameters", {}) or {}
+    score_summary = payload.get("score_summary", {}) or {}
+    risk_summary = payload.get("risk_summary", {}) or {}
+    sample_store = payload.get("sample_store", {}) or {}
+    lines = [
+        f"# Backtest {action}",
+        "",
+        "## Summary",
+        "",
+        f"- Status: {payload.get('status', 'ok')}",
+        f"- Scope: {parameters.get('scope', '')}",
+        f"- Window: {parameters.get('start', '')} -> {parameters.get('end', '')}",
+        f"- Engine: {parameters.get('engine_mode', '')}",
+        f"- Source: {parameters.get('source_mode', '')}",
+        f"- Sample Count: {payload.get('sample_count', 0)}",
+        "",
+        "## Score",
+        "",
+        f"- Total Realized PnL: {score_summary.get('total_realized_pnl', 0)}",
+    ]
+
+    if "win_rate" in score_summary:
+        lines.append(f"- Win Rate: {score_summary.get('win_rate', 0)}")
+    if "mean_win_rate" in score_summary:
+        lines.append(f"- Mean Win Rate: {score_summary.get('mean_win_rate', 0)}")
+    if "selected_parameters" in payload:
+        lines.extend([
+            "",
+            "## Selected Parameters",
+            "",
+            f"- Buy Threshold: {(payload.get('selected_parameters', {}) or {}).get('buy_threshold', '')}",
+            f"- Stop Loss: {(payload.get('selected_parameters', {}) or {}).get('stop_loss', '')}",
+            f"- Take Profit: {(payload.get('selected_parameters', {}) or {}).get('take_profit', '')}",
+        ])
+    elif "selected_parameters" in score_summary:
+        lines.extend([
+            "",
+            "## Selected Parameters",
+            "",
+            f"- Buy Threshold: {(score_summary.get('selected_parameters', {}) or {}).get('buy_threshold', '')}",
+            f"- Stop Loss: {(score_summary.get('selected_parameters', {}) or {}).get('stop_loss', '')}",
+            f"- Take Profit: {(score_summary.get('selected_parameters', {}) or {}).get('take_profit', '')}",
+        ])
+
+    lines.extend([
+        "",
+        "## Risk",
+        "",
+        f"- Risk State: {risk_summary.get('risk_state', risk_summary.get('worst_risk_state', ''))}",
+        f"- Pool Sync State: {risk_summary.get('pool_sync_state', risk_summary.get('worst_pool_sync_state', ''))}",
+        "",
+        "## Artifacts",
+        "",
+        f"- Sample Store Count: {sample_store.get('sample_count', 0)}",
+        f"- Sample Store Path: {sample_store.get('path', '')}",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _persist_backtest_outputs(action: str, payload: dict[str, Any]) -> tuple[str, str]:
+    BACKTEST_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    parameters = payload.get("parameters", {}) or {}
+    scope = str(parameters.get("scope", "unknown")).strip() or "unknown"
+    start = str(parameters.get("start", "")).strip() or "unknown"
+    end = str(parameters.get("end", "")).strip() or "unknown"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = f"{action}_{scope}_{start}_{end}_{stamp}"
+    result_path = BACKTEST_REPORT_DIR / f"{stem}.json"
+    report_path = BACKTEST_REPORT_DIR / f"{stem}.md"
+    report_path.write_text(_render_backtest_report(action, payload), encoding="utf-8")
+    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(result_path), str(report_path)
+
+
+def _update_backtest_index(action: str, payload: dict[str, Any], result_path: str, report_path: str, sample_path: str) -> None:
+    BACKTEST_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        items = json.loads(BACKTEST_INDEX_PATH.read_text(encoding="utf-8"))
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+    parameters = payload.get("parameters", {}) or {}
+    entry = {
+        "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "command": payload.get("command", "backtest"),
+        "action": action,
+        "status": payload.get("status", "ok"),
+        "scope": parameters.get("scope", ""),
+        "start": parameters.get("start", ""),
+        "end": parameters.get("end", ""),
+        "engine_mode": parameters.get("engine_mode", ""),
+        "source_mode": parameters.get("source_mode", ""),
+        "sample_count": payload.get("sample_count", 0),
+        "result_path": result_path,
+        "report_path": report_path,
+        "sample_store_path": sample_path,
+    }
+    items.insert(0, entry)
+    BACKTEST_INDEX_PATH.write_text(json.dumps(items[:200], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_backtest_history(*, limit: int = 10) -> dict[str, Any]:
+    try:
+        items = json.loads(BACKTEST_INDEX_PATH.read_text(encoding="utf-8"))
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+    normalized_limit = max(1, int(limit or 10))
+    return {
+        "command": "backtest",
+        "action": "history",
+        "status": "ok" if items else "warning",
+        "index_path": str(BACKTEST_INDEX_PATH),
+        "item_count": len(items[:normalized_limit]),
+        "items": items[:normalized_limit],
+    }
 
 
 def _trade_reason_codes(trade: dict[str, Any]) -> list[str]:
@@ -374,6 +557,18 @@ def run_backtest(
     )
     source_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(source_trades, params_grid, baseline)
+    sample_payload = _build_history_samples(
+        source_trades,
+        scope=inputs["scope"],
+        start=inputs["start"],
+        end=inputs["end"],
+        source_mode=inputs["source_mode"],
+    )
+    sample_store = {
+        "sample_count": sample_payload["sample_count"],
+        "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
+        "source": "proxy_market_history",
+    }
     score_summary = _summarize_score(inputs)
     risk_summary = _summarize_risk(inputs)
     score_summary.update({
@@ -390,7 +585,7 @@ def run_backtest(
     )
     if sample_count == 0:
         status = "warning" if status == "ok" else status
-    return {
+    result = {
         "command": "backtest",
         "action": "run",
         "status": status,
@@ -409,7 +604,14 @@ def run_backtest(
         "state_fields": _state_fields(inputs),
         "selected_parameters": selected_params,
         "parameter_rankings": rankings[:10],
+        "sample_store": sample_store,
     }
+    result_path, report_path = _persist_backtest_outputs("run", result)
+    result["result_path"] = result_path
+    result["report_path"] = report_path
+    result["artifacts"] = _build_artifacts(result_path, report_path, sample_store.get("path", ""))
+    _update_backtest_index("run", result, result_path, report_path, sample_store.get("path", ""))
+    return result
 
 
 def run_parameter_sweep(
@@ -433,7 +635,14 @@ def run_parameter_sweep(
     )
     trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(trades, params_grid, baseline)
-    return {
+    sample_payload = _build_history_samples(
+        trades,
+        scope=inputs["scope"],
+        start=inputs["start"],
+        end=inputs["end"],
+        source_mode=inputs["source_mode"],
+    )
+    result = {
         "command": "backtest",
         "action": "sweep",
         "status": "ok" if rankings else "warning",
@@ -451,7 +660,18 @@ def run_parameter_sweep(
         "selected_parameters": selected_params,
         "ranking_count": len(rankings),
         "rankings": rankings[:20],
+        "sample_store": {
+            "sample_count": sample_payload["sample_count"],
+            "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
+            "source": "proxy_market_history",
+        },
     }
+    result_path, report_path = _persist_backtest_outputs("sweep", result)
+    result["result_path"] = result_path
+    result["report_path"] = report_path
+    result["artifacts"] = _build_artifacts(result_path, report_path, result["sample_store"].get("path", ""))
+    _update_backtest_index("sweep", result, result_path, report_path, result["sample_store"].get("path", ""))
+    return result
 
 
 def _walk_forward_windows(start: date, end: date, folds: int) -> list[dict[str, str]]:
@@ -540,6 +760,13 @@ def run_walk_forward(
         })
 
     total_sample_count = sum(item["sample_count"] for item in fold_reports)
+    sample_payload = _build_history_samples(
+        all_trades,
+        scope=inputs["scope"],
+        start=inputs["start"],
+        end=inputs["end"],
+        source_mode=inputs["source_mode"],
+    )
     score_summary = {
         "fold_count": len(fold_reports),
         "mean_win_rate": round(
@@ -560,7 +787,7 @@ def run_walk_forward(
     overall_status = max((item["status"] for item in fold_reports), key=_severity_rank, default="ok")
     if total_sample_count == 0 and overall_status == "ok":
         overall_status = "warning"
-    return {
+    result = {
         "command": "backtest",
         "action": "walk-forward",
         "status": overall_status,
@@ -578,4 +805,15 @@ def run_walk_forward(
         "risk_summary": risk_summary,
         "state_fields": _state_fields(inputs),
         "folds": fold_reports,
+        "sample_store": {
+            "sample_count": sample_payload["sample_count"],
+            "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
+            "source": "proxy_market_history",
+        },
     }
+    result_path, report_path = _persist_backtest_outputs("walk_forward", result)
+    result["result_path"] = result_path
+    result["report_path"] = report_path
+    result["artifacts"] = _build_artifacts(result_path, report_path, result["sample_store"].get("path", ""))
+    _update_backtest_index("walk_forward", result, result_path, report_path, result["sample_store"].get("path", ""))
+    return result

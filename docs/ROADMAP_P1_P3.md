@@ -197,14 +197,15 @@
 
 - 已有 `bin/trade backtest run`、`bin/trade backtest sweep` 和 `bin/trade backtest walk-forward`
 - 当前可做 proxy 级 parameter sweep，并在 walk-forward 中执行训练窗口选参 + 测试窗口评估
+- 已能落盘历史样本、JSON 结果和 Markdown 报表到 `data/backtest/`
 
 待办 backlog：
 
-1. 历史样本数据组织
-2. 评分重放与策略回测引擎
-3. parameter sweep
-4. walk-forward 验证
-5. 回测结果持久化与报告
+1. 评分重放与策略回测引擎
+2. 真实历史行情驱动的 MFE / MAE 回放
+3. 参数 sweep 扩展到评分权重层
+4. walk-forward 多 fold 报表强化
+5. 回测结果持久化索引与对比视图
 
 验收标准：
 

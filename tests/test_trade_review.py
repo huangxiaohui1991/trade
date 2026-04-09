@@ -83,6 +83,9 @@ class TradeReviewTests(unittest.TestCase):
         self.assertEqual(trade["realized_pnl"], 2200)
         self.assertIn("risk", trade["rule_tags"])
         self.assertIn("entry", trade["rule_tags"])
+        self.assertIsNotNone(trade["mfe_pct"])
+        self.assertIsNotNone(trade["mae_pct"])
+        self.assertEqual(review["mfe_mae_status"], "proxy_market_history")
 
     def test_load_trade_review_adds_summary_and_weekly_section(self):
         from scripts.pipeline.weekly_review import _build_weekly_report
@@ -158,6 +161,8 @@ class TradeReviewTests(unittest.TestCase):
         self.assertEqual(summary["avg_win"], 2200.0)
         self.assertEqual(summary["avg_loss"], -500.0)
         self.assertEqual(summary["rule_break_count"], 1)
+        self.assertIsNotNone(summary["avg_mfe_pct"])
+        self.assertIsNotNone(summary["avg_mae_pct"])
 
         trades = {item["code"]: item for item in review["closed_trades"]}
         self.assertEqual(trades["300389"]["holding_days_bucket"], "0-3天")

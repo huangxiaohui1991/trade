@@ -14,5 +14,6 @@ data/cache/
 data/runs/
 data/locks/
 data/ledger/
+data/backtest/
 交易记录/
 每日快照/

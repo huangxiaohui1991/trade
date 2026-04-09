@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
-from scripts.backtest import run_backtest, run_parameter_sweep, run_walk_forward
+from scripts.backtest import list_backtest_history, run_backtest, run_parameter_sweep, run_walk_forward
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
 from scripts.pipeline.morning import run as run_morning
@@ -1177,6 +1177,8 @@ def main():
     backtest_walk.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
     backtest_walk.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
     backtest_walk.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_history = backtest_sub.add_parser("history")
+    backtest_history.add_argument("--limit", type=int, default=10, help="Number of historical backtest entries")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -1241,6 +1243,8 @@ def main():
                             stop_losses=args.stop_losses,
                             take_profits=args.take_profits,
                         )
+                    elif args.action == "history":
+                        result = list_backtest_history(limit=args.limit)
                     else:
                         result = run_walk_forward(
                             start=args.start,
@@ -1300,6 +1304,8 @@ def main():
                     stop_losses=args.stop_losses,
                     take_profits=args.take_profits,
                 )
+            elif args.action == "history":
+                result = list_backtest_history(limit=args.limit)
             else:
                 result = run_walk_forward(
                     start=args.start,
@@ -1361,12 +1367,18 @@ def main():
                 print(f"alerts: {result.get('alert_count', 0)} status={result.get('status', 'ok')}")
         elif result.get("command") == "backtest":
             print(f"backtest {result.get('action')}: {result.get('status', 'ok')}")
-            print(f"sample_count: {result.get('sample_count', 0)}")
-            print(
-                "score_summary: "
-                f"win_rate={result.get('score_summary', {}).get('win_rate', result.get('score_summary', {}).get('mean_win_rate', 0))} "
-                f"pnl={result.get('score_summary', {}).get('total_realized_pnl', 0)}"
-            )
+            if result.get("action") == "history":
+                print(f"item_count: {result.get('item_count', 0)}")
+                print(f"index_path: {result.get('index_path', '')}")
+            else:
+                print(f"sample_count: {result.get('sample_count', 0)}")
+                print(
+                    "score_summary: "
+                    f"win_rate={result.get('score_summary', {}).get('win_rate', result.get('score_summary', {}).get('mean_win_rate', 0))} "
+                    f"pnl={result.get('score_summary', {}).get('total_realized_pnl', 0)}"
+                )
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")

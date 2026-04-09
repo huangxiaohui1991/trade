@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ class BacktestRunnerTests(unittest.TestCase):
     def test_run_backtest_summarizes_structured_inputs(self):
         from scripts.backtest import run_backtest
 
-        with mock.patch("scripts.backtest.runner.load_trade_review", return_value={
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("scripts.backtest.runner.BACKTEST_SAMPLE_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_REPORT_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", Path(tmpdir) / "index.json"), mock.patch("scripts.backtest.runner.load_trade_review", return_value={
             "scope": "cn_a_system",
             "window": 30,
             "closed_trade_count": 2,
@@ -71,6 +72,11 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(result["selected_parameters"]["buy_threshold"], 7.0)
         self.assertEqual(result["score_summary"]["selected_summary"]["closed_trade_count"], 1)
         self.assertGreater(len(result["parameter_rankings"]), 0)
+        self.assertEqual(result["sample_store"]["sample_count"], 2)
+        self.assertTrue(result["sample_store"]["path"])
+        self.assertTrue(result["result_path"])
+        self.assertTrue(result["report_path"])
+        self.assertEqual(len(result["artifacts"]), 3)
 
     def test_walk_forward_uses_fixture_input(self):
         from scripts.backtest import run_walk_forward
@@ -124,7 +130,8 @@ class BacktestRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path = Path(tmpdir) / "backtest_fixture.json"
             fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False), encoding="utf-8")
-            result = run_walk_forward("2026-04-01", "2026-04-09", folds=3, fixture=fixture_path)
+            with mock.patch("scripts.backtest.runner.BACKTEST_SAMPLE_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_REPORT_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", Path(tmpdir) / "index.json"):
+                result = run_walk_forward("2026-04-01", "2026-04-09", folds=3, fixture=fixture_path)
 
         self.assertEqual(result["command"], "backtest")
         self.assertEqual(result["action"], "walk-forward")
@@ -137,6 +144,10 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertIn("training_summary", result["folds"][0]["score_summary"])
         self.assertIn("evaluation_summary", result["folds"][0]["score_summary"])
         self.assertIn("selected_parameters", result["folds"][0]["score_summary"])
+        self.assertEqual(result["sample_store"]["sample_count"], 3)
+        self.assertTrue(result["sample_store"]["path"])
+        self.assertTrue(result["result_path"])
+        self.assertTrue(result["report_path"])
 
     def test_run_parameter_sweep_ranks_candidates(self):
         from scripts.backtest import run_parameter_sweep
@@ -182,19 +193,41 @@ class BacktestRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path = Path(tmpdir) / "backtest_fixture.json"
             fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False), encoding="utf-8")
-            result = run_parameter_sweep(
-                "2026-04-01",
-                "2026-04-09",
-                fixture=fixture_path,
-                buy_thresholds="6,7,8",
-                stop_losses="0.03,0.04",
-                take_profits="0.15,0.2",
-            )
+            with mock.patch("scripts.backtest.runner.BACKTEST_SAMPLE_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_REPORT_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", Path(tmpdir) / "index.json"):
+                result = run_parameter_sweep(
+                    "2026-04-01",
+                    "2026-04-09",
+                    fixture=fixture_path,
+                    buy_thresholds="6,7,8",
+                    stop_losses="0.03,0.04",
+                    take_profits="0.15,0.2",
+                )
 
         self.assertEqual(result["action"], "sweep")
         self.assertEqual(result["ranking_count"], 12)
         self.assertGreater(len(result["rankings"]), 0)
         self.assertIn("buy_threshold", result["selected_parameters"])
+        self.assertEqual(result["sample_store"]["sample_count"], 2)
+        self.assertTrue(result["sample_store"]["path"])
+        self.assertTrue(result["result_path"])
+        self.assertTrue(result["report_path"])
+
+    def test_list_backtest_history_reads_latest_entries(self):
+        from scripts.backtest import list_backtest_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir) / "index.json"
+            index_path.write_text(json.dumps([
+                {"action": "walk_forward", "status": "warning", "created_at": "2026-04-09T23:00:00"},
+                {"action": "run", "status": "ok", "created_at": "2026-04-09T22:00:00"},
+            ], ensure_ascii=False), encoding="utf-8")
+            with mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", index_path):
+                result = list_backtest_history(limit=1)
+
+        self.assertEqual(result["command"], "backtest")
+        self.assertEqual(result["action"], "history")
+        self.assertEqual(result["item_count"], 1)
+        self.assertEqual(result["items"][0]["action"], "walk_forward")
 
     def test_cli_backtest_commands_parse_and_dispatch(self):
         import scripts.cli.trade as trade
@@ -230,6 +263,14 @@ class BacktestRunnerTests(unittest.TestCase):
             "selected_parameters": {"buy_threshold": 6.0, "stop_loss": 0.03, "take_profit": 0.2},
             "ranking_count": 4,
             "rankings": [],
+        }
+        history_payload = {
+            "command": "backtest",
+            "action": "history",
+            "status": "ok",
+            "index_path": "/tmp/index.json",
+            "item_count": 1,
+            "items": [{"action": "run", "status": "ok"}],
         }
 
         stdout = io.StringIO()
@@ -303,6 +344,28 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(payload["command"], "backtest")
         self.assertEqual(payload["action"], "sweep")
         sweep_mock.assert_called_once()
+
+        stdout = io.StringIO()
+        with mock.patch.object(trade, "run_backtest", return_value=run_payload), mock.patch.object(
+            trade,
+            "run_walk_forward",
+            return_value=walk_payload,
+        ), mock.patch.object(
+            trade,
+            "run_parameter_sweep",
+            return_value=sweep_payload,
+        ), mock.patch.object(
+            trade,
+            "list_backtest_history",
+            return_value=history_payload,
+        ) as history_mock, mock.patch.object(trade.sys, "argv", ["trade", "--json", "backtest", "history", "--limit", "5"]):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["command"], "backtest")
+        self.assertEqual(payload["action"], "history")
+        history_mock.assert_called_once()
         self.assertEqual(sweep_mock.call_args.kwargs["buy_thresholds"], "6,7,8")
 
 
