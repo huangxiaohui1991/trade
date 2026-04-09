@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 miaoxiang/
 筛选结果/
+cron.log
+交易记录/
+每日快照/
