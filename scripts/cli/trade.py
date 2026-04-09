@@ -619,12 +619,6 @@ def orchestrate_workflow(name: str, args) -> dict:
         "artifacts": [],
     }
 
-    doctor_result = doctor()
-    payload["doctor"] = {
-        "status": doctor_result.get("status", "error"),
-        "hard_fail": doctor_result.get("hard_fail", []),
-        "warning": doctor_result.get("warning", []),
-    }
     try:
         state_sync = _preflight_state_sync("all")
         payload["state_sync"] = state_sync
@@ -657,6 +651,12 @@ def orchestrate_workflow(name: str, args) -> dict:
         payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
         return sanitize_for_json(payload)
 
+    doctor_result = doctor()
+    payload["doctor"] = {
+        "status": doctor_result.get("status", "error"),
+        "hard_fail": doctor_result.get("hard_fail", []),
+        "warning": doctor_result.get("warning", []),
+    }
     if doctor_result.get("status") == "error":
         payload["status"] = "blocked"
         payload["error"] = "doctor_failed"
