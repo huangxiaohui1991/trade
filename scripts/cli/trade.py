@@ -37,6 +37,7 @@ from scripts.pipeline.weekly_review import run as run_weekly
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_strategy
 from scripts.utils.obsidian import ObsidianVault
+from scripts.utils.pool_manager import POOL_STATE_PATH, load_pool_state
 from scripts.utils.run_context import (
     LOCK_DIR,
     RUNS_DIR,
@@ -62,6 +63,15 @@ PIPELINES = {
 
 PIPELINE_ALIASES = {
     "stock_screener": "screener",
+}
+
+WORKFLOWS = {
+    "morning_brief": ["status", "morning"],
+    "noon_check": ["status", "noon"],
+    "close_review": ["status", "evening", "scoring"],
+    "weekly_review": ["status", "weekly"],
+    "tracked_scan": ["status", "screener"],
+    "market_scan": ["status", "screener"],
 }
 
 
@@ -308,10 +318,51 @@ def _finalize_run(payload: dict, started: datetime) -> dict:
     return sanitize_for_json(payload)
 
 
+def _artifact_paths_from_run(run_result: dict) -> list:
+    artifacts = []
+    details = run_result.get("details", {}) if isinstance(run_result, dict) else {}
+    result = run_result.get("result", {}) if isinstance(run_result, dict) else {}
+
+    for key in [
+        "report_path",
+        "review_path",
+        "market_watch_path",
+        "suggestion_path",
+        "pool_state_path",
+        "daily_state_path",
+        "result_path",
+    ]:
+        value = details.get(key)
+        if value:
+            artifacts.append({"type": key, "path": value})
+
+    if isinstance(result, dict):
+        for key in ["review_path", "tomorrow_date"]:
+            value = result.get(key)
+            if value:
+                artifacts.append({"type": key, "path": value})
+
+    if run_result.get("result_path"):
+        artifacts.append({"type": "run_result", "path": run_result["result_path"]})
+    if run_result.get("daily_state_path"):
+        artifacts.append({"type": "daily_state", "path": run_result["daily_state_path"]})
+
+    deduped = []
+    seen = set()
+    for item in artifacts:
+        path = item.get("path", "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(item)
+    return deduped
+
+
 def status_today() -> dict:
     today = load_daily_state()
     strategy = get_strategy()
     today_decision = build_today_decision(strategy=strategy)
+    pool_state = load_pool_state()
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -329,7 +380,98 @@ def status_today() -> dict:
         "pipelines": normalized,
         "updated_at": today.get("updated_at", ""),
         "today_decision": today_decision,
+        "pool_management": {
+            "updated_at": pool_state.get("updated_at", ""),
+            "last_eval_date": pool_state.get("last_eval_date", ""),
+            "summary": pool_state.get("last_summary", {}),
+            "state_path": str(POOL_STATE_PATH),
+        },
     }
+
+
+def orchestrate_workflow(name: str, args) -> dict:
+    started = datetime.now()
+    workflow = WORKFLOWS[name]
+    payload = {
+        "command": "orchestrate",
+        "workflow": name,
+        "status": "success",
+        "started_at": started.strftime("%Y-%m-%dT%H:%M:%S"),
+        "retryable": False,
+        "steps": [],
+        "artifacts": [],
+    }
+
+    doctor_result = doctor()
+    payload["doctor"] = {
+        "status": doctor_result.get("status", "error"),
+        "hard_fail": doctor_result.get("hard_fail", []),
+        "warning": doctor_result.get("warning", []),
+    }
+    if doctor_result.get("status") == "error":
+        payload["status"] = "blocked"
+        payload["error"] = "doctor_failed"
+        payload["steps"].append({"step": "doctor", "status": "error"})
+        finished = datetime.now()
+        payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+        payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+        return sanitize_for_json(payload)
+
+    status_before = status_today()
+    payload["status_before"] = {
+        "today_decision": status_before.get("today_decision", {}),
+        "pool_management": status_before.get("pool_management", {}),
+    }
+    payload["steps"].append({"step": "status_before", "status": "success"})
+
+    run_targets = workflow[1:]
+    for target in run_targets:
+        if target == "screener":
+            run_args = argparse.Namespace(
+                command="run",
+                pipeline="screener",
+                pool=getattr(args, "pool", "all"),
+                universe="market" if name == "market_scan" else getattr(args, "universe", "tracked"),
+                json=getattr(args, "json", False),
+            )
+        else:
+            run_args = argparse.Namespace(
+                command="run",
+                pipeline=target,
+                pool="all",
+                universe="tracked",
+                json=getattr(args, "json", False),
+            )
+
+        step_result = run_pipeline(target, run_args)
+        payload["steps"].append({
+            "step": target,
+            "status": step_result.get("status", "error"),
+            "run_id": step_result.get("run_id", ""),
+            "result_path": step_result.get("result_path", ""),
+        })
+        payload["artifacts"].extend(_artifact_paths_from_run(step_result))
+
+        if step_result.get("status") in {"error", "blocked"}:
+            payload["status"] = step_result.get("status", "error")
+            payload["error"] = step_result.get("error", f"{target}_failed")
+            payload["failed_step"] = target
+            break
+        if step_result.get("status") == "warning" and payload["status"] == "success":
+            payload["status"] = "warning"
+
+    status_after = status_today()
+    payload["status_after"] = {
+        "today_decision": status_after.get("today_decision", {}),
+        "pool_management": status_after.get("pool_management", {}),
+        "pipelines": status_after.get("pipelines", {}),
+    }
+    payload["steps"].append({"step": "status_after", "status": "success"})
+
+    finished = datetime.now()
+    payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+    payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+    return sanitize_for_json(payload)
 
 
 def main():
@@ -350,6 +492,14 @@ def main():
     status_parser = sub.add_parser("status", help="Show current status")
     status_parser.add_argument("target", choices=["today"])
 
+    orch_parser = sub.add_parser("orchestrate", help="Run shared workflow for Hermes/OpenClaw")
+    orch_parser.add_argument(
+        "workflow",
+        choices=sorted(WORKFLOWS.keys()),
+    )
+    orch_parser.add_argument("--pool", choices=["core", "watch", "all"], default="all")
+    orch_parser.add_argument("--universe", choices=["tracked", "market"], default="tracked")
+
     args = parser.parse_args()
 
     if args.json:
@@ -364,6 +514,8 @@ def main():
                     result = doctor()
                 elif args.command == "run":
                     result = run_pipeline(args.pipeline, args)
+                elif args.command == "orchestrate":
+                    result = orchestrate_workflow(args.workflow, args)
                 else:
                     result = status_today()
         finally:
@@ -383,6 +535,8 @@ def main():
             result = doctor()
         elif args.command == "run":
             result = run_pipeline(args.pipeline, args)
+        elif args.command == "orchestrate":
+            result = orchestrate_workflow(args.workflow, args)
         else:
             result = status_today()
 
@@ -399,6 +553,9 @@ def main():
             print(f"status today: {result.get('date')}")
             print(f"today_decision: {result.get('today_decision', {}).get('decision')}")
             print("pipelines:", ", ".join(sorted(result.get("pipelines", {}).keys())))
+        elif result.get("command") == "orchestrate":
+            print(f"workflow {result['workflow']}: {result['status']}")
+            print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")
         else:
             print(f"run {result['pipeline']}: {result['status']}")
             print(f"run_id: {result['run_id']}")

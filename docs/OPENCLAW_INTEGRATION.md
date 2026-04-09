@@ -2,7 +2,7 @@
 
 ## 定位
 
-本仓库提供稳定的交易系统内核，`openclaw` 作为外层 orchestrator，不直接 import 仓库内部模块。
+本仓库提供稳定的交易系统内核，`openclaw/hermes` 作为外层 orchestrator，不直接 import 仓库内部模块。
 
 推荐分层：
 
@@ -16,6 +16,9 @@
 ```bash
 bin/trade doctor --json
 bin/trade status today --json
+bin/trade orchestrate morning_brief --json
+bin/trade orchestrate close_review --json
+bin/trade orchestrate weekly_review --json
 bin/trade run morning --json
 bin/trade run noon --json
 bin/trade run evening --json
@@ -123,33 +126,70 @@ bin/trade run screener --universe market --pool all --json
     "market_signal": "GREEN|YELLOW|RED|CLEAR",
     "risk": {},
     "reasons": []
+  },
+  "pool_management": {
+    "summary": {
+      "promote_to_core": 0,
+      "keep_watch": 0,
+      "add_to_watch": 0,
+      "demote_from_core": 0,
+      "remove_or_avoid": 0
+    }
   }
 }
 ```
 
-## 推荐的 OpenClaw Skill 编排
+### 4. `orchestrate <workflow>`
+
+推荐给 `openclaw/hermes` 直接调用，减少外层自己编排多步命令。
+
+支持：
+- `morning_brief`
+- `noon_check`
+- `close_review`
+- `weekly_review`
+- `tracked_scan`
+- `market_scan`
+
+返回关键字段：
+
+```json
+{
+  "command": "orchestrate",
+  "workflow": "close_review",
+  "status": "success|warning|error|blocked",
+  "doctor": {},
+  "steps": [],
+  "artifacts": [],
+  "status_before": {},
+  "status_after": {}
+}
+```
+
+建议：
+- Hermes 定时任务优先调用 `orchestrate`
+- OpenClaw 技能也优先调用 `orchestrate`
+- 只有在需要单独重跑某一步时，才直接调用 `run <pipeline>`
+
+## 推荐的 openclaw/hermes Skill 编排
 
 ### 盘前
 
-1. `trade doctor --json`
-2. `trade status today --json`
-3. 如果 `doctor.status != error`，执行 `trade run morning --json`
-4. 读取 `today_decision`
-5. 把 `decision + market_signal + weekly_remaining` 转成用户可读摘要
+1. `trade orchestrate morning_brief --json`
+2. 读取 `status_after.today_decision`
+3. 读取 `status_after.pool_management`
+4. 把 `decision + market_signal + weekly_remaining + 池子调整建议数` 转成用户可读摘要
 
 ### 收盘
 
-1. `trade doctor --json`
-2. `trade run evening --json`
-3. `trade run scoring --json`
-4. 如需全市场扫描，再执行 `trade run screener --universe market --pool all --json`
-5. 汇总 `result_path` 指向的落盘文件
+1. `trade orchestrate close_review --json`
+2. 如需全市场扫描，再执行 `trade orchestrate market_scan --json`
+3. 汇总 `artifacts` 和 `status_after` 指向的落盘文件与状态摘要
 
 ### 周报
 
-1. `trade doctor --json`
-2. `trade run weekly --json`
-3. 用 `review_path` 和 `daily_state_path` 生成总结
+1. `trade orchestrate weekly_review --json`
+2. 用 `artifacts` 和 `status_after` 生成总结
 
 ## 工程建议
 

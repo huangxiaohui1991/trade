@@ -36,6 +36,7 @@ from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.pool_manager import evaluate_pool_actions
 from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.stock_screener")
@@ -278,53 +279,33 @@ def _write_market_scan_watchlist(results: list) -> str:
     return str(path)
 
 
-def _build_pool_suggestions(results: list, stocks_cfg: dict) -> dict:
-    """根据当前评分结果给出核心池/观察池调整建议。"""
-    core_codes = {str(item.get("code", "")).strip() for item in stocks_cfg.get("core_pool", [])}
-    watch_codes = {str(item.get("code", "")).strip() for item in stocks_cfg.get("watch_pool", [])}
-
-    suggestions = {
-        "promote_to_core": [],
-        "keep_watch": [],
-        "demote_from_core": [],
-        "remove_or_avoid": [],
-    }
-    for row in results:
-        code = str(row.get("code", "")).strip()
-        name = str(row.get("name", "")).strip()
-        score = float(row.get("total_score", 0) or 0)
-        veto = bool(row.get("veto_triggered", False))
-        entry = {
-            "code": code,
-            "name": name,
-            "score": round(score, 1),
-            "reason": "veto" if veto else get_recommendation(row),
-        }
-        if code in core_codes and (veto or score < 5):
-            suggestions["demote_from_core"].append(entry)
-        elif code in watch_codes and not veto and score >= 7:
-            suggestions["promote_to_core"].append(entry)
-        elif not veto and score >= 5:
-            suggestions["keep_watch"].append(entry)
-        else:
-            suggestions["remove_or_avoid"].append(entry)
-    return suggestions
-
-
-def _write_pool_suggestions(suggestions: dict) -> str:
+def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
     vault = ObsidianVault()
     report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
     report_dir.mkdir(parents=True, exist_ok=True)
     path = report_dir / f"池子调整建议_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    meta = meta or {}
+    rules = meta.get("rules", {})
 
     sections = [
         ("建议晋级核心池", suggestions.get("promote_to_core", [])),
         ("建议保留观察", suggestions.get("keep_watch", [])),
+        ("建议加入观察池", suggestions.get("add_to_watch", [])),
         ("建议降级移出核心池", suggestions.get("demote_from_core", [])),
         ("建议规避", suggestions.get("remove_or_avoid", [])),
     ]
 
     lines = [f"# 池子调整建议 — {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+    if rules:
+        lines.extend([
+            "## 当前规则",
+            "",
+            f"- 晋级核心池：连续 {rules.get('promote_streak_days', 0)} 天分数 >= {rules.get('promote_min_score', 0):.1f}",
+            f"- 加入观察池：连续 {rules.get('add_to_watch_streak_days', 0)} 天分数 >= {rules.get('watch_min_score', 0):.1f}",
+            f"- 降级核心池：连续 {rules.get('demote_streak_days', 0)} 天分数 < {rules.get('demote_max_score', 0):.1f}",
+            f"- 移出观察池：连续 {rules.get('remove_streak_days', 0)} 天分数 < {rules.get('remove_max_score', 0):.1f}",
+            "",
+        ])
     for title, rows in sections:
         lines.extend([f"## {title}", "", "| 股票 | 代码 | 分数 | 原因 |", "|------|------|------|------|"])
         if rows:
@@ -606,11 +587,11 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         scored = batch_score(candidates)
         actionable = [r for r in scored if not r.get("veto_triggered", False)]
         today_decision = build_today_decision(strategy_cfg)
-        pool_suggestions = _build_pool_suggestions(scored, stocks_cfg)
+        pool_suggestions, pool_meta = evaluate_pool_actions(scored, stocks_cfg, strategy_cfg)
 
         _logger.info(">> 写入筛选报告...")
         report_path = _write_screening_result(scored, pool_name, source)
-        suggestion_path = _write_pool_suggestions(pool_suggestions)
+        suggestion_path = _write_pool_suggestions(pool_suggestions, pool_meta)
 
         _logger.info(
             f"[SCREENER] 完成: {len(scored)} 只评分, "
@@ -657,6 +638,8 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                     key: len(value)
                     for key, value in pool_suggestions.items()
                 },
+                "pool_state_path": pool_meta.get("state_path", ""),
+                "pool_rules": pool_meta.get("rules", {}),
             },
             today_str,
         )

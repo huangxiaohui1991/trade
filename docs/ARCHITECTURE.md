@@ -1,7 +1,7 @@
 # A股交易系统 · Hermes 原生架构方案
 
 > 分支：`feature/agent-native`
-> 版本：v2.3（统一 CLI / 运行协议版）
+> 版本：v2.4（统一 CLI / 运行协议 + 池子状态版）
 > 日期：2026-04-09
 
 ---
@@ -122,6 +122,7 @@ trade/
 │   └── utils/
 │       ├── cache.py            # 本地缓存
 │       ├── obsidian.py         # Obsidian 读写
+│       ├── pool_manager.py     # 池子连续评分状态 / 晋级降级建议
 │       ├── discord_push.py     # Discord 推送
 │       ├── config_loader.py    # 配置读取
 │       ├── runtime_state.py    # 每日运行状态
@@ -210,6 +211,21 @@ screening:
 capital: 450286
 ```
 
+新增池子状态规则：
+
+```yaml
+pool_management:
+  watch_min_score: 5
+  promote_min_score: 7
+  promote_streak_days: 2
+  demote_max_score: 5
+  demote_streak_days: 2
+  remove_max_score: 4
+  remove_streak_days: 2
+  veto_immediate_demote: true
+  add_to_watch_streak_days: 1
+```
+
 ### config/stocks.yaml
 
 ```yaml
@@ -246,9 +262,14 @@ blacklist:
 ```bash
 bin/trade doctor --json
 bin/trade status today --json
+bin/trade orchestrate morning_brief --json
+bin/trade orchestrate close_review --json
 bin/trade run morning --json
 bin/trade run screener --universe market --pool all --json
 ```
+
+`status today` 除了 `today_decision` 之外，还会返回 `pool_management.summary`，方便 OpenClaw 直接消费。
+Hermes 与 OpenClaw 推荐优先共用 `orchestrate` 工作流，而不是各自手拼多步命令。
 
 ---
 
@@ -490,7 +511,7 @@ market 模式：
 - `sentiment` 在 `hermes_cron.sh` 中仍是 placeholder，尚未独立上线
 - 全市场扫描已有缓存回退，但评分阶段仍依赖外部接口稳定性
 - 目前自动化定位仍是“辅助决策 + 影子交易验证”，不是直连实盘下单
-- `openclaw` 应消费 CLI JSON，不直接依赖内部 Python 模块
+- `openclaw/hermes` 应消费 CLI JSON，不直接依赖内部 Python 模块
 
 ---
 

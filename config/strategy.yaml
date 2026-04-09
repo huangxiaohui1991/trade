@@ -52,4 +52,15 @@ screening:
     max_pe_ttm: 40
     exclude_st: true
 
+pool_management:
+  watch_min_score: 5
+  promote_min_score: 7
+  promote_streak_days: 2
+  demote_max_score: 5
+  demote_streak_days: 2
+  remove_max_score: 4
+  remove_streak_days: 2
+  veto_immediate_demote: true
+  add_to_watch_streak_days: 1
+
 capital: 450286

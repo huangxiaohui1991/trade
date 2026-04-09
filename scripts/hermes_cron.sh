@@ -74,15 +74,15 @@ fi
 case "$MODE" in
     morning)
         echo ">> 盘前流程（8:25）"
-        "$PYTHON" -m scripts.cli.trade --json run morning 2>&1
+        "$PYTHON" -m scripts.cli.trade --json orchestrate morning_brief 2>&1
         ;;
     noon)
         echo ">> 午休检查（11:55）"
-        "$PYTHON" -m scripts.cli.trade --json run noon 2>&1
+        "$PYTHON" -m scripts.cli.trade --json orchestrate noon_check 2>&1
         ;;
     evening)
         echo ">> 收盘流程（15:35）"
-        "$PYTHON" -m scripts.cli.trade --json run evening 2>&1
+        "$PYTHON" -m scripts.cli.trade --json orchestrate close_review 2>&1
         ;;
     scoring)
         echo ">> 核心池评分（15:40）"
@@ -90,7 +90,7 @@ case "$MODE" in
         ;;
     weekly)
         echo ">> 周报（周日20:00）"
-        "$PYTHON" -m scripts.cli.trade --json run weekly 2>&1
+        "$PYTHON" -m scripts.cli.trade --json orchestrate weekly_review 2>&1
         ;;
     sentiment)
         echo ">> 舆情监控（TrendRadar）"
