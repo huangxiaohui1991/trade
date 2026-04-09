@@ -441,6 +441,7 @@ def run() -> dict:
             "market_data": market_data,
             "positions": positions,
             "core_pool": core_items,
+            "news": news_items,
             "weekly_bought": weekly_bought,
             "discord_data": discord_data,
         }
