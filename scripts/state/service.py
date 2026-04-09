@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - same behavior as config_loader
 from scripts.utils.config_loader import clear_config_cache, get_stocks
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
-from scripts.utils.parser import parse_md_table
+from scripts.utils.parser import parse_md_table, parse_user_reply
 from scripts.mx.mx_moni import MXMoni
 
 LOGGER = get_logger("state.service")
@@ -153,6 +153,20 @@ CREATE TABLE IF NOT EXISTS pool_entries (
   added_date TEXT DEFAULT '',
   snapshot_date TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  metadata_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS pool_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT DEFAULT '',
+  action TEXT NOT NULL,
+  previous_bucket TEXT DEFAULT '',
+  current_bucket TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  reason_text TEXT DEFAULT '',
   metadata_json TEXT DEFAULT '{}'
 );
 
@@ -1300,6 +1314,233 @@ def load_order_snapshot(scope: str | None = None, status: str | None = None) -> 
     }
 
 
+def _condition_type_matches(order: dict, reply_type: str) -> bool:
+    reply_text = str(reply_type or "").strip()
+    if not reply_text:
+        return True
+    condition_type = str(order.get("condition_type", "")).strip().lower()
+    if reply_text == "止损":
+        return "stop" in condition_type
+    if reply_text == "止盈":
+        return "profit" in condition_type or condition_type.endswith("_tp")
+    return True
+
+
+def _order_matches_stock(order: dict, stock: str) -> bool:
+    target = str(stock or "").strip()
+    if not target:
+        return True
+    normalized_target = _normalize_code(target)
+    order_code = _normalize_code(order.get("code", ""))
+    order_name = str(order.get("name", "")).strip()
+    return target == order_name or normalized_target == order_code
+
+
+def _reply_stock_code(stock: str) -> str:
+    normalized = _normalize_code(stock)
+    return normalized if normalized.isdigit() else ""
+
+
+def _pending_condition_orders(scope: str = PAPER_SCOPE, conn: sqlite3.Connection | None = None) -> list[dict]:
+    orders = _order_rows(scope=scope, conn=conn)
+    result = []
+    for order in orders:
+        status = str(order.get("status", "")).strip()
+        confirm_status = str(order.get("confirm_status", "")).strip()
+        if not (
+            str(order.get("order_class", "")).strip() == "condition"
+            or str(order.get("condition_type", "")).strip()
+        ):
+            continue
+        if status in _ORDER_TERMINAL_STATUSES:
+            continue
+        if confirm_status in {"pending", "timed_out"} or status == "candidate":
+            result.append(order)
+    return result
+
+
+def pending_condition_order_items(scope: str = PAPER_SCOPE) -> list[dict]:
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        orders = _pending_condition_orders(scope=scope, conn=conn)
+
+    items = []
+    for order in orders:
+        condition_type = str(order.get("condition_type", "")).strip().lower()
+        order_type = "止盈" if ("profit" in condition_type or condition_type.endswith("_tp")) else "止损"
+        price = _safe_float(order.get("trigger_price", order.get("limit_price", 0.0)), 0.0)
+        items.append(
+            {
+                "external_id": order.get("external_id", ""),
+                "name": order.get("name", ""),
+                "code": order.get("code", ""),
+                "type": order_type,
+                "price": price,
+                "currency": "¥",
+                "status": str(order.get("confirm_status", "")).strip() or str(order.get("status", "")).strip(),
+            }
+        )
+    return items
+
+
+def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
+    parsed = parse_user_reply(reply_text)
+    if not parsed.get("action") or not parsed.get("type") or not parsed.get("stock"):
+        return {
+            "status": "invalid_reply",
+            "reply": parsed,
+            "message": "reply_not_recognized",
+            "db_path": str(_db_path()),
+        }
+
+    now_ts = _now_ts()
+    trade_event_recorded = False
+    created_order = False
+    matched_order_count = 0
+
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        candidates = [
+            order
+            for order in _order_rows(scope=scope, conn=conn)
+            if _order_matches_stock(order, parsed.get("stock", ""))
+            and _condition_type_matches(order, parsed.get("type", ""))
+        ]
+        candidates.sort(
+            key=lambda item: (str(item.get("updated_at", "")), str(item.get("external_id", ""))),
+            reverse=True,
+        )
+        matched_order_count = len(candidates)
+        matched = candidates[0] if candidates else None
+
+        if not matched and parsed["action"] == "挂单":
+            manual_condition = "manual_tp" if parsed["type"] == "止盈" else "manual_stop"
+            matched = upsert_order_state(
+                {
+                    "external_id": f"{scope}:reply:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{manual_condition}",
+                    "scope": scope,
+                    "broker": "manual_reply",
+                    "code": _reply_stock_code(parsed.get("stock", "")),
+                    "name": parsed.get("stock", ""),
+                    "side": "sell",
+                    "order_class": "condition",
+                    "order_type": "conditional",
+                    "condition_type": manual_condition,
+                    "requested_shares": 0,
+                    "filled_shares": 0,
+                    "trigger_price": _safe_float(parsed.get("price", 0.0), 0.0),
+                    "status": "placed",
+                    "confirm_status": "confirmed",
+                    "reason_code": "DISCORD_MANUAL_CONFIRM",
+                    "reason_text": parsed.get("raw", ""),
+                    "source": "discord_reply",
+                    "placed_at": now_ts,
+                    "updated_at": now_ts,
+                    "metadata": {"reply_history": [parsed]},
+                },
+                conn=conn,
+            )
+            created_order = True
+            matched_order_count = 1
+
+        if not matched:
+            return {
+                "status": "not_found",
+                "reply": parsed,
+                "matched_order_count": 0,
+                "message": "no_matching_order",
+                "db_path": str(_db_path()),
+            }
+
+        metadata = matched.get("metadata", {}) if isinstance(matched.get("metadata", {}), dict) else {}
+        reply_history = list(metadata.get("reply_history", []))
+        if not reply_history or reply_history[-1] != parsed:
+            reply_history.append(parsed)
+        update = {
+            "external_id": matched.get("external_id", ""),
+            "updated_at": now_ts,
+            "confirm_status": "confirmed",
+            "confirmed_at": now_ts,
+            "source": "discord_reply",
+            "metadata": {**metadata, "reply_history": reply_history},
+        }
+
+        if parsed["action"] == "挂单":
+            update["status"] = "placed"
+            if parsed.get("price") is not None:
+                update["trigger_price"] = _safe_float(parsed["price"], 0.0)
+            if not matched.get("placed_at"):
+                update["placed_at"] = now_ts
+        elif parsed["action"] == "取消":
+            update["status"] = "cancelled"
+            update["cancelled_at"] = now_ts
+        elif parsed["action"] == "触发":
+            update["status"] = "filled"
+            update["filled_at"] = now_ts
+            update["avg_fill_price"] = _safe_float(parsed.get("filled_price", 0.0), 0.0)
+            if not _safe_int(matched.get("filled_shares", 0), 0):
+                update["filled_shares"] = _safe_int(matched.get("requested_shares", 0), 0)
+
+        updated_order = upsert_order_state(update, conn=conn)
+
+        if parsed["action"] == "触发" and not metadata.get("trade_event_logged"):
+            shares = _safe_int(updated_order.get("filled_shares", updated_order.get("requested_shares", 0)), 0)
+            price = _safe_float(updated_order.get("avg_fill_price", 0.0), 0.0)
+            side = str(updated_order.get("side", "sell")).strip() or "sell"
+            if shares > 0 and price > 0:
+                _upsert_trade_event(
+                    conn,
+                    {
+                        "external_id": f"{updated_order.get('external_id', '')}:reply_fill",
+                        "scope": scope,
+                        "market": "MX_PAPER",
+                        "code": updated_order.get("code", ""),
+                        "name": updated_order.get("name", ""),
+                        "side": side,
+                        "event_type": side,
+                        "shares": shares,
+                        "price": price,
+                        "amount": round(shares * price, 2),
+                        "event_date": now_ts[:10],
+                        "reason_code": updated_order.get("reason_code") or "DISCORD_REPLY_FILL",
+                        "reason_text": parsed.get("raw", ""),
+                        "source": "discord_reply",
+                        "metadata": {
+                            "order_external_id": updated_order.get("external_id", ""),
+                            "reply": parsed,
+                        },
+                        "created_at": now_ts,
+                    },
+                )
+                updated_order = upsert_order_state(
+                    {
+                        "external_id": updated_order.get("external_id", ""),
+                        "updated_at": _now_ts(),
+                        "metadata": {
+                            **(
+                                updated_order.get("metadata", {})
+                                if isinstance(updated_order.get("metadata", {}), dict)
+                                else {}
+                            ),
+                            "trade_event_logged": True,
+                            "trade_event_source": "discord_reply",
+                        },
+                    },
+                    conn=conn,
+                )
+                trade_event_recorded = True
+
+    return {
+        "status": "ok",
+        "reply": parsed,
+        "created_order": created_order,
+        "matched_order_count": matched_order_count,
+        "trade_event_recorded": trade_event_recorded,
+        "order": updated_order,
+        "db_path": str(_db_path()),
+    }
+
+
 def _normalize_market_detail(detail: dict) -> dict:
     if not isinstance(detail, dict):
         return {}
@@ -1394,6 +1635,15 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
         metadata = metadata or {}
         snapshot_date = metadata.get("snapshot_date", _today_str()) if metadata else _today_str()
         updated_at = _now_ts()
+        previous_rows = conn.execute("SELECT code, name, bucket FROM pool_entries").fetchall()
+        previous_entries = {
+            str(row["code"]).strip(): {
+                "code": str(row["code"]).strip(),
+                "name": str(row["name"]).strip(),
+                "bucket": str(row["bucket"]).strip(),
+            }
+            for row in previous_rows
+        }
         conn.execute("DELETE FROM pool_entries")
         normalized_entries = []
         for entry in entries:
@@ -1450,6 +1700,14 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
                 ),
             )
 
+        _record_pool_actions(
+            conn,
+            previous_entries=previous_entries,
+            current_entries=normalized_entries,
+            snapshot_date=snapshot_date,
+            updated_at=updated_at,
+            source=metadata.get("source", "unknown"),
+        )
         snapshot = {
             "snapshot_date": snapshot_date,
             "updated_at": updated_at,
@@ -1465,6 +1723,7 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
             "watch_count": len(snapshot["watch_pool"]),
             "other_count": len(snapshot["other_entries"]),
         }
+        snapshot["action_history_summary"] = _latest_pool_action_summary(conn, snapshot_date=snapshot_date)
         projection_paths = {}
         if own_conn:
             projection_paths["stocks_yaml_path"] = _project_stocks_yaml(snapshot)
@@ -1505,6 +1764,7 @@ def load_pool_snapshot() -> dict:
             entry["metadata"] = _json_loads(entry.pop("metadata_json", "{}"), {})
             entries.append(entry)
         meta = _json_loads(_meta_get(conn, "pool_snapshot_meta", "{}"), {})
+        action_history_summary = _latest_pool_action_summary(conn, snapshot_date=meta.get("snapshot_date", _today_str()))
     core_pool = [entry for entry in entries if entry["bucket"] == "core"]
     watch_pool = [entry for entry in entries if entry["bucket"] == "watch"]
     other_entries = [entry for entry in entries if entry["bucket"] not in {"core", "watch"}]
@@ -1522,6 +1782,125 @@ def load_pool_snapshot() -> dict:
             "watch_count": len(watch_pool),
             "other_count": len(other_entries),
         },
+        "action_history_summary": action_history_summary,
+    }
+
+
+def _classify_pool_action(previous_bucket: str, current_bucket: str) -> str:
+    previous_bucket = str(previous_bucket or "").strip()
+    current_bucket = str(current_bucket or "").strip()
+    if not previous_bucket and current_bucket == "core":
+        return "promote"
+    if not previous_bucket and current_bucket:
+        return "keep"
+    if previous_bucket == current_bucket:
+        return "keep"
+    if current_bucket == "core" and previous_bucket != "core":
+        return "promote"
+    if previous_bucket == "core" and current_bucket in {"watch", "avoid"}:
+        return "demote"
+    if current_bucket in {"avoid", ""}:
+        return "remove"
+    return "keep"
+
+
+def _record_pool_actions(conn: sqlite3.Connection, previous_entries: dict[str, dict],
+                         current_entries: list[dict], snapshot_date: str,
+                         updated_at: str, source: str) -> None:
+    current_map = {str(item.get("code", "")).strip(): item for item in current_entries if str(item.get("code", "")).strip()}
+    all_codes = sorted(set(previous_entries.keys()) | set(current_map.keys()))
+    conn.execute("DELETE FROM pool_actions WHERE snapshot_date = ?", (snapshot_date,))
+    for code in all_codes:
+        previous = previous_entries.get(code, {})
+        current = current_map.get(code, {})
+        previous_bucket = str(previous.get("bucket", "")).strip()
+        current_bucket = str(current.get("bucket", "")).strip()
+        action = _classify_pool_action(previous_bucket, current_bucket)
+        name = current.get("name") or previous.get("name") or code
+        reason_text = str(current.get("note", "") or previous.get("note", "")).strip()
+        metadata = {
+            "previous_bucket": previous_bucket,
+            "current_bucket": current_bucket,
+            "total_score": current.get("total_score", 0.0),
+            "veto_triggered": bool(current.get("veto_triggered", False)),
+        }
+        conn.execute(
+            """
+            INSERT INTO pool_actions(
+              snapshot_date, updated_at, code, name, action, previous_bucket,
+              current_bucket, source, reason_text, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_date,
+                updated_at,
+                code,
+                name,
+                action,
+                previous_bucket,
+                current_bucket,
+                source,
+                reason_text,
+                _json_dumps(metadata),
+            ),
+        )
+
+
+def _latest_pool_action_summary(conn: sqlite3.Connection, snapshot_date: str) -> dict:
+    rows = conn.execute(
+        """
+        SELECT action, COUNT(*) AS count
+        FROM pool_actions
+        WHERE snapshot_date = ?
+        GROUP BY action
+        ORDER BY action
+        """,
+        (snapshot_date,),
+    ).fetchall()
+    counts = {str(row["action"]).strip(): int(row["count"]) for row in rows}
+    return {
+        "snapshot_date": snapshot_date,
+        "action_count": sum(counts.values()),
+        "action_counts": counts,
+    }
+
+
+def load_pool_action_history(limit: int = 50, snapshot_date: str | None = None) -> dict:
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        if snapshot_date:
+            rows = conn.execute(
+                """
+                SELECT * FROM pool_actions
+                WHERE snapshot_date = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (snapshot_date, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM pool_actions
+                ORDER BY snapshot_date DESC, updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    actions = []
+    action_counts: dict[str, int] = {}
+    for row in rows:
+        item = dict(row)
+        item["metadata"] = _json_loads(item.pop("metadata_json", "{}"), {})
+        actions.append(item)
+        action = str(item.get("action", "")).strip() or "unknown"
+        action_counts[action] = action_counts.get(action, 0) + 1
+    return {
+        "snapshot_date": snapshot_date or (actions[0]["snapshot_date"] if actions else ""),
+        "action_count": len(actions),
+        "action_counts": action_counts,
+        "actions": actions,
+        "db_path": str(_db_path()),
     }
 
 

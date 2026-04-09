@@ -38,17 +38,21 @@ from scripts.state.reason_codes import build_signal_bus_summary
 from scripts.state import (
     AUTOMATED_RULES,
     LEDGER_DB_PATH,
+    apply_order_reply,
     audit_state,
     bootstrap_state,
     load_market_snapshot,
+    load_pool_action_history,
     load_order_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
+    pending_condition_order_items,
     sync_activity_state,
     sync_portfolio_state,
 )
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_strategy
+from scripts.utils.discord_push import render_condition_order_reminder, send_condition_order_reminder
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.run_context import (
     LOCK_DIR,
@@ -529,6 +533,37 @@ def state_command(action: str, args) -> dict:
             "scope_filter": snapshot.get("scope", "all"),
             "order_status_filter": snapshot.get("status", "all"),
         }
+    elif action == "confirm":
+        result = apply_order_reply(
+            reply_text=getattr(args, "reply", ""),
+            scope=getattr(args, "scope", "paper_mx"),
+        )
+        result["scope_filter"] = getattr(args, "scope", "paper_mx")
+    elif action == "remind":
+        scope = getattr(args, "scope", "paper_mx")
+        pending = pending_condition_order_items(scope=scope)
+        content = render_condition_order_reminder(pending)
+        send = bool(getattr(args, "send", False))
+        discord_ok = False
+        discord_error = ""
+        if send:
+            discord_ok, discord_error = send_condition_order_reminder(pending)
+        result = {
+            "status": "ok" if (not send or discord_ok) else "warning",
+            "scope_filter": scope,
+            "pending_count": len(pending),
+            "pending": pending,
+            "send": send,
+            "discord_ok": discord_ok,
+            "discord_error": discord_error,
+            "content": content,
+        }
+    elif action == "pool-actions":
+        result = load_pool_action_history(
+            limit=getattr(args, "limit", 50),
+            snapshot_date=getattr(args, "snapshot_date", None),
+        )
+        result["status"] = "ok"
     else:
         result = _combined_state_audit()
     return sanitize_for_json({
@@ -818,6 +853,7 @@ def status_today(sync_state: bool = True) -> dict:
             "updated_at": pool_snapshot.get("updated_at", ""),
             "last_eval_date": pool_snapshot.get("snapshot_date", ""),
             "summary": pool_snapshot.get("summary", {}),
+            "action_history_summary": pool_snapshot.get("action_history_summary", {}),
             "state_path": str(LEDGER_DB_PATH),
         },
     }
@@ -980,6 +1016,15 @@ def main():
     state_orders = state_sub.add_parser("orders")
     state_orders.add_argument("--scope", default=None, help="Optional scope filter for structured orders")
     state_orders.add_argument("--status", default=None, help="Optional status filter for structured orders")
+    state_confirm = state_sub.add_parser("confirm")
+    state_confirm.add_argument("--reply", required=True, help="Discord/manual reply text for condition-order confirmation")
+    state_confirm.add_argument("--scope", default="paper_mx", help="Scope for structured order confirmation")
+    state_remind = state_sub.add_parser("remind")
+    state_remind.add_argument("--scope", default="paper_mx", help="Scope for pending condition-order reminders")
+    state_remind.add_argument("--send", action="store_true", help="Send reminder to Discord webhook")
+    state_pool_actions = state_sub.add_parser("pool-actions")
+    state_pool_actions.add_argument("--limit", type=int, default=50, help="Maximum number of pool actions to return")
+    state_pool_actions.add_argument("--snapshot-date", default=None, help="Optional YYYY-MM-DD snapshot date filter")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -1085,6 +1130,15 @@ def main():
                     f"open={summary.get('open_count', 0)} "
                     f"exception={summary.get('exception_count', 0)}"
                 )
+            elif result.get("action") == "confirm":
+                print(f"reply: {result.get('reply', {}).get('raw', '')}")
+                print(f"matched_order_count: {result.get('matched_order_count', 0)}")
+                print(f"trade_event_recorded: {result.get('trade_event_recorded', False)}")
+            elif result.get("action") == "remind":
+                print(f"pending_count: {result.get('pending_count', 0)}")
+                print(f"send: {result.get('send', False)} discord_ok={result.get('discord_ok', False)}")
+            elif result.get("action") == "pool-actions":
+                print(f"pool_actions: {result.get('action_count', 0)}")
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")

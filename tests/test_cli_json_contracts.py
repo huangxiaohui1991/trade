@@ -255,6 +255,47 @@ class CLIJsonContractTests(unittest.TestCase):
             },
         }
 
+    def _state_confirm_contract(self, payload: dict) -> dict:
+        return {
+            "command": payload["command"],
+            "action": payload["action"],
+            "status": payload["status"],
+            "db_path": payload["db_path"],
+            "scope_filter": payload["scope_filter"],
+            "matched_order_count": payload["matched_order_count"],
+            "created_order": payload["created_order"],
+            "trade_event_recorded": payload["trade_event_recorded"],
+            "reply": {
+                "action": payload["reply"]["action"],
+                "type": payload["reply"]["type"],
+                "stock": payload["reply"]["stock"],
+                "price": payload["reply"]["price"],
+                "filled_price": payload["reply"]["filled_price"],
+                "raw": payload["reply"]["raw"],
+            },
+            "order": {
+                "external_id": payload["order"]["external_id"],
+                "status": payload["order"]["status"],
+                "confirm_status": payload["order"]["confirm_status"],
+                "avg_fill_price": payload["order"]["avg_fill_price"],
+            },
+        }
+
+    def _state_remind_contract(self, payload: dict) -> dict:
+        return {
+            "command": payload["command"],
+            "action": payload["action"],
+            "status": payload["status"],
+            "db_path": payload["db_path"],
+            "scope_filter": payload["scope_filter"],
+            "pending_count": payload["pending_count"],
+            "send": payload["send"],
+            "discord_ok": payload["discord_ok"],
+            "discord_error": payload["discord_error"],
+            "pending": payload["pending"],
+            "content": payload["content"],
+        }
+
     def _run_for_orders(self, argv_variants: list[list[str]], patches: list[mock._patch], contract_fn, fixture_name: str):
         expected = _load_fixture(fixture_name)
         outputs = []
@@ -649,6 +690,74 @@ class CLIJsonContractTests(unittest.TestCase):
             patches,
             self._state_orders_contract,
             "state_orders.json",
+        )
+
+    def test_state_confirm_json_contract(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
+            mock.patch.object(trade, "apply_order_reply", return_value={
+                "status": "ok",
+                "reply": {
+                    "action": "触发",
+                    "type": "止盈",
+                    "stock": "艾比森",
+                    "price": None,
+                    "filled_price": 21.3,
+                    "raw": "止盈触发了 艾比森 成交¥21.3",
+                },
+                "created_order": False,
+                "matched_order_count": 1,
+                "trade_event_recorded": True,
+                "order": {
+                    "external_id": "paper:order:001",
+                    "status": "filled",
+                    "confirm_status": "confirmed",
+                    "avg_fill_price": 21.3,
+                },
+                "db_path": "/tmp/trade_state.sqlite3",
+            }),
+        ]
+
+        self._run_for_orders(
+            [
+                ["trade", "--json", "state", "confirm", "--reply", "止盈触发了 艾比森 成交¥21.3"],
+                ["trade", "state", "confirm", "--reply", "止盈触发了 艾比森 成交¥21.3", "--json"],
+            ],
+            patches,
+            self._state_confirm_contract,
+            "state_confirm.json",
+        )
+
+    def test_state_remind_json_contract(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
+            mock.patch.object(trade, "pending_condition_order_items", return_value=[
+                {
+                    "external_id": "paper:order:001",
+                    "name": "艾比森",
+                    "code": "300389",
+                    "type": "止损",
+                    "price": 20.3,
+                    "currency": "¥",
+                    "status": "pending",
+                }
+            ]),
+            mock.patch.object(
+                trade,
+                "render_condition_order_reminder",
+                return_value="提醒内容",
+            ),
+        ]
+
+        self._run_for_orders(
+            [["trade", "--json", "state", "remind"], ["trade", "state", "remind", "--json"]],
+            patches,
+            self._state_remind_contract,
+            "state_remind.json",
         )
 
 
