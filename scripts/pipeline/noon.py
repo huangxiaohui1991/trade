@@ -126,6 +126,19 @@ def run() -> dict:
         _logger.warning(f">> Discord 推送失败: {err}")
 
     _logger.info("[NOON] 午休检查完成")
+
+    # 4. 影子交易：盘中检查止损止盈（午休是最佳执行时机）
+    try:
+        from scripts.pipeline.shadow_trade import check_stop_signals
+        shadow_results = check_stop_signals()
+        triggered = [r for r in shadow_results if r.get("action") != "持有"]
+        if triggered:
+            _logger.info(f">> 影子交易(午休): {len(triggered)} 只触发信号")
+            for r in triggered:
+                _logger.info(f"  {r['name']}({r['code']}): {r['action']} — {r['reason']}")
+    except Exception as e:
+        _logger.warning(f">> 影子交易检查失败: {e}")
+
     return discord_data
 
 

@@ -188,22 +188,41 @@ def buy_new_picks(dry_run: bool = False) -> list:
 
 def check_stop_signals(dry_run: bool = False) -> list:
     """
-    检查模拟盘持仓是否触发止损/止盈信号。
+    检查模拟盘持仓是否触发止损/止盈信号，盘中执行卖出。
+
+    调用时机：
+      - morning.py 盘前（8:25）→ 只计算价格，不下单（盘前无法交易）
+      - noon.py 午休（11:55）→ 盘中检查，触发则市价卖出
+      - evening.py 收盘（15:35）→ 最后一次检查，触发则市价卖出
 
     Returns:
         list of {"code": str, "name": str, "action": str, "reason": str}
     """
+    from datetime import time as dt_time
+
     mx = _get_moni()
     strategy = get_strategy()
     risk_cfg = strategy.get("risk", {})
     stop_loss_pct = risk_cfg.get("stop_loss", 0.04)
     absolute_stop_pct = risk_cfg.get("absolute_stop", 0.07)
     t1_pct = risk_cfg.get("take_profit", {}).get("t1_pct", 0.15)
+    t1_drawdown = risk_cfg.get("take_profit", {}).get("t1_drawdown", 0.05)
+    t2_drawdown = risk_cfg.get("take_profit", {}).get("t2_drawdown", 0.08)
 
     positions = _get_positions(mx)
     if not positions:
         _logger.info("[shadow] 模拟盘空仓，无需检查")
         return []
+
+    # 判断是否在交易时间（可以下单）
+    now = datetime.now()
+    current_time = now.time()
+    can_trade = (
+        now.weekday() < 5 and (
+            dt_time(9, 30) <= current_time <= dt_time(11, 30) or
+            dt_time(13, 0) <= current_time <= dt_time(15, 0)
+        )
+    )
 
     results = []
     for pos in positions:
@@ -218,36 +237,58 @@ def check_stop_signals(dry_run: bool = False) -> list:
             continue
 
         pnl_pct = (price / cost - 1)
+
+        # 计算止损止盈价格
+        stop_loss_price = round(cost * (1 - stop_loss_pct), 2)
+        absolute_stop_price = round(cost * (1 - absolute_stop_pct), 2)
+        t1_price = round(cost * (1 + t1_pct), 2)
+
         action = None
         reason = None
+        sell_price = None
 
         # 绝对止损
         if pnl_pct <= -absolute_stop_pct:
             action = "清仓"
-            reason = f"绝对止损 {pnl_pct*100:+.1f}% (阈值-{absolute_stop_pct*100:.0f}%)"
+            reason = f"绝对止损 现价¥{price:.2f} < ¥{absolute_stop_price:.2f} ({pnl_pct*100:+.1f}%)"
+            sell_price = absolute_stop_price
         # 动态止损
         elif pnl_pct <= -stop_loss_pct:
             action = "清仓"
-            reason = f"动态止损 {pnl_pct*100:+.1f}% (阈值-{stop_loss_pct*100:.0f}%)"
+            reason = f"动态止损 现价¥{price:.2f} < ¥{stop_loss_price:.2f} ({pnl_pct*100:+.1f}%)"
+            sell_price = stop_loss_price
         # 第一批止盈
         elif pnl_pct >= t1_pct:
             sell_shares = (avail_shares // 4 // 100) * 100
             if sell_shares >= 100:
                 action = f"卖出{sell_shares}股"
-                reason = f"止盈第一批 {pnl_pct*100:+.1f}% (阈值+{t1_pct*100:.0f}%)"
+                reason = f"止盈第一批 现价¥{price:.2f} > ¥{t1_price:.2f} ({pnl_pct*100:+.1f}%)"
+                sell_price = t1_price
 
         if not action:
-            _logger.info(f"[shadow] {name}({code}) 盈亏{pnl_pct*100:+.1f}% 无信号")
-            results.append({"code": code, "name": name, "action": "持有", "reason": f"盈亏{pnl_pct*100:+.1f}%"})
+            _logger.info(
+                f"[shadow] {name}({code}) 现价¥{price:.2f} 成本¥{cost:.2f} "
+                f"盈亏{pnl_pct*100:+.1f}% | 止损¥{stop_loss_price} 止盈¥{t1_price} → 持有"
+            )
+            results.append({
+                "code": code, "name": name, "action": "持有",
+                "reason": f"盈亏{pnl_pct*100:+.1f}% 止损¥{stop_loss_price} 止盈¥{t1_price}",
+                "stop_loss": stop_loss_price, "take_profit": t1_price,
+            })
             continue
 
         _logger.info(f"[shadow] {name}({code}) → {action} ({reason})")
 
-        if dry_run:
-            results.append({"code": code, "name": name, "action": action, "reason": reason, "status": "dry_run"})
+        if dry_run or not can_trade:
+            tag = "dry_run" if dry_run else "非交易时间"
+            _logger.info(f"[shadow] [{tag}] 不下单，记录信号待下次盘中执行")
+            results.append({
+                "code": code, "name": name, "action": action, "reason": reason,
+                "status": tag, "stop_loss": stop_loss_price, "take_profit": t1_price,
+            })
             continue
 
-        # 执行卖出
+        # 盘中执行：限价卖出（止损用止损价，止盈用止盈价）
         if action == "清仓":
             sell_qty = (avail_shares // 100) * 100
         else:
@@ -257,7 +298,12 @@ def check_stop_signals(dry_run: bool = False) -> list:
             results.append({"code": code, "name": name, "action": action, "reason": reason, "status": "不足100股"})
             continue
 
-        trade_result = mx.trade("sell", code, sell_qty, use_market_price=True)
+        # 止损用市价确保成交，止盈用限价锁定利润
+        if "止损" in reason:
+            trade_result = mx.trade("sell", code, sell_qty, use_market_price=True)
+        else:
+            trade_result = mx.trade("sell", code, sell_qty, price=sell_price, use_market_price=False)
+
         trade_code = str(trade_result.get("code", ""))
         if trade_code == "200":
             _logger.info(f"[shadow] ✅ {name} {action} 成功")

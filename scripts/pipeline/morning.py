@@ -328,6 +328,18 @@ def run() -> dict:
 
     _logger.info("[MORNING] 盘前流程完成")
 
+    # 6. 影子交易：盘前预览止损止盈价（不下单，只记录）
+    try:
+        from scripts.pipeline.shadow_trade import check_stop_signals
+        shadow_results = check_stop_signals(dry_run=True)
+        for r in shadow_results:
+            if r.get("action") != "持有":
+                _logger.info(f"  ⚠️ 模拟盘 {r['name']}: {r['action']} — {r['reason']}")
+            else:
+                _logger.info(f"  模拟盘 {r['name']}: {r.get('reason', '持有')}")
+    except Exception as e:
+        _logger.info(f">> 影子交易预览跳过: {e}")
+
     return {
         "market_data": market_data,
         "positions": positions,
