@@ -46,6 +46,37 @@ def _get_moni() -> MXMoni:
     return MXMoni()
 
 
+def _log_trade(action: str, code: str, name: str, shares: int,
+               price: float, reason: str = "") -> None:
+    """
+    记录模拟盘交易到 Obsidian 交易日志。
+    追加到 03-复盘/模拟盘/交易记录.md
+    """
+    vault_path = os.environ.get("AStockVault", _PROJECT_ROOT)
+    log_dir = Path(vault_path) / "03-复盘" / "模拟盘"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "交易记录.md"
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    amount = round(shares * price, 2)
+
+    # 如果文件不存在，写表头
+    if not log_path.exists():
+        header = (
+            "# 模拟盘交易记录\n\n"
+            "| 时间 | 操作 | 股票 | 代码 | 数量 | 价格 | 金额 | 原因 |\n"
+            "|------|------|------|------|------|------|------|------|\n"
+        )
+        log_path.write_text(header, encoding="utf-8")
+
+    # 追加一行
+    line = f"| {now} | {action} | {name} | {code} | {shares} | ¥{price:.2f} | ¥{amount:,.0f} | {reason} |\n"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+    _logger.info(f"[shadow] 交易记录: {action} {name}({code}) {shares}股 @ ¥{price:.2f}")
+
+
 def _get_positions(mx: MXMoni) -> list:
     """获取模拟盘当前持仓列表"""
     result = mx.positions()
@@ -195,6 +226,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
             available -= actual_cost
             held_codes.add(code)
             _logger.info(f"[shadow] ✅ {name} 买入成功 {shares}股")
+            _log_trade("买入", code, name, shares, price, f"核心池评分{total_score:.1f}")
             results.append({"code": code, "name": name, "shares": shares, "status": "成功", "price": price})
         else:
             _logger.warning(f"[shadow] ❌ {name} 买入失败: {trade_code} {trade_msg}")
@@ -328,6 +360,7 @@ def check_stop_signals(dry_run: bool = False) -> list:
         trade_code = str(trade_result.get("code", ""))
         if trade_code == "200":
             _logger.info(f"[shadow] ✅ {name} {action} 成功")
+            _log_trade("卖出", code, name, sell_qty, price, reason)
             results.append({"code": code, "name": name, "action": action, "reason": reason, "status": "成功"})
         else:
             msg = trade_result.get("message", "")
