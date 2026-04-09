@@ -34,6 +34,7 @@ from scripts.pipeline.morning import run as run_morning
 from scripts.pipeline.noon import run as run_noon
 from scripts.pipeline.stock_screener import run as run_screener
 from scripts.pipeline.weekly_review import run as run_weekly
+from scripts.state.reason_codes import build_signal_bus_summary
 from scripts.state import (
     AUTOMATED_RULES,
     LEDGER_DB_PATH,
@@ -659,6 +660,13 @@ def status_today(sync_state: bool = True) -> dict:
     pool_sync_state = audit_state()
     market_snapshot = load_market_snapshot()
     shadow_snapshot = _shadow_trade_snapshot()
+    signal_bus = build_signal_bus_summary(
+        market_snapshot=market_snapshot,
+        pool_snapshot=pool_snapshot,
+        pool_audit=pool_sync_state,
+        today_decision=today_decision,
+        shadow_snapshot=shadow_snapshot,
+    )
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -684,6 +692,7 @@ def status_today(sync_state: bool = True) -> dict:
             "source_chain": market_snapshot.get("source_chain", []),
             "as_of_date": market_snapshot.get("as_of_date", ""),
         },
+        "signal_bus": signal_bus,
         "pool_sync_state": pool_sync_state,
         "paper_trade_audit": shadow_snapshot.get("consistency", {}),
         "shadow_trade_state": {

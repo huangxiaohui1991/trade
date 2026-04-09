@@ -1,0 +1,50 @@
+{
+  "command": "doctor",
+  "status": "warning",
+  "retryable": false,
+  "hard_fail": [],
+  "warning": [
+    "discord_webhook",
+    "state_audit"
+  ],
+  "checks": {
+    "python": {
+      "ok": true,
+      "version": "3.11.0"
+    },
+    "mx_apikey": {
+      "ok": true,
+      "configured": true
+    },
+    "discord_webhook": {
+      "ok": false,
+      "configured": false
+    },
+    "daily_state": {
+      "ok": true,
+      "date": "2026-04-09",
+      "pipelines": [
+        "morning"
+      ]
+    },
+    "state_audit": {
+      "ok": false,
+      "status": "drift",
+      "snapshot_date": "2026-04-09"
+    },
+    "mx_connectivity": {
+      "ok": true
+    },
+    "akshare_connectivity": {
+      "ok": true
+    },
+    "vault": {
+      "ok": true
+    },
+    "writable": {
+      "ledger": {
+        "ok": true
+      }
+    }
+  }
+}

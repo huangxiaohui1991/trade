@@ -26,6 +26,7 @@ from scripts.utils.config_loader import clear_config_cache, get_stocks
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.parser import parse_md_table
+from scripts.mx.mx_moni import MXMoni
 
 LOGGER = get_logger("state.service")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -383,6 +384,61 @@ def _write_positions(conn: sqlite3.Connection, positions: Iterable[dict]) -> Non
         )
 
 
+def _replace_portfolio_scope_snapshot(
+    conn: sqlite3.Connection,
+    scope: str,
+    positions: Iterable[dict],
+    balances: Iterable[dict],
+) -> None:
+    conn.execute("DELETE FROM portfolio_positions WHERE scope = ?", (scope,))
+    conn.execute("DELETE FROM portfolio_balances WHERE scope = ?", (scope,))
+    for position in positions:
+        conn.execute(
+            """
+            INSERT INTO portfolio_positions(
+              scope, code, name, market, shares, avg_cost, current_price, market_value,
+              status, note, source, as_of_date, updated_at, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                position["scope"],
+                position["code"],
+                position["name"],
+                position.get("market", ""),
+                position.get("shares", 0),
+                position.get("avg_cost", 0.0),
+                position.get("current_price", 0.0),
+                position.get("market_value", 0.0),
+                position.get("status", ""),
+                position.get("note", ""),
+                position.get("source", "bootstrap"),
+                position.get("as_of_date", _today_str()),
+                position.get("updated_at", _now_ts()),
+                _json_dumps(position.get("metadata", {})),
+            ),
+        )
+    for balance in balances:
+        conn.execute(
+            """
+            INSERT INTO portfolio_balances(
+              scope, cash_value, total_capital, total_market_value, exposure,
+              source, as_of_date, updated_at, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                balance["scope"],
+                balance.get("cash_value", 0.0),
+                balance.get("total_capital", 0.0),
+                balance.get("total_market_value", 0.0),
+                balance.get("exposure", 0.0),
+                balance.get("source", "bootstrap"),
+                balance.get("as_of_date", _today_str()),
+                balance.get("updated_at", _now_ts()),
+                _json_dumps(balance.get("metadata", {})),
+            ),
+        )
+
+
 def _replace_trade_events(conn: sqlite3.Connection, events: Iterable[dict]) -> None:
     conn.execute("DELETE FROM trade_events")
     for event in events:
@@ -650,6 +706,87 @@ def _bootstrap_portfolio_snapshot() -> tuple[list[dict], list[dict], str]:
     return positions, balances, as_of_date
 
 
+def _mx_payload(result: Any) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    payload = result.get("data")
+    return payload if isinstance(payload, dict) else result
+
+
+def _build_paper_position(row: dict, as_of_date: str, updated_at: str) -> dict | None:
+    name = str(row.get("stockName", row.get("secuName", row.get("name", "")))).strip()
+    code = _normalize_code(row.get("stockCode", row.get("secuCode", row.get("code", ""))))
+    shares = _safe_int(row.get("totalQty", row.get("currentQty", row.get("shares", 0))))
+    if not code or shares <= 0:
+        return None
+
+    avg_cost = _safe_float(row.get("costPrice", row.get("avgCost", row.get("cost", 0))))
+    current_price = _safe_float(row.get("lastPrice", row.get("currentPrice", row.get("price", 0))))
+    market_value = _safe_float(row.get("marketValue", row.get("market_value", 0)))
+    if market_value <= 0 and current_price > 0:
+        market_value = round(current_price * shares, 2)
+    if current_price <= 0 and market_value > 0 and shares > 0:
+        current_price = round(market_value / shares, 4)
+
+    return {
+        "scope": PAPER_SCOPE,
+        "code": code,
+        "name": name or code,
+        "market": str(row.get("market", row.get("marketType", "MX_PAPER"))).strip() or "MX_PAPER",
+        "shares": shares,
+        "avg_cost": avg_cost,
+        "current_price": current_price,
+        "market_value": market_value,
+        "status": str(row.get("status", row.get("positionStatus", "持仓"))).strip(),
+        "note": str(row.get("note", row.get("remark", ""))).strip(),
+        "source": "broker:mx_moni",
+        "as_of_date": as_of_date,
+        "updated_at": updated_at,
+        "metadata": row,
+    }
+
+
+def _paper_portfolio_snapshot() -> tuple[list[dict], list[dict], str]:
+    mx = MXMoni()
+    positions_result = _mx_payload(mx.positions())
+    balance_result = _mx_payload(mx.balance())
+    as_of_date = _today_str()
+    updated_at = _now_ts()
+
+    raw_positions = positions_result.get("posList", [])
+    positions = []
+    for row in raw_positions if isinstance(raw_positions, list) else []:
+        if not isinstance(row, dict):
+            continue
+        position = _build_paper_position(row, as_of_date, updated_at)
+        if position:
+            positions.append(position)
+
+    total_assets = _safe_float(balance_result.get("totalAssets", 0))
+    cash_value = _safe_float(balance_result.get("availBalance", 0))
+    total_market_value = _safe_float(balance_result.get("totalPosValue", 0))
+    if total_assets <= 0:
+        total_assets = cash_value + total_market_value
+
+    balances = [
+        {
+            "scope": PAPER_SCOPE,
+            "cash_value": cash_value,
+            "total_capital": total_assets,
+            "total_market_value": total_market_value,
+            "exposure": (total_market_value / total_assets) if total_assets else 0.0,
+            "source": "broker:mx_moni",
+            "as_of_date": as_of_date,
+            "updated_at": updated_at,
+            "metadata": {
+                "balance": balance_result,
+                "positions": positions_result,
+            },
+        }
+    ]
+    return positions, balances, as_of_date
+
+
 def _portfolio_weekly_trade_events(source: str = "bootstrap:weekly_record") -> list[dict]:
     vault = ObsidianVault()
     portfolio = vault.read_portfolio()
@@ -847,6 +984,26 @@ def _portfolio_rows(scope: str | None = None, conn: sqlite3.Connection | None = 
 
 def load_portfolio_snapshot(scope: str | None = None) -> dict:
     """Return the current structured portfolio snapshot."""
+    if scope == PAPER_SCOPE:
+        try:
+            positions, balances, as_of_date = _paper_portfolio_snapshot()
+            with _connect() as conn:
+                _ensure_bootstrapped(conn)
+                _replace_portfolio_scope_snapshot(conn, PAPER_SCOPE, positions, balances)
+                _meta_set(conn, "paper_portfolio_sync_at", _now_ts())
+                _meta_set(conn, "paper_portfolio_sync_date", as_of_date)
+        except Exception as exc:
+            LOGGER.warning(f"[state] paper portfolio snapshot refresh failed: {exc}")
+    elif scope is None:
+        try:
+            positions, balances, as_of_date = _paper_portfolio_snapshot()
+            with _connect() as conn:
+                _ensure_bootstrapped(conn)
+                _replace_portfolio_scope_snapshot(conn, PAPER_SCOPE, positions, balances)
+                _meta_set(conn, "paper_portfolio_sync_at", _now_ts())
+                _meta_set(conn, "paper_portfolio_sync_date", as_of_date)
+        except Exception as exc:
+            LOGGER.warning(f"[state] paper portfolio snapshot refresh failed: {exc}")
     balances, positions = _portfolio_rows(scope=scope)
     scopes = {}
     for balance in balances:
@@ -860,6 +1017,21 @@ def load_portfolio_snapshot(scope: str | None = None) -> dict:
         }
     active_positions = [row for row in positions if _safe_int(row.get("shares", 0)) > 0]
     primary = scopes.get(PRIMARY_SCOPE, {})
+    if scope == PAPER_SCOPE:
+        paper = scopes.get(PAPER_SCOPE, {})
+        return {
+            "scope": PAPER_SCOPE,
+            "as_of_date": paper.get("as_of_date", _today_str()),
+            "positions": active_positions,
+            "balances": balances,
+            "summary": {
+                "holding_count": len([row for row in active_positions if row.get("scope") == PAPER_SCOPE]),
+                "current_exposure": round(paper.get("exposure", 0.0), 3),
+                "cash_value": round(paper.get("cash_value", 0.0), 2),
+                "total_capital": round(paper.get("total_capital", 0.0), 2),
+                "scopes": scopes,
+            },
+        }
     return {
         "scope": scope or "all",
         "as_of_date": max((item.get("as_of_date", "") for item in balances), default=_today_str()),
