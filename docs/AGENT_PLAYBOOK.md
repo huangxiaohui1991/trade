@@ -32,6 +32,7 @@ bin/trade templates --json
 bin/trade doctor --json
 bin/trade state sync --target all --json
 bin/trade state audit --json
+bin/trade state reconcile --json
 ```
 
 处理建议：
@@ -39,6 +40,7 @@ bin/trade state audit --json
 - `warning`：继续执行，但把 warning 原因写进摘要
 - 手工修改 `portfolio.md` 或本周交易记录后，先跑一次 `state sync --target all`
 - `state audit=drift`：优先修正 pool 投影漂移，再继续执行
+- 若 `paper_trade_consistency=drift`，先查看 `state reconcile --json` 计划；确认后再执行 `bin/trade state reconcile --apply --json`
 
 ### 3. 最后跑工作流
 

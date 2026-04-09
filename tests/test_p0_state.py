@@ -187,6 +187,116 @@ class P0StateTests(unittest.TestCase):
             ["300389"],
         )
 
+    def test_paper_trade_consistency_snapshot_detects_share_mismatch(self):
+        from scripts.pipeline.shadow_trade import paper_trade_consistency_snapshot
+
+        with mock.patch("scripts.pipeline.shadow_trade.load_activity_summary", return_value={
+            "trade_count": 1,
+            "trade_events": [
+                {
+                    "event_date": "2026-04-01",
+                    "side": "buy",
+                    "code": "300389",
+                    "name": "艾比森",
+                    "shares": 1000,
+                    "price": 19.13,
+                }
+            ],
+        }), mock.patch("scripts.pipeline.shadow_trade.get_status", return_value={
+            "positions": [
+                {"code": "300389", "name": "艾比森", "shares": 600, "cost": 19.2, "price": 19.5}
+            ],
+        }):
+            snapshot = paper_trade_consistency_snapshot(window=30)
+
+        self.assertEqual(snapshot["status"], "drift")
+        self.assertEqual(snapshot["event_only_codes"], [])
+        self.assertEqual(snapshot["broker_only_codes"], [])
+        self.assertEqual(len(snapshot["share_mismatches"]), 1)
+        self.assertEqual(snapshot["share_mismatches"][0]["delta_shares"], -400)
+
+    def test_reconcile_trade_state_builds_actions_without_applying(self):
+        from scripts.pipeline.shadow_trade import reconcile_trade_state
+
+        with mock.patch("scripts.pipeline.shadow_trade.paper_trade_consistency_snapshot", return_value={
+            "ok": False,
+            "status": "drift",
+            "event_trade_count": 2,
+            "event_only_codes": ["300389"],
+            "broker_only_codes": ["603063"],
+            "share_mismatches": [],
+            "inferred_positions": {
+                "300389": {
+                    "code": "300389",
+                    "name": "艾比森",
+                    "shares": 1000,
+                    "avg_cost": 19.13,
+                    "first_buy_price": 19.13,
+                }
+            },
+            "actual_positions": {
+                "603063": {
+                    "code": "603063",
+                    "name": "禾望电气",
+                    "shares": 600,
+                    "cost": 32.76,
+                    "price": 33.10,
+                }
+            },
+        }):
+            result = reconcile_trade_state(apply=False, window=30)
+
+        self.assertEqual(result["status"], "drift")
+        self.assertEqual(result["planned_action_count"], 2)
+        self.assertEqual(result["applied_actions"], [])
+        self.assertEqual({item["reason_code"] for item in result["planned_actions"]}, {
+            "PAPER_RECONCILE_FLATTEN",
+            "PAPER_RECONCILE_OPEN",
+        })
+
+    def test_reconcile_trade_state_apply_logs_synthetic_events(self):
+        from scripts.pipeline.shadow_trade import reconcile_trade_state
+
+        consistency_before = {
+            "ok": False,
+            "status": "drift",
+            "event_trade_count": 1,
+            "event_only_codes": ["300389"],
+            "broker_only_codes": [],
+            "share_mismatches": [],
+            "inferred_positions": {
+                "300389": {
+                    "code": "300389",
+                    "name": "艾比森",
+                    "shares": 1000,
+                    "avg_cost": 19.13,
+                    "first_buy_price": 19.13,
+                }
+            },
+            "actual_positions": {},
+        }
+        consistency_after = {
+            "ok": True,
+            "status": "ok",
+            "event_trade_count": 2,
+            "event_only_codes": [],
+            "broker_only_codes": [],
+            "share_mismatches": [],
+            "inferred_positions": {},
+            "actual_positions": {},
+        }
+
+        with mock.patch("scripts.pipeline.shadow_trade.paper_trade_consistency_snapshot", side_effect=[
+            consistency_before,
+            consistency_after,
+        ]), mock.patch("scripts.pipeline.shadow_trade._log_trade") as log_trade:
+            result = reconcile_trade_state(apply=True, window=30)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["applied_actions"]), 1)
+        log_trade.assert_called_once()
+        self.assertEqual(result["consistency_after"]["status"], "ok")
+
     def test_status_today_exposes_shadow_trade_summary(self):
         from scripts.cli.trade import status_today
 

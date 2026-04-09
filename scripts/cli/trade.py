@@ -39,7 +39,6 @@ from scripts.state import (
     LEDGER_DB_PATH,
     audit_state,
     bootstrap_state,
-    load_activity_summary,
     load_market_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
@@ -238,12 +237,9 @@ def _shadow_trade_snapshot() -> dict:
         "positions": [],
     }
     try:
-        from scripts.pipeline.shadow_trade import _build_open_position_context, get_status
+        from scripts.pipeline.shadow_trade import get_status, paper_trade_consistency_snapshot
 
-        activity = load_activity_summary(180, scope="paper_mx")
-        inferred_context = _build_open_position_context(activity.get("trade_events", []))
-        inferred_codes = sorted(inferred_context.keys())
-
+        consistency = paper_trade_consistency_snapshot(window=180)
         shadow_status = get_status()
         actual_positions = [
             {
@@ -254,20 +250,6 @@ def _shadow_trade_snapshot() -> dict:
             for item in shadow_status.get("positions", [])
             if str(item.get("code", "")).strip() and int(float(item.get("shares", 0) or 0)) > 0
         ]
-        actual_codes = sorted(item["code"] for item in actual_positions)
-        event_only_codes = sorted(code for code in inferred_codes if code not in actual_codes)
-        broker_only_codes = sorted(code for code in actual_codes if code not in inferred_codes)
-        consistency_ok = not event_only_codes and not broker_only_codes
-
-        consistency = {
-            "ok": consistency_ok,
-            "status": "ok" if consistency_ok else "drift",
-            "inferred_open_codes": inferred_codes,
-            "actual_open_codes": actual_codes,
-            "event_only_codes": event_only_codes,
-            "broker_only_codes": broker_only_codes,
-            "event_trade_count": int(activity.get("trade_count", 0) or 0),
-        }
         return {
             "ok": True,
             "status": consistency["status"],
@@ -456,6 +438,13 @@ def state_command(action: str, args) -> dict:
         if target in {"activity", "all"}:
             activity_result = sync_activity_state()
             result["steps"].append({"step": "activity", **activity_result})
+    elif action == "reconcile":
+        from scripts.pipeline.shadow_trade import reconcile_trade_state
+
+        result = reconcile_trade_state(
+            apply=getattr(args, "apply", False),
+            window=getattr(args, "window", 180),
+        )
     else:
         result = _combined_state_audit()
     return sanitize_for_json({
@@ -865,6 +854,9 @@ def main():
     state_sync = state_sub.add_parser("sync")
     state_sync.add_argument("--target", choices=["portfolio", "activity", "all"], default="all")
     state_sub.add_parser("audit")
+    state_reconcile = state_sub.add_parser("reconcile")
+    state_reconcile.add_argument("--apply", action="store_true", help="Write reconcile events into paper ledger/log")
+    state_reconcile.add_argument("--window", type=int, default=180, help="Lookback window for paper event inference")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)

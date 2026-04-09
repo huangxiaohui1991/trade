@@ -61,7 +61,8 @@ def _get_moni() -> MXMoni:
 
 
 def _log_trade(action: str, code: str, name: str, shares: int,
-               price: float, reason: str = "", reason_code: str = "") -> None:
+               price: float, reason: str = "", reason_code: str = "",
+               source: str = "shadow_trade", metadata: dict | None = None) -> None:
     """
     记录模拟盘交易到 Obsidian 交易日志。
     追加到 03-复盘/模拟盘/交易记录.md
@@ -105,10 +106,11 @@ def _log_trade(action: str, code: str, name: str, shares: int,
             "event_date": datetime.now().strftime("%Y-%m-%d"),
             "reason_code": reason_code or f"paper_{side}",
             "reason_text": reason,
-            "source": "shadow_trade",
+            "source": source,
             "metadata": {
                 "action": action,
                 "log_path": str(log_path),
+                **(metadata or {}),
             },
         })
     except Exception as exc:
@@ -202,22 +204,47 @@ def _build_open_position_context(trade_events: list) -> dict:
             continue
 
         ctx = contexts.setdefault(code, {
+            "name": str(event.get("name", "")).strip(),
             "open_date": "",
             "first_buy_price": 0.0,
+            "last_buy_price": 0.0,
+            "avg_cost": 0.0,
+            "cost_basis_total": 0.0,
             "net_shares": 0,
             "last_event_date": "",
         })
+        if str(event.get("name", "")).strip():
+            ctx["name"] = str(event.get("name", "")).strip()
 
         if side == "buy":
             if ctx["net_shares"] <= 0:
                 ctx["open_date"] = event_date.isoformat()
                 ctx["first_buy_price"] = round(price, 3)
+                ctx["cost_basis_total"] = 0.0
+            ctx["last_buy_price"] = round(price, 3)
+            ctx["cost_basis_total"] += shares * price
             ctx["net_shares"] += shares
+            ctx["avg_cost"] = round(
+                (ctx["cost_basis_total"] / ctx["net_shares"]) if ctx["net_shares"] > 0 else 0.0,
+                3,
+            )
         else:
+            held_shares = _safe_int(ctx.get("net_shares", 0), 0)
+            avg_cost = (
+                (_safe_float(ctx.get("cost_basis_total", 0.0), 0.0) / held_shares)
+                if held_shares > 0 else 0.0
+            )
+            reduced_shares = min(shares, held_shares)
+            ctx["cost_basis_total"] = max(ctx["cost_basis_total"] - (reduced_shares * avg_cost), 0.0)
             ctx["net_shares"] = max(ctx["net_shares"] - shares, 0)
             if ctx["net_shares"] == 0:
                 ctx["open_date"] = ""
                 ctx["first_buy_price"] = 0.0
+                ctx["last_buy_price"] = 0.0
+                ctx["avg_cost"] = 0.0
+                ctx["cost_basis_total"] = 0.0
+            else:
+                ctx["avg_cost"] = round(ctx["cost_basis_total"] / ctx["net_shares"], 3)
 
         ctx["last_event_date"] = event_date.isoformat()
 
@@ -398,6 +425,192 @@ def _load_paper_position_context(window: int = 180) -> dict:
         _logger.info(f"[shadow] 结构化模拟盘事件读取失败: {exc}")
         return {}
     return _build_open_position_context(summary.get("trade_events", []))
+
+
+def _actual_paper_position_map(positions: list) -> dict:
+    mapped = {}
+    for item in positions or []:
+        code = str(item.get("code", "")).strip()
+        shares = _safe_int(item.get("shares", 0))
+        if not code or shares <= 0:
+            continue
+        mapped[code] = {
+            "code": code,
+            "name": str(item.get("name", "")).strip(),
+            "shares": shares,
+            "cost": _safe_float(item.get("cost", 0.0), 0.0),
+            "price": _safe_float(item.get("price", 0.0), 0.0),
+        }
+    return mapped
+
+
+def paper_trade_consistency_snapshot(window: int = 180) -> dict:
+    activity = load_activity_summary(window, scope="paper_mx")
+    inferred_context = _build_open_position_context(activity.get("trade_events", []))
+    inferred_positions = {
+        code: {
+            "code": code,
+            "name": str(item.get("name", "")).strip(),
+            "shares": _safe_int(item.get("net_shares", 0)),
+            "open_date": str(item.get("open_date", "")).strip(),
+            "first_buy_price": _safe_float(item.get("first_buy_price", 0.0), 0.0),
+            "avg_cost": _safe_float(item.get("avg_cost", 0.0), 0.0),
+        }
+        for code, item in inferred_context.items()
+        if _safe_int(item.get("net_shares", 0)) > 0
+    }
+
+    shadow_status = get_status()
+    actual_positions = _actual_paper_position_map(shadow_status.get("positions", []))
+
+    inferred_codes = sorted(inferred_positions.keys())
+    actual_codes = sorted(actual_positions.keys())
+    event_only_codes = sorted(code for code in inferred_codes if code not in actual_codes)
+    broker_only_codes = sorted(code for code in actual_codes if code not in inferred_codes)
+    share_mismatches = []
+    for code in sorted(set(inferred_codes) & set(actual_codes)):
+        inferred_shares = inferred_positions[code]["shares"]
+        actual_shares = actual_positions[code]["shares"]
+        if inferred_shares != actual_shares:
+            share_mismatches.append({
+                "code": code,
+                "name": actual_positions[code].get("name") or inferred_positions[code].get("name", ""),
+                "event_shares": inferred_shares,
+                "broker_shares": actual_shares,
+                "delta_shares": actual_shares - inferred_shares,
+            })
+
+    ok = not event_only_codes and not broker_only_codes and not share_mismatches
+    return {
+        "ok": ok,
+        "status": "ok" if ok else "drift",
+        "event_trade_count": int(activity.get("trade_count", 0) or 0),
+        "inferred_open_codes": inferred_codes,
+        "actual_open_codes": actual_codes,
+        "event_only_codes": event_only_codes,
+        "broker_only_codes": broker_only_codes,
+        "share_mismatches": share_mismatches,
+        "inferred_positions": inferred_positions,
+        "actual_positions": actual_positions,
+    }
+
+
+def reconcile_trade_state(apply: bool = False, window: int = 180) -> dict:
+    snapshot = paper_trade_consistency_snapshot(window=window)
+    actions = []
+
+    for code in snapshot.get("event_only_codes", []):
+        inferred = snapshot["inferred_positions"].get(code, {})
+        shares = _safe_int(inferred.get("shares", 0))
+        if shares <= 0:
+            continue
+        reference_price = _safe_float(
+            inferred.get("avg_cost") or inferred.get("last_buy_price") or inferred.get("first_buy_price"),
+            0.0,
+        )
+        actions.append({
+            "action": "flatten_missing_broker_position",
+            "side": "sell",
+            "code": code,
+            "name": inferred.get("name", code),
+            "shares": shares,
+            "price": reference_price,
+            "reason_code": "PAPER_RECONCILE_FLATTEN",
+            "reason": (
+                f"对账平仓：broker 实际空仓，但事件流残留 {shares} 股。"
+                "以参考成本价补录中性卖出，真实已实现盈亏未知。"
+            ),
+        })
+
+    for code in snapshot.get("broker_only_codes", []):
+        actual = snapshot["actual_positions"].get(code, {})
+        shares = _safe_int(actual.get("shares", 0))
+        if shares <= 0:
+            continue
+        actions.append({
+            "action": "open_missing_event_position",
+            "side": "buy",
+            "code": code,
+            "name": actual.get("name", code),
+            "shares": shares,
+            "price": _safe_float(actual.get("cost", 0.0), 0.0),
+            "reason_code": "PAPER_RECONCILE_OPEN",
+            "reason": (
+                f"对账开仓：broker 持有 {shares} 股，但事件流缺失。"
+                "以当前持仓成本补录基线买入。"
+            ),
+        })
+
+    for mismatch in snapshot.get("share_mismatches", []):
+        delta = _safe_int(mismatch.get("delta_shares", 0))
+        code = mismatch.get("code", "")
+        if not code or delta == 0:
+            continue
+        if delta > 0:
+            actual = snapshot["actual_positions"].get(code, {})
+            actions.append({
+                "action": "increase_event_position_to_broker",
+                "side": "buy",
+                "code": code,
+                "name": mismatch.get("name", code),
+                "shares": delta,
+                "price": _safe_float(actual.get("cost", 0.0), 0.0),
+                "reason_code": "PAPER_RECONCILE_ADD",
+                "reason": (
+                    f"对账补仓：broker {mismatch.get('broker_shares', 0)} 股，"
+                    f"事件流仅 {mismatch.get('event_shares', 0)} 股。补录 {delta} 股买入。"
+                ),
+            })
+        else:
+            inferred = snapshot["inferred_positions"].get(code, {})
+            actions.append({
+                "action": "decrease_event_position_to_broker",
+                "side": "sell",
+                "code": code,
+                "name": mismatch.get("name", code),
+                "shares": abs(delta),
+                "price": _safe_float(
+                    inferred.get("avg_cost") or inferred.get("first_buy_price"),
+                    0.0,
+                ),
+                "reason_code": "PAPER_RECONCILE_REDUCE",
+                "reason": (
+                    f"对账减仓：broker {mismatch.get('broker_shares', 0)} 股，"
+                    f"事件流 {mismatch.get('event_shares', 0)} 股。补录 {abs(delta)} 股卖出。"
+                    "真实已实现盈亏未知。"
+                ),
+            })
+
+    result = {
+        "status": snapshot.get("status", "ok"),
+        "apply": apply,
+        "consistency_before": snapshot,
+        "planned_actions": actions,
+        "planned_action_count": len(actions),
+        "applied_actions": [],
+    }
+
+    if apply and actions:
+        for item in actions:
+            action_text = "买入" if item["side"] == "buy" else "卖出"
+            _log_trade(
+                action_text,
+                item["code"],
+                item["name"],
+                item["shares"],
+                item["price"],
+                item["reason"],
+                item["reason_code"],
+                source="paper_reconcile",
+                metadata={"reconcile_action": item["action"]},
+            )
+            result["applied_actions"].append(item)
+        result["consistency_after"] = paper_trade_consistency_snapshot(window=window)
+        result["status"] = result["consistency_after"].get("status", "ok")
+    else:
+        result["consistency_after"] = snapshot
+
+    return result
 
 
 def _get_positions(mx: MXMoni) -> list:
