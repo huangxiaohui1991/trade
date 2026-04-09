@@ -27,6 +27,7 @@ from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.parser import parse_md_table, parse_user_reply
 from scripts.mx.mx_moni import MXMoni
+from scripts.state.reason_codes import normalize_reason_code
 
 LOGGER = get_logger("state.service")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -179,6 +180,18 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
   updated_at TEXT NOT NULL,
   detail_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS alert_snapshots (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  snapshot_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  alert_count INTEGER NOT NULL DEFAULT 0,
+  level_counts_json TEXT NOT NULL DEFAULT '{}',
+  code_counts_json TEXT NOT NULL DEFAULT '{}',
+  ack_counts_json TEXT NOT NULL DEFAULT '{}',
+  detail_json TEXT NOT NULL
+);
 """
 
 
@@ -260,6 +273,17 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _extract_realized_pnl(value: Any, default: float = 0.0) -> float:
@@ -1625,6 +1649,351 @@ def load_market_snapshot(refresh: bool = False) -> dict:
     return save_market_snapshot(snapshot)
 
 
+def _shadow_trade_snapshot() -> dict:
+    empty_advisory = {
+        "triggered_signal_count": 0,
+        "triggered_position_count": 0,
+        "triggered_rules": [],
+        "positions": [],
+    }
+    try:
+        from scripts.pipeline.shadow_trade import get_status, paper_trade_consistency_snapshot
+
+        consistency = paper_trade_consistency_snapshot(window=180)
+        shadow_status = get_status()
+        actual_positions = [
+            {
+                "code": str(item.get("code", "")).strip(),
+                "name": str(item.get("name", "")).strip(),
+                "shares": int(float(item.get("shares", 0) or 0)),
+            }
+            for item in shadow_status.get("positions", [])
+            if str(item.get("code", "")).strip() and int(float(item.get("shares", 0) or 0)) > 0
+        ]
+        return {
+            "ok": True,
+            "status": consistency["status"],
+            "timestamp": shadow_status.get("timestamp", ""),
+            "automation_scope": shadow_status.get("automation_scope", ""),
+            "automated_rules": shadow_status.get("automated_rules", []),
+            "advisory_rules": shadow_status.get("advisory_rules", []),
+            "positions_count": len(actual_positions),
+            "positions": actual_positions,
+            "advisory_summary": shadow_status.get("advisory_summary", empty_advisory),
+            "consistency": consistency,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "error": str(e),
+            "timestamp": "",
+            "automation_scope": "",
+            "automated_rules": [],
+            "advisory_rules": [],
+            "positions_count": 0,
+            "positions": [],
+            "advisory_summary": empty_advisory,
+            "consistency": {
+                "ok": False,
+                "status": "error",
+                "error": str(e),
+                "inferred_open_codes": [],
+                "actual_open_codes": [],
+                "event_only_codes": [],
+                "broker_only_codes": [],
+                "event_trade_count": 0,
+            },
+        }
+
+
+def _alert_level_order(level: str) -> int:
+    level = str(level or "").strip().lower()
+    return {"warning": 0, "error": 0, "block": 0, "info": 1, "ok": 2}.get(level, 3)
+
+
+def _count_alerts(alerts: list[dict]) -> tuple[dict, dict, dict]:
+    level_counts: dict[str, int] = {}
+    code_counts: dict[str, int] = {}
+    code_level_counts: dict[str, dict[str, int]] = {}
+    for alert in alerts:
+        level = str(alert.get("level", "")).strip().lower() or "info"
+        code = str(alert.get("code", "")).strip() or "UNKNOWN"
+        level_counts[level] = level_counts.get(level, 0) + 1
+        code_counts[code] = code_counts.get(code, 0) + 1
+        level_bucket = code_level_counts.setdefault(level, {})
+        level_bucket[code] = level_bucket.get(code, 0) + 1
+    return level_counts, code_counts, code_level_counts
+
+
+def _prepare_alert_entry(level: str, code: str, summary: str, details: dict | None = None) -> dict:
+    now = _now_ts()
+    return {
+        "level": str(level or "info").strip().lower() or "info",
+        "code": str(code or "").strip() or "UNKNOWN",
+        "summary": str(summary or "").strip(),
+        "details": details or {},
+        "acknowledged": False,
+        "acknowledged_at": "",
+        "acknowledged_by": "",
+        "updated_at": now,
+    }
+
+
+def build_alert_center_snapshot(
+    today_decision: dict | None = None,
+    pool_sync_state: dict | None = None,
+    shadow_snapshot: dict | None = None,
+    order_snapshot: dict | None = None,
+    signal_bus: dict | None = None,
+    pool_snapshot: dict | None = None,
+    market_snapshot: dict | None = None,
+) -> dict:
+    """Build a structured alert center snapshot from the current state views."""
+    today_decision = today_decision or {}
+    pool_sync_state = pool_sync_state or {}
+    shadow_snapshot = shadow_snapshot or {}
+    order_snapshot = order_snapshot or {}
+    signal_bus = signal_bus or {}
+    pool_snapshot = pool_snapshot or {}
+    market_snapshot = market_snapshot or {}
+
+    alerts: list[dict] = []
+
+    def add_alert(level: str, code: str, summary: str, details: dict | None = None) -> None:
+        alerts.append(_prepare_alert_entry(level, code, summary, details))
+
+    if pool_sync_state.get("status") not in {"", "ok"}:
+        add_alert("warning", "POOL_SYNC_DRIFT", "池子投影存在漂移", {
+            "status": pool_sync_state.get("status", ""),
+            "snapshot_date": pool_sync_state.get("snapshot_date", ""),
+        })
+
+    consistency = shadow_snapshot.get("consistency", {}) or {}
+    if consistency.get("status") not in {"", "ok"} or not consistency.get("ok", True):
+        add_alert("warning", "TRADE_PAPER_RECONCILE_DRIFT", "模拟盘事件流与 broker 状态不一致", {
+            "event_only_codes": consistency.get("event_only_codes", []),
+            "broker_only_codes": consistency.get("broker_only_codes", []),
+        })
+
+    order_summary = order_snapshot.get("summary", {}) if isinstance(order_snapshot, dict) else {}
+    if int(order_summary.get("pending_count", 0) or 0) > 0:
+        add_alert("info", "ORDER_CONFIRM_PENDING", "存在待确认条件单", {
+            "pending_count": order_summary.get("pending_count", 0),
+            "condition_orders": order_snapshot.get("condition_orders", {}),
+        })
+    if int(order_summary.get("exception_count", 0) or 0) > 0:
+        add_alert("warning", "ORDER_EXCEPTION", "存在异常订单", {
+            "exception_count": order_summary.get("exception_count", 0),
+        })
+
+    portfolio_risk = today_decision.get("portfolio_risk", {}) if isinstance(today_decision, dict) else {}
+    if portfolio_risk.get("state") == "block":
+        add_alert("warning", "PORTFOLIO_RISK_BLOCK", "组合级风控阻断交易", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+    elif portfolio_risk.get("state") == "warning":
+        add_alert("info", "PORTFOLIO_RISK_WARNING", "组合级风控预警", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+
+    market_signal = str(today_decision.get("market_signal", "")).strip().upper()
+    if market_signal in {"RED", "CLEAR"}:
+        add_alert("info", f"MARKET_{market_signal}", "当前市场状态不支持主动开仓", {
+            "market_signal": market_signal,
+        })
+
+    advisory_summary = shadow_snapshot.get("advisory_summary", {}) or {}
+    if int(advisory_summary.get("triggered_signal_count", 0) or 0) > 0:
+        add_alert("info", "SHADOW_ADVISORY", "影子盘存在 advisory 风控提示", {
+            "triggered_rules": advisory_summary.get("triggered_rules", []),
+            "triggered_position_count": advisory_summary.get("triggered_position_count", 0),
+        })
+
+    level_counts, code_counts, code_level_counts = _count_alerts(alerts)
+    status = "ok"
+    if any(level in {"warning", "error", "block"} for level in level_counts):
+        status = "warning"
+    elif level_counts.get("info", 0) > 0:
+        status = "info"
+
+    snapshot_date = (
+        str(pool_snapshot.get("snapshot_date", "")).strip()
+        or str(market_snapshot.get("as_of_date", "")).strip()
+        or _today_str()
+    )
+    updated_at = _now_ts()
+    ack_summary = {
+        "acknowledged_count": sum(1 for alert in alerts if bool(alert.get("acknowledged"))),
+        "pending_count": sum(1 for alert in alerts if not bool(alert.get("acknowledged"))),
+        "all_acknowledged": bool(alerts) and all(bool(alert.get("acknowledged")) for alert in alerts),
+    }
+
+    summary = {
+        "status": status,
+        "alert_count": len(alerts),
+        "level_counts": level_counts,
+        "code_counts": code_counts,
+        "ack_summary": ack_summary,
+        "recent_updated_at": updated_at,
+        "snapshot_date": snapshot_date,
+    }
+
+    classification = {
+        "by_level": level_counts,
+        "by_code": code_counts,
+        "by_level_code": code_level_counts,
+    }
+
+    return {
+        "status": status,
+        "snapshot_date": snapshot_date,
+        "updated_at": updated_at,
+        "status_summary": summary,
+        "classification": classification,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+        "signal_bus_state": str(signal_bus.get("state", "")).strip(),
+        "pool_snapshot_date": str(pool_snapshot.get("snapshot_date", "")).strip(),
+        "market_signal": str(market_snapshot.get("signal", market_snapshot.get("market_signal", ""))).strip(),
+        "signal_bus": signal_bus,
+        "pool_snapshot": pool_snapshot,
+        "market_snapshot": market_snapshot,
+        "ack_summary": ack_summary,
+    }
+
+
+def save_alert_snapshot(snapshot: dict, conn: sqlite3.Connection | None = None) -> dict:
+    """Persist a structured alert snapshot to the ledger."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        snapshot = dict(snapshot or {})
+        detail = dict(snapshot)
+        summary = dict(snapshot.get("status_summary", {}))
+        classification = dict(snapshot.get("classification", {}))
+        ack_summary = dict(snapshot.get("ack_summary", {}))
+        detail.setdefault("status_summary", summary)
+        detail.setdefault("classification", classification)
+        detail.setdefault("ack_summary", ack_summary)
+        snapshot_date = str(snapshot.get("snapshot_date", _today_str())).strip() or _today_str()
+        updated_at = str(snapshot.get("updated_at", _now_ts())).strip() or _now_ts()
+        status = str(snapshot.get("status", summary.get("status", "ok"))).strip() or "ok"
+        alert_count = int(snapshot.get("alert_count", summary.get("alert_count", 0)) or 0)
+        level_counts = summary.get("level_counts", classification.get("by_level", {}))
+        code_counts = summary.get("code_counts", classification.get("by_code", {}))
+
+        conn.execute(
+            """
+            INSERT INTO alert_snapshots(
+              id, snapshot_date, updated_at, status, alert_count,
+              level_counts_json, code_counts_json, ack_counts_json, detail_json
+            ) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              snapshot_date = excluded.snapshot_date,
+              updated_at = excluded.updated_at,
+              status = excluded.status,
+              alert_count = excluded.alert_count,
+              level_counts_json = excluded.level_counts_json,
+              code_counts_json = excluded.code_counts_json,
+              ack_counts_json = excluded.ack_counts_json,
+              detail_json = excluded.detail_json
+            """,
+            (
+                snapshot_date,
+                updated_at,
+                status,
+                alert_count,
+                _json_dumps(level_counts),
+                _json_dumps(code_counts),
+                _json_dumps(ack_summary),
+                _json_dumps(detail),
+            ),
+        )
+        return {
+            **detail,
+            "snapshot_date": snapshot_date,
+            "updated_at": updated_at,
+            "status": status,
+            "alert_count": alert_count,
+        }
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
+
+
+def load_alert_snapshot(context: dict | None = None, refresh: bool = False) -> dict:
+    """Load or rebuild the structured alert center snapshot."""
+    if context is None and not refresh:
+        with _connect() as conn:
+            row = conn.execute("SELECT * FROM alert_snapshots WHERE id = 1").fetchone()
+            if row and row["snapshot_date"] == _today_str():
+                detail = _json_loads(row["detail_json"], {})
+                if isinstance(detail, dict) and detail:
+                    detail.setdefault("snapshot_date", row["snapshot_date"])
+                    detail.setdefault("updated_at", row["updated_at"])
+                    detail.setdefault("status", row["status"])
+                    detail.setdefault("alert_count", int(row["alert_count"]))
+                    detail.setdefault("status_summary", {
+                        "status": row["status"],
+                        "alert_count": int(row["alert_count"]),
+                        "level_counts": _json_loads(row["level_counts_json"], {}),
+                        "code_counts": _json_loads(row["code_counts_json"], {}),
+                        "ack_summary": _json_loads(row["ack_counts_json"], {}),
+                        "recent_updated_at": row["updated_at"],
+                        "snapshot_date": row["snapshot_date"],
+                    })
+                    detail.setdefault("classification", {
+                        "by_level": _json_loads(row["level_counts_json"], {}),
+                        "by_code": _json_loads(row["code_counts_json"], {}),
+                        "by_level_code": {},
+                    })
+                    return detail
+
+    if context is None:
+        from scripts.engine.composite import build_today_decision
+        from scripts.state.reason_codes import build_signal_bus_summary
+
+        strategy = get_strategy()
+        today_decision = build_today_decision(strategy=strategy)
+        pool_snapshot = load_pool_snapshot()
+        pool_sync_state = audit_state()
+        market_snapshot = load_market_snapshot()
+        shadow_snapshot = _shadow_trade_snapshot()
+        order_snapshot = load_order_snapshot(scope="paper_mx")
+        signal_bus = build_signal_bus_summary(
+            market_snapshot=market_snapshot,
+            pool_snapshot=pool_snapshot,
+            pool_audit=pool_sync_state,
+            today_decision=today_decision,
+            shadow_snapshot=shadow_snapshot,
+        )
+        context = {
+            "today_decision": today_decision,
+            "pool_sync_state": pool_sync_state,
+            "shadow_snapshot": shadow_snapshot,
+            "order_snapshot": order_snapshot,
+            "signal_bus": signal_bus,
+            "pool_snapshot": pool_snapshot,
+            "market_snapshot": market_snapshot,
+        }
+
+    snapshot = build_alert_center_snapshot(
+        today_decision=context.get("today_decision", {}),
+        pool_sync_state=context.get("pool_sync_state", {}),
+        shadow_snapshot=context.get("shadow_snapshot", {}),
+        order_snapshot=context.get("order_snapshot", {}),
+        signal_bus=context.get("signal_bus", {}),
+        pool_snapshot=context.get("pool_snapshot", {}),
+        market_snapshot=context.get("market_snapshot", {}),
+    )
+    return save_alert_snapshot(snapshot)
+
+
 def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: sqlite3.Connection | None = None) -> dict:
     """Persist the latest pool snapshot and project it back to YAML/Obsidian."""
     own_conn = conn is None
@@ -1977,6 +2346,282 @@ def load_activity_summary(window: str | int = "week", scope: str = PRIMARY_SCOPE
         "total_trades": len(buy_events) + len(sell_events),
         "realized_pnl": round(sum(_safe_float(event.get("realized_pnl", 0)) for event in sell_events), 2),
         "source": "structured_ledger",
+    }
+
+
+def _trade_review_tags(reason_codes: list[str]) -> list[str]:
+    tags = []
+    for code in reason_codes:
+        text = str(code or "").strip().upper()
+        if not text:
+            continue
+        if text.startswith("RISK_") and "risk" not in tags:
+            tags.append("risk")
+        elif text.startswith("POOL_") and "pool" not in tags:
+            tags.append("pool")
+        elif text.startswith("PAPER_RECONCILE") and "reconcile" not in tags:
+            tags.append("reconcile")
+        elif text.startswith("BUY_") and "entry" not in tags:
+            tags.append("entry")
+        elif text.startswith("TRADE_") and "trade" not in tags:
+            tags.append("trade")
+    return tags
+
+
+def _trade_holding_days_bucket(holding_days: int) -> str:
+    if holding_days <= 3:
+        return "0-3天"
+    if holding_days <= 7:
+        return "4-7天"
+    if holding_days <= 14:
+        return "8-14天"
+    if holding_days <= 30:
+        return "15-30天"
+    return "31天+"
+
+
+def _trade_exit_style(reason_codes: list[str]) -> tuple[str, str]:
+    normalized = _dedupe(
+        [
+            normalize_reason_code(code, category="trade")
+            for code in reason_codes
+            if str(code or "").strip()
+        ]
+    )
+    for code in normalized:
+        if code.startswith("RISK_") or code in {
+            "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT",
+            "TRADE_CONSECUTIVE_LOSS_COOLDOWN",
+            "TRADE_WEEKLY_BUY_LIMIT",
+            "TRADE_EXPOSURE_LIMIT",
+            "TRADE_HOLDING_LIMIT",
+        }:
+            return "risk", code
+    for code in normalized:
+        if code.startswith("POOL_"):
+            return "pool", code
+    for code in normalized:
+        if (
+            "RECONCILE" in code
+            or "MANUAL" in code
+            or "REPLY" in code
+            or code.startswith("DISCORD_")
+        ):
+            return "manual", code
+    return "other", ""
+
+
+def _trade_rule_compliance(reason_codes: list[str]) -> dict:
+    normalized = _dedupe(
+        [
+            normalize_reason_code(code, category="trade")
+            for code in reason_codes
+            if str(code or "").strip()
+        ]
+    )
+
+    has_drift = any(code == "TRADE_PAPER_RECONCILE_DRIFT" for code in normalized)
+    has_reconcile = any(
+        code.startswith("PAPER_RECONCILE_")
+        or code in {
+            "TRADE_PAPER_RECONCILE_OPEN",
+            "TRADE_PAPER_RECONCILE_FLATTEN",
+            "TRADE_PAPER_RECONCILE_ADD",
+            "TRADE_PAPER_RECONCILE_REDUCE",
+        }
+        for code in normalized
+    )
+    has_manual_override = any(
+        "MANUAL" in code or "REPLY" in code or code.startswith("DISCORD_")
+        for code in normalized
+    )
+    rule_break_count = sum(int(flag) for flag in (has_drift, has_reconcile, has_manual_override))
+    if has_drift:
+        status = "drift"
+    elif has_reconcile:
+        status = "reconcile"
+    elif has_manual_override:
+        status = "manual_override"
+    else:
+        status = "compliant"
+    return {
+        "status": status,
+        "has_drift": has_drift,
+        "has_reconcile": has_reconcile,
+        "has_manual_override": has_manual_override,
+        "reason_codes": [
+            code
+            for code in normalized
+            if code == "TRADE_PAPER_RECONCILE_DRIFT"
+            or code.startswith("PAPER_RECONCILE_")
+            or "MANUAL" in code
+            or "REPLY" in code
+            or code.startswith("DISCORD_")
+        ],
+        "rule_break_count": rule_break_count,
+    }
+
+
+def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
+    activity = load_activity_summary(window, scope=scope)
+    trade_events = list(activity.get("trade_events", []))
+    open_positions: dict[str, dict] = {}
+    closed_trades: list[dict] = []
+
+    def _event_date(value: dict) -> str:
+        return str(value.get("event_date") or value.get("trade_date") or value.get("date") or "").strip()[:10]
+
+    def _event_side(value: dict) -> str:
+        return str(value.get("side") or value.get("action") or "").strip().lower()
+
+    for event in sorted(trade_events, key=lambda item: (str(item.get("event_date", "")), str(item.get("created_at", "")))):
+        code = _normalize_code(event.get("code", ""))
+        if not code:
+            continue
+        side = _event_side(event)
+        shares = _safe_int(event.get("shares", 0), 0)
+        if shares <= 0:
+            continue
+        reason_code = str(event.get("reason_code", "")).strip()
+        reason_text = str(event.get("reason_text", event.get("reason", ""))).strip()
+        event_date = _event_date(event)
+        price = _safe_float(event.get("price", 0.0), 0.0)
+
+        if side == "buy":
+            position = open_positions.setdefault(
+                code,
+                {
+                    "code": code,
+                    "name": event.get("name", code),
+                    "entry_date": event_date,
+                    "entry_price": price,
+                    "entry_reason_code": reason_code,
+                    "entry_reason_text": reason_text,
+                    "entry_reason_codes": [],
+                    "buy_count": 0,
+                    "sell_count": 0,
+                    "shares_open": 0,
+                    "cost_amount": 0.0,
+                    "realized_pnl": 0.0,
+                    "exit_reason_codes": [],
+                    "exit_reason_texts": [],
+                    "exit_dates": [],
+                    "metadata": {"mfe_pct": None, "mae_pct": None},
+                },
+            )
+            if position["shares_open"] == 0:
+                position["entry_date"] = event_date
+                position["entry_price"] = price
+                position["entry_reason_code"] = reason_code
+                position["entry_reason_text"] = reason_text
+            position["name"] = event.get("name", position["name"])
+            position["buy_count"] += 1
+            position["shares_open"] += shares
+            position["cost_amount"] += round(price * shares, 2)
+            if reason_code and reason_code not in position["entry_reason_codes"]:
+                position["entry_reason_codes"].append(reason_code)
+            continue
+
+        if side != "sell":
+            continue
+
+        position = open_positions.get(code)
+        if not position:
+            continue
+        close_qty = min(shares, position["shares_open"])
+        if close_qty <= 0:
+            continue
+        position["sell_count"] += 1
+        position["shares_open"] -= close_qty
+        avg_cost = (position["cost_amount"] / (position["shares_open"] + close_qty)) if (position["shares_open"] + close_qty) > 0 else 0.0
+        position["cost_amount"] = max(position["cost_amount"] - avg_cost * close_qty, 0.0)
+        position["realized_pnl"] += _safe_float(event.get("realized_pnl", 0.0), 0.0)
+        if reason_code and reason_code not in position["exit_reason_codes"]:
+            position["exit_reason_codes"].append(reason_code)
+        if reason_text and reason_text not in position["exit_reason_texts"]:
+            position["exit_reason_texts"].append(reason_text)
+        if event_date:
+            position["exit_dates"].append(event_date)
+
+            if position["shares_open"] == 0:
+                hold_days = 0
+                if position["entry_date"] and event_date:
+                    try:
+                        hold_days = (
+                        datetime.strptime(event_date, "%Y-%m-%d").date()
+                        - datetime.strptime(position["entry_date"], "%Y-%m-%d").date()
+                    ).days
+                    except Exception:
+                        hold_days = 0
+            holding_days_bucket = _trade_holding_days_bucket(hold_days)
+            entry_tags = _trade_review_tags(position["entry_reason_codes"])
+            exit_tags = _trade_review_tags(position["exit_reason_codes"])
+            all_reason_codes = list(position["entry_reason_codes"]) + list(position["exit_reason_codes"])
+            exit_style, exit_style_code = _trade_exit_style(position["exit_reason_codes"])
+            rule_compliance = _trade_rule_compliance(all_reason_codes)
+            closed_trades.append(
+                {
+                    "code": code,
+                    "name": position["name"],
+                    "entry_date": position["entry_date"],
+                    "exit_date": event_date,
+                    "holding_days": hold_days,
+                    "holding_days_bucket": holding_days_bucket,
+                    "entry_price": round(position["entry_price"], 3),
+                    "exit_price": round(price, 3),
+                    "buy_count": position["buy_count"],
+                    "sell_count": position["sell_count"],
+                    "entry_reason_code": position["entry_reason_code"],
+                    "entry_reason_codes": position["entry_reason_codes"],
+                    "entry_reason_text": position["entry_reason_text"],
+                    "exit_reason_codes": position["exit_reason_codes"],
+                    "exit_reason_texts": position["exit_reason_texts"],
+                    "realized_pnl": round(position["realized_pnl"], 2),
+                    "rule_tags": sorted(set(entry_tags + exit_tags)),
+                    "exit_style": exit_style,
+                    "exit_style_reason_code": exit_style_code,
+                    "rule_compliance": rule_compliance,
+                    "rule_break_count": rule_compliance["rule_break_count"],
+                    "mfe_pct": None,
+                    "mae_pct": None,
+                }
+            )
+            open_positions.pop(code, None)
+
+    total_realized_pnl = round(sum(_safe_float(item.get("realized_pnl", 0.0), 0.0) for item in closed_trades), 2)
+    winners = [item for item in closed_trades if _safe_float(item.get("realized_pnl", 0.0), 0.0) > 0]
+    losers = [item for item in closed_trades if _safe_float(item.get("realized_pnl", 0.0), 0.0) < 0]
+    holding_days_values = [int(item.get("holding_days", 0) or 0) for item in closed_trades]
+    avg_holding_days = round(sum(holding_days_values) / len(holding_days_values), 1) if holding_days_values else 0.0
+    avg_win = round(
+        sum(_safe_float(item.get("realized_pnl", 0.0), 0.0) for item in winners) / len(winners),
+        2,
+    ) if winners else 0.0
+    avg_loss = round(
+        sum(_safe_float(item.get("realized_pnl", 0.0), 0.0) for item in losers) / len(losers),
+        2,
+    ) if losers else 0.0
+    rule_break_count = sum(_safe_int(item.get("rule_break_count", 0), 0) for item in closed_trades)
+    summary_stats = {
+        "avg_holding_days": avg_holding_days,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "rule_break_count": rule_break_count,
+    }
+    return {
+        "scope": scope,
+        "window": window,
+        "closed_trade_count": len(closed_trades),
+        "win_count": len(winners),
+        "loss_count": len(losers),
+        "win_rate": round((len(winners) / len(closed_trades) * 100), 1) if closed_trades else 0.0,
+        "total_realized_pnl": total_realized_pnl,
+        "open_position_count": len(open_positions),
+        "closed_trades": closed_trades,
+        "open_positions": list(open_positions.values()),
+        "summary_stats": summary_stats,
+        "source": activity.get("source", "structured_ledger"),
+        "mfe_mae_status": "pending_market_history",
     }
 
 

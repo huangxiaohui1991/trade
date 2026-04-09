@@ -101,6 +101,156 @@
       ]
     }
   },
+  "alert_snapshot": {
+    "status": "warning",
+    "snapshot_date": "2026-04-09",
+    "alert_count": 4,
+    "status_summary": {
+      "status": "warning",
+      "alert_count": 4,
+      "level_counts": {
+        "warning": 2,
+        "info": 2
+      },
+      "code_counts": {
+        "TRADE_PAPER_RECONCILE_DRIFT": 1,
+        "ORDER_CONFIRM_PENDING": 1,
+        "ORDER_EXCEPTION": 1,
+        "SHADOW_ADVISORY": 1
+      },
+      "ack_summary": {
+        "acknowledged_count": 0,
+        "pending_count": 4,
+        "all_acknowledged": false
+      },
+      "snapshot_date": "2026-04-09"
+    },
+    "classification": {
+      "by_level": {
+        "warning": 2,
+        "info": 2
+      },
+      "by_code": {
+        "TRADE_PAPER_RECONCILE_DRIFT": 1,
+        "ORDER_CONFIRM_PENDING": 1,
+        "ORDER_EXCEPTION": 1,
+        "SHADOW_ADVISORY": 1
+      },
+      "by_level_code": {
+        "warning": {
+          "TRADE_PAPER_RECONCILE_DRIFT": 1,
+          "ORDER_EXCEPTION": 1
+        },
+        "info": {
+          "ORDER_CONFIRM_PENDING": 1,
+          "SHADOW_ADVISORY": 1
+        }
+      }
+    },
+    "ack_summary": {
+      "acknowledged_count": 0,
+      "pending_count": 4,
+      "all_acknowledged": false
+    },
+    "signal_bus_state": "drift",
+    "pool_snapshot_date": "2026-04-09",
+    "market_signal": "CLEAR",
+    "alerts": [
+      {
+        "level": "warning",
+        "code": "TRADE_PAPER_RECONCILE_DRIFT",
+        "summary": "模拟盘事件流与 broker 状态不一致",
+        "details": {
+          "event_only_codes": [
+            "300389"
+          ],
+          "broker_only_codes": []
+        },
+        "acknowledged": false,
+        "acknowledged_at": "",
+        "acknowledged_by": ""
+      },
+      {
+        "level": "info",
+        "code": "ORDER_CONFIRM_PENDING",
+        "summary": "存在待确认条件单",
+        "details": {
+          "pending_count": 1,
+          "condition_orders": {
+            "count": 2,
+            "pending_count": 1,
+            "open_count": 1,
+            "exception_count": 0,
+            "status_counts": {
+              "candidate": 1,
+              "placed": 1
+            },
+            "condition_type_counts": {
+              "take_profit_t1": 1,
+              "manual_stop": 1
+            },
+            "sample": [
+              {
+                "external_id": "paper:order:001",
+                "code": "300389",
+                "name": "艾比森",
+                "side": "sell",
+                "status": "candidate",
+                "condition_type": "take_profit_t1",
+                "requested_shares": 1000,
+                "filled_shares": 0,
+                "trigger_price": 20.5,
+                "limit_price": 20.45,
+                "confirm_status": "pending"
+              },
+              {
+                "external_id": "paper:order:002",
+                "code": "603063",
+                "name": "禾望电气",
+                "side": "sell",
+                "status": "placed",
+                "condition_type": "manual_stop",
+                "requested_shares": 600,
+                "filled_shares": 0,
+                "trigger_price": 18.2,
+                "limit_price": 18.1,
+                "confirm_status": "not_required"
+              }
+            ]
+          }
+        },
+        "acknowledged": false,
+        "acknowledged_at": "",
+        "acknowledged_by": ""
+      },
+      {
+        "level": "warning",
+        "code": "ORDER_EXCEPTION",
+        "summary": "存在异常订单",
+        "details": {
+          "exception_count": 1
+        },
+        "acknowledged": false,
+        "acknowledged_at": "",
+        "acknowledged_by": ""
+      },
+      {
+        "level": "info",
+        "code": "SHADOW_ADVISORY",
+        "summary": "影子盘存在 advisory 风控提示",
+        "details": {
+          "triggered_rules": [
+            "RISK_TIME_STOP",
+            "RISK_DRAWDOWN_TAKE_PROFIT"
+          ],
+          "triggered_position_count": 0
+        },
+        "acknowledged": false,
+        "acknowledged_at": "",
+        "acknowledged_by": ""
+      }
+    ]
+  },
   "pool_sync_state": {
     "status": "ok",
     "snapshot_date": "2026-04-09"

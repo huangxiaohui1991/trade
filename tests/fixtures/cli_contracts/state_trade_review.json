@@ -1,0 +1,45 @@
+{
+  "command": "state",
+  "action": "trade-review",
+  "status": "ok",
+  "db_path": "/tmp/trade_state.sqlite3",
+  "scope": "cn_a_system",
+  "window": 90,
+  "closed_trade_count": 1,
+  "win_count": 1,
+  "loss_count": 0,
+  "win_rate": 100.0,
+  "total_realized_pnl": 2200.0,
+  "mfe_mae_status": "pending_market_history",
+  "closed_trades": [
+    {
+      "code": "300389",
+      "name": "艾比森",
+      "entry_date": "2026-04-07",
+      "exit_date": "2026-04-09",
+      "holding_days": 2,
+      "entry_price": 19.1,
+      "exit_price": 21.3,
+      "buy_count": 1,
+      "sell_count": 1,
+      "entry_reason_code": "BUY_CORE_POOL",
+      "entry_reason_codes": [
+        "BUY_CORE_POOL"
+      ],
+      "entry_reason_text": "核心池评分7.6",
+      "exit_reason_codes": [
+        "RISK_TAKE_PROFIT_T1"
+      ],
+      "exit_reason_texts": [
+        "第一批止盈"
+      ],
+      "realized_pnl": 2200.0,
+      "rule_tags": [
+        "entry",
+        "risk"
+      ],
+      "mfe_pct": null,
+      "mae_pct": null
+    }
+  ]
+}

@@ -37,6 +37,7 @@ from scripts.utils.discord_push import send_weekly_report
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
 from scripts.engine.trading_record import load_activity_summary
+from scripts.state import load_trade_review
 
 _logger = get_logger("pipeline.weekly_review")
 
@@ -95,7 +96,8 @@ def _safe_date_key(event: dict) -> str:
 def _build_weekly_report(vault: ObsidianVault, stats: dict,
                          core_pool_changes: list, trade_events: list,
                          year: int, week_num: int,
-                         shadow_advisories: list | None = None) -> str:
+                         shadow_advisories: list | None = None,
+                         trade_review: dict | None = None) -> str:
     """生成周报 markdown 内容"""
     week_str = f"{year}-W{week_num:02d}"
 
@@ -219,6 +221,37 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         "",
         "",
     ])
+
+    lines.extend(["", "---", "", "## 复盘归因（结构化闭合交易）", ""])
+    closed_trades = list((trade_review or {}).get("closed_trades", []))
+    review_summary = dict((trade_review or {}).get("summary_stats", {}))
+    lines.append("| 指标 | 数值 |")
+    lines.append("|------|------|")
+    lines.append(f"| 平均持有天数 | {float(review_summary.get('avg_holding_days', 0.0)):.1f} 天 |")
+    lines.append(f"| 平均盈利单笔 | ¥{_safe_float(review_summary.get('avg_win', 0.0)):+,.2f} |")
+    lines.append(f"| 平均亏损单笔 | ¥{_safe_float(review_summary.get('avg_loss', 0.0)):+,.2f} |")
+    lines.append(f"| 规则违例数 | {int(review_summary.get('rule_break_count', 0) or 0)} |")
+    lines.append("")
+    if closed_trades:
+        lines.append("| 股票 | 开始 | 结束 | 持有天数 | 入场原因 | 出场原因 | 已实现盈亏 | 标签 |")
+        lines.append("|------|------|------|----------|----------|----------|------------|------|")
+        for item in closed_trades:
+            entry_reason = (
+                ",".join(item.get("entry_reason_codes", [])[:2])
+                or item.get("entry_reason_code", "")
+                or "—"
+            )
+            exit_reason = ",".join(item.get("exit_reason_codes", [])[:2]) or "—"
+            tags = ",".join(item.get("rule_tags", [])) or "—"
+            lines.append(
+                f"| {item.get('name', '—')} | {item.get('entry_date', '—')} | {item.get('exit_date', '—')} | "
+                f"{item.get('holding_days', '—')} | {entry_reason} | {exit_reason} | "
+                f"¥{_safe_float(item.get('realized_pnl', 0)):+,.2f} | {tags} |"
+            )
+        lines.append("")
+        lines.append(f"> MFE/MAE 暂未接入历史行情，当前状态：{(trade_review or {}).get('mfe_mae_status', 'pending')}")
+    else:
+        lines.append("（本周无闭合交易可归因）")
 
     # 核心池变化
     lines.extend(["", "---", "", "## 核心池变化", ""])
@@ -385,6 +418,7 @@ def run() -> dict:
             })
 
         shadow_advisories = []
+        trade_review = {}
         try:
             from scripts.pipeline.shadow_trade import get_status as get_shadow_status
             shadow_status = get_shadow_status()
@@ -393,10 +427,14 @@ def run() -> dict:
                 _logger.info(f"  影子盘 advisory 提示: {len(shadow_advisories)} 只")
         except Exception as e:
             _logger.warning(f"  影子盘 advisory 汇总失败: {e}")
+        try:
+            trade_review = load_trade_review(window=7, scope="cn_a_system")
+        except Exception as e:
+            _logger.warning(f"  交易归因汇总失败: {e}")
 
         _logger.info(">> 生成周报文件...")
         report_content, summary_stats = _build_weekly_report(
-            vault, stats, core_pool_changes, trade_events, year, week_num, shadow_advisories
+            vault, stats, core_pool_changes, trade_events, year, week_num, shadow_advisories, trade_review
         )
 
         review_dir = Path(vault.vault_path) / "03-复盘" / "周"
@@ -447,6 +485,7 @@ def run() -> dict:
                 "sell_count": sell_count,
                 "realized_pnl": realized_pnl,
                 "shadow_advisory_count": len(shadow_advisories),
+                "closed_trade_review_count": int(trade_review.get("closed_trade_count", 0) or 0),
             },
         )
 

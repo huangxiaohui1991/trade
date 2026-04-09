@@ -1,6 +1,8 @@
+import os
 import contextlib
 import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +16,18 @@ def _load_fixture(name: str) -> dict:
 
 
 class CLIJsonContractTests(unittest.TestCase):
+    def setUp(self):
+        self._old_db_path = os.environ.get("TRADE_STATE_DB_PATH")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        os.environ["TRADE_STATE_DB_PATH"] = str(Path(self._tmpdir.name) / "trade_state.sqlite3")
+
+    def tearDown(self):
+        if self._old_db_path is None:
+            os.environ.pop("TRADE_STATE_DB_PATH", None)
+        else:
+            os.environ["TRADE_STATE_DB_PATH"] = self._old_db_path
+        self._tmpdir.cleanup()
+
     def _run_main(self, argv: list[str], patches: list[mock._patch]) -> dict:
         import scripts.cli.trade as trade
 
@@ -25,6 +39,20 @@ class CLIJsonContractTests(unittest.TestCase):
             with contextlib.redirect_stdout(stdout):
                 trade.main()
         return json.loads(stdout.getvalue())
+
+    def _alert_items_contract(self, alerts: list[dict]) -> list[dict]:
+        return [
+            {
+                "level": item["level"],
+                "code": item["code"],
+                "summary": item["summary"],
+                "details": item["details"],
+                "acknowledged": item["acknowledged"],
+                "acknowledged_at": item["acknowledged_at"],
+                "acknowledged_by": item["acknowledged_by"],
+            }
+            for item in alerts
+        ]
 
     def _doctor_contract(self, payload: dict) -> dict:
         checks = payload["checks"]
@@ -193,6 +221,29 @@ class CLIJsonContractTests(unittest.TestCase):
                     "reason_codes": payload["signal_bus"]["trade"]["reason_codes"],
                 },
             },
+            "alert_snapshot": {
+                "status": payload["alert_snapshot"]["status"],
+                "snapshot_date": payload["alert_snapshot"]["snapshot_date"],
+                "alert_count": payload["alert_snapshot"]["alert_count"],
+                "status_summary": {
+                    "status": payload["alert_snapshot"]["status_summary"]["status"],
+                    "alert_count": payload["alert_snapshot"]["status_summary"]["alert_count"],
+                    "level_counts": payload["alert_snapshot"]["status_summary"]["level_counts"],
+                    "code_counts": payload["alert_snapshot"]["status_summary"]["code_counts"],
+                    "ack_summary": payload["alert_snapshot"]["status_summary"]["ack_summary"],
+                    "snapshot_date": payload["alert_snapshot"]["status_summary"]["snapshot_date"],
+                },
+                "classification": {
+                    "by_level": payload["alert_snapshot"]["classification"]["by_level"],
+                    "by_code": payload["alert_snapshot"]["classification"]["by_code"],
+                    "by_level_code": payload["alert_snapshot"]["classification"]["by_level_code"],
+                },
+                "ack_summary": payload["alert_snapshot"]["ack_summary"],
+                "signal_bus_state": payload["alert_snapshot"]["signal_bus_state"],
+                "pool_snapshot_date": payload["alert_snapshot"]["pool_snapshot_date"],
+                "market_signal": payload["alert_snapshot"]["market_signal"],
+                "alerts": self._alert_items_contract(payload["alert_snapshot"]["alerts"]),
+            },
             "pool_sync_state": {
                 "status": payload["pool_sync_state"]["status"],
                 "snapshot_date": payload["pool_sync_state"]["snapshot_date"],
@@ -294,6 +345,50 @@ class CLIJsonContractTests(unittest.TestCase):
             "discord_error": payload["discord_error"],
             "pending": payload["pending"],
             "content": payload["content"],
+        }
+
+    def _state_trade_review_contract(self, payload: dict) -> dict:
+        return {
+            "command": payload["command"],
+            "action": payload["action"],
+            "status": payload["status"],
+            "db_path": payload["db_path"],
+            "scope": payload["scope"],
+            "window": payload["window"],
+            "closed_trade_count": payload["closed_trade_count"],
+            "win_count": payload["win_count"],
+            "loss_count": payload["loss_count"],
+            "win_rate": payload["win_rate"],
+            "total_realized_pnl": payload["total_realized_pnl"],
+            "mfe_mae_status": payload["mfe_mae_status"],
+            "closed_trades": payload["closed_trades"],
+        }
+
+    def _state_alerts_contract(self, payload: dict) -> dict:
+        return {
+            "command": payload["command"],
+            "action": payload["action"],
+            "status": payload["status"],
+            "db_path": payload["db_path"],
+            "alert_count": payload["alert_count"],
+            "snapshot_date": payload["snapshot_date"],
+            "signal_bus_state": payload["signal_bus_state"],
+            "pool_snapshot_date": payload["pool_snapshot_date"],
+            "status_summary": {
+                "status": payload["status_summary"]["status"],
+                "alert_count": payload["status_summary"]["alert_count"],
+                "level_counts": payload["status_summary"]["level_counts"],
+                "code_counts": payload["status_summary"]["code_counts"],
+                "ack_summary": payload["status_summary"]["ack_summary"],
+                "snapshot_date": payload["status_summary"]["snapshot_date"],
+            },
+            "classification": {
+                "by_level": payload["classification"]["by_level"],
+                "by_code": payload["classification"]["by_code"],
+                "by_level_code": payload["classification"]["by_level_code"],
+            },
+            "ack_summary": payload["ack_summary"],
+            "alerts": self._alert_items_contract(payload["alerts"]),
         }
 
     def _run_for_orders(self, argv_variants: list[list[str]], patches: list[mock._patch], contract_fn, fixture_name: str):
@@ -462,6 +557,7 @@ class CLIJsonContractTests(unittest.TestCase):
         patches = [
             mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
             mock.patch.object(trade, "_preflight_state_sync", return_value={"status": "success", "target": "all", "steps": []}),
+            mock.patch("scripts.state.service._now_ts", return_value="2026-04-09T09:30:00"),
             mock.patch.object(trade, "load_daily_state", return_value={
                 "date": "2026-04-09",
                 "updated_at": "2026-04-09T09:00:00",
@@ -758,6 +854,129 @@ class CLIJsonContractTests(unittest.TestCase):
             patches,
             self._state_remind_contract,
             "state_remind.json",
+        )
+
+    def test_state_trade_review_json_contract(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
+            mock.patch.object(trade, "load_trade_review", return_value={
+                "scope": "cn_a_system",
+                "window": 90,
+                "closed_trade_count": 1,
+                "win_count": 1,
+                "loss_count": 0,
+                "win_rate": 100.0,
+                "total_realized_pnl": 2200.0,
+                "open_position_count": 0,
+                "closed_trades": [
+                    {
+                        "code": "300389",
+                        "name": "艾比森",
+                        "entry_date": "2026-04-07",
+                        "exit_date": "2026-04-09",
+                        "holding_days": 2,
+                        "entry_price": 19.1,
+                        "exit_price": 21.3,
+                        "buy_count": 1,
+                        "sell_count": 1,
+                        "entry_reason_code": "BUY_CORE_POOL",
+                        "entry_reason_codes": ["BUY_CORE_POOL"],
+                        "entry_reason_text": "核心池评分7.6",
+                        "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                        "exit_reason_texts": ["第一批止盈"],
+                        "realized_pnl": 2200.0,
+                        "rule_tags": ["entry", "risk"],
+                        "mfe_pct": None,
+                        "mae_pct": None,
+                    }
+                ],
+                "open_positions": [],
+                "source": "structured_ledger",
+                "mfe_mae_status": "pending_market_history",
+            }),
+        ]
+
+        self._run_for_orders(
+            [["trade", "--json", "state", "trade-review"], ["trade", "state", "trade-review", "--json"]],
+            patches,
+            self._state_trade_review_contract,
+            "state_trade_review.json",
+        )
+
+    def test_state_alerts_json_contract(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
+            mock.patch.object(trade, "get_strategy", return_value={}),
+            mock.patch("scripts.state.service._now_ts", return_value="2026-04-09T09:30:00"),
+            mock.patch.object(trade, "build_today_decision", return_value={
+                "decision": "NO_TRADE",
+                "market_signal": "CLEAR",
+                "portfolio_risk": {
+                    "state": "block",
+                    "reason_codes": ["TRADE_CONSECUTIVE_LOSS_COOLDOWN"],
+                    "reasons": ["连续亏损冷却中"],
+                },
+            }),
+            mock.patch.object(trade, "load_pool_snapshot", return_value={"snapshot_date": "2026-04-09"}),
+            mock.patch.object(trade, "audit_state", return_value={"status": "drift", "snapshot_date": "2026-04-09"}),
+            mock.patch.object(trade, "load_market_snapshot", return_value={"signal": "CLEAR"}),
+            mock.patch.object(trade, "_shadow_trade_snapshot", return_value={
+                "consistency": {
+                    "ok": False,
+                    "status": "drift",
+                    "event_only_codes": ["300389"],
+                    "broker_only_codes": [],
+                },
+                "advisory_summary": {
+                    "triggered_signal_count": 1,
+                    "triggered_position_count": 1,
+                    "triggered_rules": ["RISK_TIME_STOP"],
+                },
+            }),
+            mock.patch.object(trade, "load_order_snapshot", return_value={
+                "scope": "paper_mx",
+                "status": "all",
+                "db_path": "/tmp/trade_state.sqlite3",
+                "orders": [
+                    {
+                        "external_id": "paper:order:001",
+                        "scope": "paper_mx",
+                        "order_class": "condition",
+                        "condition_type": "manual_stop",
+                        "code": "300389",
+                        "name": "艾比森",
+                        "side": "sell",
+                        "status": "candidate",
+                        "requested_shares": 1000,
+                        "filled_shares": 0,
+                        "trigger_price": 20.5,
+                        "limit_price": 20.45,
+                        "confirm_status": "pending",
+                    }
+                ],
+                "summary": {
+                    "order_count": 1,
+                    "open_count": 0,
+                    "terminal_count": 0,
+                    "status_counts": {"candidate": 1},
+                    "scope_counts": {"paper_mx": 1},
+                    "class_counts": {"condition": 1},
+                    "pending_count": 1,
+                    "exception_count": 0,
+                },
+            }),
+            mock.patch.object(trade, "build_signal_bus_summary", return_value={"state": "drift"}),
+        ]
+
+        self._run_for_orders(
+            [["trade", "--json", "state", "alerts"], ["trade", "state", "alerts", "--json"]],
+            patches,
+            self._state_alerts_contract,
+            "state_alerts.json",
         )
 
 

@@ -193,6 +193,10 @@
 
 - 让评分阈值、权重、止损止盈参数可验证，而不是靠经验固定
 
+当前状态：
+
+- 已有 `bin/trade backtest run` 和 `bin/trade backtest walk-forward` 最小骨架，可从结构化 state 或 fixture 读取输入并输出结构化摘要
+
 待办 backlog：
 
 1. 历史样本数据组织

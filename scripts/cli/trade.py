@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
+from scripts.backtest import run_backtest, run_walk_forward
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
 from scripts.pipeline.morning import run as run_morning
@@ -42,10 +43,12 @@ from scripts.state import (
     audit_state,
     bootstrap_state,
     load_market_snapshot,
+    load_alert_snapshot,
     load_pool_action_history,
     load_order_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
+    load_trade_review,
     pending_condition_order_items,
     sync_activity_state,
     sync_portfolio_state,
@@ -362,6 +365,83 @@ def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> di
     }
 
 
+def _build_alert_snapshot(today_decision: dict, pool_sync_state: dict, shadow_snapshot: dict,
+                          order_snapshot: dict, signal_bus: dict, pool_snapshot: dict | None = None) -> dict:
+    alerts = []
+
+    def add_alert(level: str, code: str, summary: str, details: dict | None = None):
+        alerts.append({
+            "level": level,
+            "code": code,
+            "summary": summary,
+            "details": details or {},
+        })
+
+    if pool_sync_state.get("status") not in {"", "ok"}:
+        add_alert("warning", "POOL_SYNC_DRIFT", "池子投影存在漂移", {
+            "status": pool_sync_state.get("status", ""),
+            "snapshot_date": pool_sync_state.get("snapshot_date", ""),
+        })
+
+    consistency = shadow_snapshot.get("consistency", {}) or {}
+    if consistency.get("status") not in {"", "ok"} or not consistency.get("ok", True):
+        add_alert("warning", "TRADE_PAPER_RECONCILE_DRIFT", "模拟盘事件流与 broker 状态不一致", {
+            "event_only_codes": consistency.get("event_only_codes", []),
+            "broker_only_codes": consistency.get("broker_only_codes", []),
+        })
+
+    order_summary = order_snapshot.get("summary", {}) if isinstance(order_snapshot, dict) else {}
+    if int(order_summary.get("pending_count", 0) or 0) > 0:
+        add_alert("info", "ORDER_CONFIRM_PENDING", "存在待确认条件单", {
+            "pending_count": order_summary.get("pending_count", 0),
+            "condition_orders": order_snapshot.get("condition_orders", {}),
+        })
+    if int(order_summary.get("exception_count", 0) or 0) > 0:
+        add_alert("warning", "ORDER_EXCEPTION", "存在异常订单", {
+            "exception_count": order_summary.get("exception_count", 0),
+        })
+
+    portfolio_risk = today_decision.get("portfolio_risk", {}) if isinstance(today_decision, dict) else {}
+    if portfolio_risk.get("state") == "block":
+        add_alert("warning", "PORTFOLIO_RISK_BLOCK", "组合级风控阻断交易", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+    elif portfolio_risk.get("state") == "warning":
+        add_alert("info", "PORTFOLIO_RISK_WARNING", "组合级风控预警", {
+            "reason_codes": portfolio_risk.get("reason_codes", []),
+            "reasons": portfolio_risk.get("reasons", []),
+        })
+
+    market_signal = str(today_decision.get("market_signal", "")).strip().upper()
+    if market_signal in {"RED", "CLEAR"}:
+        add_alert("info", f"MARKET_{market_signal}", "当前市场状态不支持主动开仓", {
+            "market_signal": market_signal,
+        })
+
+    advisory_summary = shadow_snapshot.get("advisory_summary", {}) or {}
+    if int(advisory_summary.get("triggered_signal_count", 0) or 0) > 0:
+        add_alert("info", "SHADOW_ADVISORY", "影子盘存在 advisory 风控提示", {
+            "triggered_rules": advisory_summary.get("triggered_rules", []),
+            "triggered_position_count": advisory_summary.get("triggered_position_count", 0),
+        })
+
+    levels = [item["level"] for item in alerts]
+    overall = "ok"
+    if "warning" in levels:
+        overall = "warning"
+    elif "info" in levels:
+        overall = "info"
+
+    return {
+        "status": overall,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+        "signal_bus_state": signal_bus.get("state", ""),
+        "pool_snapshot_date": (pool_snapshot or {}).get("snapshot_date", ""),
+    }
+
+
 def _combined_state_audit() -> dict:
     base_audit = audit_state()
     shadow_snapshot = _shadow_trade_snapshot()
@@ -564,6 +644,36 @@ def state_command(action: str, args) -> dict:
             snapshot_date=getattr(args, "snapshot_date", None),
         )
         result["status"] = "ok"
+    elif action == "trade-review":
+        result = load_trade_review(
+            window=getattr(args, "window", 90),
+            scope=getattr(args, "scope", "cn_a_system"),
+        )
+        result["status"] = "ok"
+    elif action == "alerts":
+        strategy = get_strategy()
+        today_decision = build_today_decision(strategy=strategy)
+        pool_snapshot = load_pool_snapshot()
+        pool_sync_state = audit_state()
+        market_snapshot = load_market_snapshot()
+        shadow_snapshot = _shadow_trade_snapshot()
+        order_snapshot = _compact_order_snapshot(load_order_snapshot(scope="paper_mx"))
+        signal_bus = build_signal_bus_summary(
+            market_snapshot=market_snapshot,
+            pool_snapshot=pool_snapshot,
+            pool_audit=pool_sync_state,
+            today_decision=today_decision,
+            shadow_snapshot=shadow_snapshot,
+        )
+        result = load_alert_snapshot(context={
+            "today_decision": today_decision,
+            "pool_sync_state": pool_sync_state,
+            "shadow_snapshot": shadow_snapshot,
+            "order_snapshot": order_snapshot,
+            "signal_bus": signal_bus,
+            "pool_snapshot": pool_snapshot,
+            "market_snapshot": market_snapshot,
+        })
     else:
         result = _combined_state_audit()
     return sanitize_for_json({
@@ -812,6 +922,15 @@ def status_today(sync_state: bool = True) -> dict:
         today_decision=today_decision,
         shadow_snapshot=shadow_snapshot,
     )
+    alert_snapshot = load_alert_snapshot(context={
+        "today_decision": today_decision,
+        "pool_sync_state": pool_sync_state,
+        "shadow_snapshot": shadow_snapshot,
+        "order_snapshot": order_snapshot,
+        "signal_bus": signal_bus,
+        "pool_snapshot": pool_snapshot,
+        "market_snapshot": market_snapshot,
+    })
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -838,6 +957,7 @@ def status_today(sync_state: bool = True) -> dict:
             "as_of_date": market_snapshot.get("as_of_date", ""),
         },
         "signal_bus": signal_bus,
+        "alert_snapshot": alert_snapshot,
         "pool_sync_state": pool_sync_state,
         "paper_trade_audit": shadow_snapshot.get("consistency", {}),
         "order_snapshot": order_snapshot,
@@ -1025,6 +1145,24 @@ def main():
     state_pool_actions = state_sub.add_parser("pool-actions")
     state_pool_actions.add_argument("--limit", type=int, default=50, help="Maximum number of pool actions to return")
     state_pool_actions.add_argument("--snapshot-date", default=None, help="Optional YYYY-MM-DD snapshot date filter")
+    state_trade_review = state_sub.add_parser("trade-review")
+    state_trade_review.add_argument("--window", type=int, default=90, help="Lookback window for structured trade review")
+    state_trade_review.add_argument("--scope", default="cn_a_system", help="Scope for structured trade review")
+    state_sub.add_parser("alerts")
+
+    backtest_parser = sub.add_parser("backtest", help="Run structured backtest and walk-forward summaries")
+    backtest_sub = backtest_parser.add_subparsers(dest="action", required=True)
+    backtest_run = backtest_sub.add_parser("run")
+    backtest_run.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_run.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_run.add_argument("--scope", default="cn_a_system", help="Scope for backtest")
+    backtest_run.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_walk = backtest_sub.add_parser("walk-forward")
+    backtest_walk.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_walk.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_walk.add_argument("--scope", default="cn_a_system", help="Scope for walk-forward")
+    backtest_walk.add_argument("--folds", type=int, default=3, help="Walk-forward folds")
+    backtest_walk.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -1068,6 +1206,22 @@ def main():
                     result = orchestrate_workflow(args.workflow, args)
                 elif args.command == "state":
                     result = state_command(args.action, args)
+                elif args.command == "backtest":
+                    if args.action == "run":
+                        result = run_backtest(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            fixture=args.fixture,
+                        )
+                    else:
+                        result = run_walk_forward(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            folds=args.folds,
+                            fixture=args.fixture,
+                        )
                 else:
                     result = status_today()
         finally:
@@ -1095,6 +1249,22 @@ def main():
             result = orchestrate_workflow(args.workflow, args)
         elif args.command == "state":
             result = state_command(args.action, args)
+        elif args.command == "backtest":
+            if args.action == "run":
+                result = run_backtest(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    fixture=args.fixture,
+                )
+            else:
+                result = run_walk_forward(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    folds=args.folds,
+                    fixture=args.fixture,
+                )
         else:
             result = status_today()
 
@@ -1139,6 +1309,18 @@ def main():
                 print(f"send: {result.get('send', False)} discord_ok={result.get('discord_ok', False)}")
             elif result.get("action") == "pool-actions":
                 print(f"pool_actions: {result.get('action_count', 0)}")
+            elif result.get("action") == "trade-review":
+                print(f"closed_trades: {result.get('closed_trade_count', 0)} win_rate={result.get('win_rate', 0)}")
+            elif result.get("action") == "alerts":
+                print(f"alerts: {result.get('alert_count', 0)} status={result.get('status', 'ok')}")
+        elif result.get("command") == "backtest":
+            print(f"backtest {result.get('action')}: {result.get('status', 'ok')}")
+            print(f"sample_count: {result.get('sample_count', 0)}")
+            print(
+                "score_summary: "
+                f"win_rate={result.get('score_summary', {}).get('win_rate', result.get('score_summary', {}).get('mean_win_rate', 0))} "
+                f"pnl={result.get('score_summary', {}).get('total_realized_pnl', 0)}"
+            )
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")
