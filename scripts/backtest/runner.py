@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,197 @@ def _status_from_components(*components: str) -> str:
     if any(component in {"warning", "block"} for component in normalized):
         return "warning"
     return "ok"
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _date_in_range(value: str, start: date, end: date) -> bool:
+    try:
+        current = datetime.strptime(str(value), "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return start <= current <= end
+
+
+def _extract_entry_score(trade: dict[str, Any]) -> float | None:
+    for key in ("entry_score", "score", "total_score"):
+        if key in trade and trade.get(key) not in (None, ""):
+            return _safe_float(trade.get(key), 0.0)
+
+    texts = [
+        str(trade.get("entry_reason_text", "")).strip(),
+        str((trade.get("metadata", {}) or {}).get("entry_reason_text", "")).strip(),
+    ]
+    pattern = re.compile(r"评分\s*([0-9]+(?:\.[0-9]+)?)")
+    for text in texts:
+        if not text:
+            continue
+        match = pattern.search(text)
+        if match:
+            return _safe_float(match.group(1), 0.0)
+    return None
+
+
+def _baseline_parameters() -> dict[str, float]:
+    strategy = get_strategy()
+    scoring_cfg = strategy.get("scoring", {})
+    risk_cfg = strategy.get("risk", {})
+    return {
+        "buy_threshold": _safe_float(scoring_cfg.get("thresholds", {}).get("buy", 7), 7.0),
+        "stop_loss": _safe_float(risk_cfg.get("stop_loss", 0.04), 0.04),
+        "take_profit": _safe_float(risk_cfg.get("take_profit", {}).get("t1_pct", 0.15), 0.15),
+    }
+
+
+def _coerce_grid(values: str | list[float] | None, default: list[float]) -> list[float]:
+    if values is None:
+        return default
+    if isinstance(values, str):
+        parsed = []
+        for item in values.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            parsed.append(_safe_float(item))
+        return parsed or default
+    parsed = [_safe_float(item) for item in values if item not in (None, "")]
+    return parsed or default
+
+
+def _parameter_grid(
+    *,
+    buy_thresholds: str | list[float] | None = None,
+    stop_losses: str | list[float] | None = None,
+    take_profits: str | list[float] | None = None,
+) -> list[dict[str, float]]:
+    baseline = _baseline_parameters()
+    buy_grid = _coerce_grid(
+        buy_thresholds,
+        sorted({baseline["buy_threshold"] - 1.0, baseline["buy_threshold"], baseline["buy_threshold"] + 1.0}),
+    )
+    stop_grid = _coerce_grid(
+        stop_losses,
+        sorted({
+            max(0.01, round(baseline["stop_loss"] - 0.01, 3)),
+            round(baseline["stop_loss"], 3),
+            round(baseline["stop_loss"] + 0.01, 3),
+        }),
+    )
+    take_profit_grid = _coerce_grid(
+        take_profits,
+        sorted({
+            max(0.02, round(baseline["take_profit"] - 0.05, 3)),
+            round(baseline["take_profit"], 3),
+            round(baseline["take_profit"] + 0.05, 3),
+        }),
+    )
+    grid: list[dict[str, float]] = []
+    for buy_threshold in buy_grid:
+        for stop_loss in stop_grid:
+            for take_profit in take_profit_grid:
+                grid.append({
+                    "buy_threshold": round(_safe_float(buy_threshold), 3),
+                    "stop_loss": round(_safe_float(stop_loss), 3),
+                    "take_profit": round(_safe_float(take_profit), 3),
+                })
+    return grid
+
+
+def _filter_closed_trades(trade_review: dict[str, Any], start: date, end: date) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in trade_review.get("closed_trades", [])
+        if _date_in_range(str(item.get("exit_date", "")), start, end)
+    ]
+
+
+def _trade_reason_codes(trade: dict[str, Any]) -> list[str]:
+    return [str(item).strip().upper() for item in trade.get("exit_reason_codes", []) if str(item).strip()]
+
+
+def _apply_parameter_set(
+    trades: list[dict[str, Any]],
+    params: dict[str, float],
+    baseline: dict[str, float],
+) -> list[dict[str, Any]]:
+    evaluated: list[dict[str, Any]] = []
+    for trade in trades:
+        entry_score = _extract_entry_score(trade)
+        if entry_score is not None and entry_score < params["buy_threshold"]:
+            continue
+
+        adjusted = dict(trade)
+        realized_pnl = _safe_float(trade.get("realized_pnl", 0.0), 0.0)
+        reason_codes = _trade_reason_codes(trade)
+        adjustment_note = "unchanged"
+
+        if any("STOP_LOSS" in code for code in reason_codes) and realized_pnl < 0:
+            base = max(baseline["stop_loss"], 0.001)
+            multiplier = min(max(params["stop_loss"] / base, 0.4), 1.6)
+            realized_pnl = round(realized_pnl * multiplier, 2)
+            adjustment_note = "stop_loss_proxy"
+        elif any("TAKE_PROFIT" in code for code in reason_codes) and realized_pnl > 0:
+            base = max(baseline["take_profit"], 0.001)
+            multiplier = min(max(params["take_profit"] / base, 0.5), 1.8)
+            realized_pnl = round(realized_pnl * multiplier, 2)
+            adjustment_note = "take_profit_proxy"
+
+        adjusted["entry_score"] = entry_score
+        adjusted["realized_pnl"] = realized_pnl
+        adjusted["parameter_adjustment"] = adjustment_note
+        evaluated.append(adjusted)
+    return evaluated
+
+
+def _summarize_trade_list(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    closed_trade_count = len(trades)
+    winners = [item for item in trades if _safe_float(item.get("realized_pnl", 0.0), 0.0) > 0]
+    losers = [item for item in trades if _safe_float(item.get("realized_pnl", 0.0), 0.0) < 0]
+    total_realized_pnl = round(sum(_safe_float(item.get("realized_pnl", 0.0), 0.0) for item in trades), 2)
+    return {
+        "closed_trade_count": closed_trade_count,
+        "win_count": len(winners),
+        "loss_count": len(losers),
+        "win_rate": round((len(winners) / closed_trade_count) * 100, 1) if closed_trade_count else 0.0,
+        "total_realized_pnl": total_realized_pnl,
+        "average_realized_pnl": round(total_realized_pnl / closed_trade_count, 2) if closed_trade_count else 0.0,
+    }
+
+
+def _score_parameter_set(summary: dict[str, Any]) -> tuple[float, float, int]:
+    return (
+        _safe_float(summary.get("total_realized_pnl", 0.0), 0.0),
+        _safe_float(summary.get("win_rate", 0.0), 0.0),
+        int(summary.get("closed_trade_count", 0) or 0),
+    )
+
+
+def _select_best_parameter_set(
+    trades: list[dict[str, Any]],
+    params_grid: list[dict[str, float]],
+    baseline: dict[str, float],
+) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any]]:
+    rankings = []
+    for params in params_grid:
+        evaluated = _apply_parameter_set(trades, params, baseline)
+        summary = _summarize_trade_list(evaluated)
+        rankings.append({
+            "params": params,
+            "summary": summary,
+            "objective": {
+                "total_realized_pnl": summary["total_realized_pnl"],
+                "win_rate": summary["win_rate"],
+                "sample_count": summary["closed_trade_count"],
+            },
+        })
+    rankings.sort(key=lambda item: _score_parameter_set(item["summary"]), reverse=True)
+    best = rankings[0] if rankings else {"params": baseline, "summary": _summarize_trade_list(trades), "objective": {}}
+    return best["params"], rankings, best["summary"]
 
 
 def _merge_backtest_inputs(
@@ -167,11 +359,30 @@ def run_backtest(
     *,
     scope: str = "cn_a_system",
     fixture: str | Path | None = None,
+    buy_thresholds: str | list[float] | None = None,
+    stop_losses: str | list[float] | None = None,
+    take_profits: str | list[float] | None = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
+    start_date = _parse_date(inputs["start"])
+    end_date = _parse_date(inputs["end"])
+    baseline = _baseline_parameters()
+    params_grid = _parameter_grid(
+        buy_thresholds=buy_thresholds,
+        stop_losses=stop_losses,
+        take_profits=take_profits,
+    )
+    source_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    selected_params, rankings, selected_summary = _select_best_parameter_set(source_trades, params_grid, baseline)
     score_summary = _summarize_score(inputs)
     risk_summary = _summarize_risk(inputs)
-    sample_count = int(score_summary["closed_trade_count"])
+    score_summary.update({
+        "selected_summary": selected_summary,
+        "baseline_parameters": baseline,
+        "selected_parameters": selected_params,
+        "grid_size": len(params_grid),
+    })
+    sample_count = int(selected_summary["closed_trade_count"])
     status = _status_from_components(
         str(inputs.get("state_audit", {}).get("status", "ok")),
         str(score_summary.get("market_signal", "ok")),
@@ -190,11 +401,56 @@ def run_backtest(
             "window_days": inputs["window_days"],
             "fixture": inputs.get("fixture_path", ""),
             "source_mode": inputs["source_mode"],
+            "engine_mode": "proxy_parameter_sweep",
         },
         "sample_count": sample_count,
         "score_summary": score_summary,
         "risk_summary": risk_summary,
         "state_fields": _state_fields(inputs),
+        "selected_parameters": selected_params,
+        "parameter_rankings": rankings[:10],
+    }
+
+
+def run_parameter_sweep(
+    start: str,
+    end: str,
+    *,
+    scope: str = "cn_a_system",
+    fixture: str | Path | None = None,
+    buy_thresholds: str | list[float] | None = None,
+    stop_losses: str | list[float] | None = None,
+    take_profits: str | list[float] | None = None,
+) -> dict[str, Any]:
+    inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
+    start_date = _parse_date(inputs["start"])
+    end_date = _parse_date(inputs["end"])
+    baseline = _baseline_parameters()
+    params_grid = _parameter_grid(
+        buy_thresholds=buy_thresholds,
+        stop_losses=stop_losses,
+        take_profits=take_profits,
+    )
+    trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    selected_params, rankings, selected_summary = _select_best_parameter_set(trades, params_grid, baseline)
+    return {
+        "command": "backtest",
+        "action": "sweep",
+        "status": "ok" if rankings else "warning",
+        "parameters": {
+            "start": inputs["start"],
+            "end": inputs["end"],
+            "scope": inputs["scope"],
+            "window_days": inputs["window_days"],
+            "fixture": inputs.get("fixture_path", ""),
+            "source_mode": inputs["source_mode"],
+            "engine_mode": "proxy_parameter_sweep",
+        },
+        "sample_count": int(selected_summary["closed_trade_count"]),
+        "baseline_parameters": baseline,
+        "selected_parameters": selected_params,
+        "ranking_count": len(rankings),
+        "rankings": rankings[:20],
     }
 
 
@@ -231,6 +487,9 @@ def run_walk_forward(
     scope: str = "cn_a_system",
     folds: int = 3,
     fixture: str | Path | None = None,
+    buy_thresholds: str | list[float] | None = None,
+    stop_losses: str | list[float] | None = None,
+    take_profits: str | list[float] | None = None,
 ) -> dict[str, Any]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)
@@ -238,26 +497,45 @@ def run_walk_forward(
         raise ValueError("end must be on or after start")
 
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
+    all_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    baseline = _baseline_parameters()
+    params_grid = _parameter_grid(
+        buy_thresholds=buy_thresholds,
+        stop_losses=stop_losses,
+        take_profits=take_profits,
+    )
     windows = _walk_forward_windows(start_date, end_date, folds)
     fold_reports = []
     for index, window in enumerate(windows, start=1):
-        fold_inputs = dict(inputs)
-        fold_inputs["start"] = window["train_start"]
-        fold_inputs["end"] = window["test_end"]
-        fold_score = _summarize_score(fold_inputs)
-        fold_risk = _summarize_risk(fold_inputs)
+        train_start = _parse_date(window["train_start"])
+        train_end = _parse_date(window["train_end"])
+        test_start = _parse_date(window["test_start"])
+        test_end = _parse_date(window["test_end"])
+        train_trades = [item for item in all_trades if _date_in_range(str(item.get("exit_date", "")), train_start, train_end)]
+        test_trades = [item for item in all_trades if _date_in_range(str(item.get("exit_date", "")), test_start, test_end)]
+        selected_params, rankings, training_summary = _select_best_parameter_set(train_trades, params_grid, baseline)
+        evaluated_test = _apply_parameter_set(test_trades, selected_params, baseline)
+        evaluation_summary = _summarize_trade_list(evaluated_test)
+        fold_score = {
+            "training_summary": training_summary,
+            "evaluation_summary": evaluation_summary,
+            "selected_parameters": selected_params,
+            "ranking_count": len(rankings),
+        }
+        fold_risk = _summarize_risk(inputs)
         fold_reports.append({
             "fold": index,
             "train_start": window["train_start"],
             "train_end": window["train_end"],
             "test_start": window["test_start"],
             "test_end": window["test_end"],
-            "sample_count": int(fold_score["closed_trade_count"]),
+            "training_sample_count": int(training_summary["closed_trade_count"]),
+            "sample_count": int(evaluation_summary["closed_trade_count"]),
             "score_summary": fold_score,
             "risk_summary": fold_risk,
             "status": _status_from_components(
                 str(fold_risk.get("risk_state", "ok")),
-                str(fold_score.get("market_signal", "ok")),
+                "warning" if int(evaluation_summary["closed_trade_count"]) == 0 else "ok",
             ),
         })
 
@@ -265,12 +543,14 @@ def run_walk_forward(
     score_summary = {
         "fold_count": len(fold_reports),
         "mean_win_rate": round(
-            sum(item["score_summary"]["win_rate"] for item in fold_reports) / len(fold_reports), 1
+            sum(item["score_summary"]["evaluation_summary"]["win_rate"] for item in fold_reports) / len(fold_reports), 1
         ) if fold_reports else 0.0,
         "total_realized_pnl": round(
-            sum(item["score_summary"]["total_realized_pnl"] for item in fold_reports), 2
+            sum(item["score_summary"]["evaluation_summary"]["total_realized_pnl"] for item in fold_reports), 2
         ),
         "mean_sample_count": round(total_sample_count / len(fold_reports), 1) if fold_reports else 0.0,
+        "baseline_parameters": baseline,
+        "grid_size": len(params_grid),
     }
     risk_summary = {
         "fold_count": len(fold_reports),
@@ -291,6 +571,7 @@ def run_walk_forward(
             "folds": len(fold_reports),
             "fixture": str(fixture) if fixture else "",
             "source_mode": inputs["source_mode"],
+            "engine_mode": "proxy_walk_forward",
         },
         "sample_count": total_sample_count,
         "score_summary": score_summary,

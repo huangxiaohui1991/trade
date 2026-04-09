@@ -20,7 +20,22 @@ class BacktestRunnerTests(unittest.TestCase):
             "win_rate": 50.0,
             "total_realized_pnl": 860.0,
             "open_position_count": 0,
-            "closed_trades": [],
+            "closed_trades": [
+                {
+                    "code": "300389",
+                    "exit_date": "2026-04-03",
+                    "realized_pnl": 1200.0,
+                    "entry_score": 7.8,
+                    "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                },
+                {
+                    "code": "603063",
+                    "exit_date": "2026-04-07",
+                    "realized_pnl": -340.0,
+                    "entry_score": 6.1,
+                    "exit_reason_codes": ["RISK_ABSOLUTE_STOP_LOSS"],
+                },
+            ],
             "open_positions": [],
             "source": "structured_ledger",
             "mfe_mae_status": "pending_market_history",
@@ -48,11 +63,14 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(result["command"], "backtest")
         self.assertEqual(result["action"], "run")
         self.assertEqual(result["status"], "warning")
-        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(result["sample_count"], 1)
         self.assertEqual(result["score_summary"]["win_rate"], 50.0)
         self.assertEqual(result["score_summary"]["pool_core_count"], 2)
         self.assertEqual(result["risk_summary"]["portfolio_risk_state"], "block")
         self.assertEqual(result["state_fields"]["market"]["signal"], "GREEN")
+        self.assertEqual(result["selected_parameters"]["buy_threshold"], 7.0)
+        self.assertEqual(result["score_summary"]["selected_summary"]["closed_trade_count"], 1)
+        self.assertGreater(len(result["parameter_rankings"]), 0)
 
     def test_walk_forward_uses_fixture_input(self):
         from scripts.backtest import run_walk_forward
@@ -61,13 +79,35 @@ class BacktestRunnerTests(unittest.TestCase):
             "trade_review": {
                 "scope": "cn_a_system",
                 "window": 9,
-                "closed_trade_count": 1,
-                "win_count": 1,
-                "loss_count": 0,
-                "win_rate": 100.0,
-                "total_realized_pnl": 2200.0,
+                "closed_trade_count": 3,
+                "win_count": 2,
+                "loss_count": 1,
+                "win_rate": 66.7,
+                "total_realized_pnl": 1800.0,
                 "open_position_count": 0,
-                "closed_trades": [],
+                "closed_trades": [
+                    {
+                        "code": "300389",
+                        "exit_date": "2026-04-03",
+                        "realized_pnl": 1200.0,
+                        "entry_score": 7.8,
+                        "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                    },
+                    {
+                        "code": "603063",
+                        "exit_date": "2026-04-06",
+                        "realized_pnl": -300.0,
+                        "entry_score": 6.3,
+                        "exit_reason_codes": ["RISK_ABSOLUTE_STOP_LOSS"],
+                    },
+                    {
+                        "code": "000612",
+                        "exit_date": "2026-04-09",
+                        "realized_pnl": 900.0,
+                        "entry_score": 8.0,
+                        "exit_reason_codes": ["POOL_DEMOTE"],
+                    }
+                ],
                 "open_positions": [],
                 "source": "fixture",
                 "mfe_mae_status": "pending_market_history",
@@ -94,6 +134,67 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(len(result["folds"]), result["parameters"]["folds"])
         self.assertIn("mean_win_rate", result["score_summary"])
         self.assertIn("worst_risk_state", result["risk_summary"])
+        self.assertIn("training_summary", result["folds"][0]["score_summary"])
+        self.assertIn("evaluation_summary", result["folds"][0]["score_summary"])
+        self.assertIn("selected_parameters", result["folds"][0]["score_summary"])
+
+    def test_run_parameter_sweep_ranks_candidates(self):
+        from scripts.backtest import run_parameter_sweep
+
+        fixture_payload = {
+            "trade_review": {
+                "scope": "cn_a_system",
+                "window": 9,
+                "closed_trade_count": 2,
+                "win_count": 1,
+                "loss_count": 1,
+                "win_rate": 50.0,
+                "total_realized_pnl": 900.0,
+                "open_position_count": 0,
+                "closed_trades": [
+                    {
+                        "code": "300389",
+                        "exit_date": "2026-04-03",
+                        "realized_pnl": 1200.0,
+                        "entry_score": 7.8,
+                        "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                    },
+                    {
+                        "code": "603063",
+                        "exit_date": "2026-04-06",
+                        "realized_pnl": -300.0,
+                        "entry_score": 6.2,
+                        "exit_reason_codes": ["RISK_ABSOLUTE_STOP_LOSS"],
+                    },
+                ],
+                "open_positions": [],
+                "source": "fixture",
+                "mfe_mae_status": "pending_market_history",
+            },
+            "pool_snapshot": {"summary": {"core_count": 1, "watch_count": 1}},
+            "market_snapshot": {"signal": "GREEN", "as_of_date": "2026-04-09", "source": "fixture"},
+            "state_audit": {"status": "ok", "snapshot_date": "2026-04-09"},
+            "today_decision": {
+                "action": "NO_TRADE",
+                "portfolio_risk": {"state": "ok", "reason_codes": [], "reasons": []},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "backtest_fixture.json"
+            fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False), encoding="utf-8")
+            result = run_parameter_sweep(
+                "2026-04-01",
+                "2026-04-09",
+                fixture=fixture_path,
+                buy_thresholds="6,7,8",
+                stop_losses="0.03,0.04",
+                take_profits="0.15,0.2",
+            )
+
+        self.assertEqual(result["action"], "sweep")
+        self.assertEqual(result["ranking_count"], 12)
+        self.assertGreater(len(result["rankings"]), 0)
+        self.assertIn("buy_threshold", result["selected_parameters"])
 
     def test_cli_backtest_commands_parse_and_dispatch(self):
         import scripts.cli.trade as trade
@@ -119,13 +220,28 @@ class BacktestRunnerTests(unittest.TestCase):
             "state_fields": {},
             "folds": [],
         }
+        sweep_payload = {
+            "command": "backtest",
+            "action": "sweep",
+            "status": "ok",
+            "parameters": {"start": "2026-04-01", "end": "2026-04-09"},
+            "sample_count": 2,
+            "baseline_parameters": {"buy_threshold": 7.0, "stop_loss": 0.04, "take_profit": 0.15},
+            "selected_parameters": {"buy_threshold": 6.0, "stop_loss": 0.03, "take_profit": 0.2},
+            "ranking_count": 4,
+            "rankings": [],
+        }
 
         stdout = io.StringIO()
         with mock.patch.object(trade, "run_backtest", return_value=run_payload) as run_mock, mock.patch.object(
             trade,
             "run_walk_forward",
             return_value=walk_payload,
-        ) as walk_mock, mock.patch.object(trade.sys, "argv", ["trade", "--json", "backtest", "run", "--start", "2026-04-01", "--end", "2026-04-09", "--fixture", "/tmp/fixture.json"]):
+        ) as walk_mock, mock.patch.object(
+            trade,
+            "run_parameter_sweep",
+            return_value=sweep_payload,
+        ) as sweep_mock, mock.patch.object(trade.sys, "argv", ["trade", "--json", "backtest", "run", "--start", "2026-04-01", "--end", "2026-04-09", "--fixture", "/tmp/fixture.json"]):
             with contextlib.redirect_stdout(stdout):
                 trade.main()
 
@@ -134,13 +250,18 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(payload["action"], "run")
         run_mock.assert_called_once()
         self.assertEqual(run_mock.call_args.kwargs["fixture"], "/tmp/fixture.json")
+        self.assertEqual(run_mock.call_args.kwargs["buy_thresholds"], None)
 
         stdout = io.StringIO()
         with mock.patch.object(trade, "run_backtest", return_value=run_payload), mock.patch.object(
             trade,
             "run_walk_forward",
             return_value=walk_payload,
-        ) as walk_mock, mock.patch.object(trade.sys, "argv", ["trade", "backtest", "walk-forward", "--start", "2026-04-01", "--end", "2026-04-09", "--json"]):
+        ) as walk_mock, mock.patch.object(
+            trade,
+            "run_parameter_sweep",
+            return_value=sweep_payload,
+        ), mock.patch.object(trade.sys, "argv", ["trade", "backtest", "walk-forward", "--start", "2026-04-01", "--end", "2026-04-09", "--json"]):
             with contextlib.redirect_stdout(stdout):
                 trade.main()
 
@@ -149,6 +270,40 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(payload["action"], "walk-forward")
         walk_mock.assert_called_once()
         self.assertEqual(walk_mock.call_args.kwargs["folds"], 3)
+
+        stdout = io.StringIO()
+        with mock.patch.object(trade, "run_backtest", return_value=run_payload), mock.patch.object(
+            trade,
+            "run_walk_forward",
+            return_value=walk_payload,
+        ), mock.patch.object(
+            trade,
+            "run_parameter_sweep",
+            return_value=sweep_payload,
+        ) as sweep_mock, mock.patch.object(
+            trade.sys,
+            "argv",
+            [
+                "trade",
+                "--json",
+                "backtest",
+                "sweep",
+                "--start",
+                "2026-04-01",
+                "--end",
+                "2026-04-09",
+                "--buy-thresholds",
+                "6,7,8",
+            ],
+        ):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["command"], "backtest")
+        self.assertEqual(payload["action"], "sweep")
+        sweep_mock.assert_called_once()
+        self.assertEqual(sweep_mock.call_args.kwargs["buy_thresholds"], "6,7,8")
 
 
 if __name__ == "__main__":

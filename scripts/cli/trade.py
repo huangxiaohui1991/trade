@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
-from scripts.backtest import run_backtest, run_walk_forward
+from scripts.backtest import run_backtest, run_parameter_sweep, run_walk_forward
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
 from scripts.pipeline.morning import run as run_morning
@@ -1157,12 +1157,26 @@ def main():
     backtest_run.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     backtest_run.add_argument("--scope", default="cn_a_system", help="Scope for backtest")
     backtest_run.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_run.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_run.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_run.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_sweep = backtest_sub.add_parser("sweep")
+    backtest_sweep.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_sweep.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_sweep.add_argument("--scope", default="cn_a_system", help="Scope for sweep")
+    backtest_sweep.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_sweep.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_sweep.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_sweep.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
     backtest_walk = backtest_sub.add_parser("walk-forward")
     backtest_walk.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     backtest_walk.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     backtest_walk.add_argument("--scope", default="cn_a_system", help="Scope for walk-forward")
     backtest_walk.add_argument("--folds", type=int, default=3, help="Walk-forward folds")
     backtest_walk.add_argument("--fixture", default=None, help="Optional JSON fixture path for backtest inputs")
+    backtest_walk.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
+    backtest_walk.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
+    backtest_walk.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -1213,6 +1227,19 @@ def main():
                             end=args.end,
                             scope=args.scope,
                             fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
+                        )
+                    elif args.action == "sweep":
+                        result = run_parameter_sweep(
+                            start=args.start,
+                            end=args.end,
+                            scope=args.scope,
+                            fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
                         )
                     else:
                         result = run_walk_forward(
@@ -1221,6 +1248,9 @@ def main():
                             scope=args.scope,
                             folds=args.folds,
                             fixture=args.fixture,
+                            buy_thresholds=args.buy_thresholds,
+                            stop_losses=args.stop_losses,
+                            take_profits=args.take_profits,
                         )
                 else:
                     result = status_today()
@@ -1256,6 +1286,19 @@ def main():
                     end=args.end,
                     scope=args.scope,
                     fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
+                )
+            elif args.action == "sweep":
+                result = run_parameter_sweep(
+                    start=args.start,
+                    end=args.end,
+                    scope=args.scope,
+                    fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
                 )
             else:
                 result = run_walk_forward(
@@ -1264,6 +1307,9 @@ def main():
                     scope=args.scope,
                     folds=args.folds,
                     fixture=args.fixture,
+                    buy_thresholds=args.buy_thresholds,
+                    stop_losses=args.stop_losses,
+                    take_profits=args.take_profits,
                 )
         else:
             result = status_today()

@@ -195,7 +195,8 @@
 
 当前状态：
 
-- 已有 `bin/trade backtest run` 和 `bin/trade backtest walk-forward` 最小骨架，可从结构化 state 或 fixture 读取输入并输出结构化摘要
+- 已有 `bin/trade backtest run`、`bin/trade backtest sweep` 和 `bin/trade backtest walk-forward`
+- 当前可做 proxy 级 parameter sweep，并在 walk-forward 中执行训练窗口选参 + 测试窗口评估
 
 待办 backlog：
 
