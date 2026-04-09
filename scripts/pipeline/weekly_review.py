@@ -35,6 +35,7 @@ from scripts.utils.parser import parse_journal_dir, parse_md_table
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_weekly_report
 from scripts.utils.logger import get_logger
+from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.weekly_review")
 
@@ -347,6 +348,19 @@ def run() -> dict:
         _logger.warning(f">> Discord 推送失败: {err}")
 
     _logger.info(f"[WEEKLY] 周报完成 → {review_path.name}")
+
+    update_pipeline_state(
+        "weekly_review",
+        "warning" if not ok else "success",
+        {
+            "week": week_str,
+            "review_path": str(review_path),
+            "discord_ok": ok,
+            "discord_error": err,
+            "core_pool_change_count": len(core_pool_changes),
+            "trade_count": stats.get("total_trades", 0),
+        },
+    )
 
     return {
         "week": week_str,

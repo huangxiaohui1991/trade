@@ -30,214 +30,13 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
-import pandas as pd
 from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks
 from scripts.utils.logger import get_logger
+from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.core_pool_scoring")
-
-
-# ---------------------------------------------------------------------------
-# 四维评分
-# ---------------------------------------------------------------------------
-
-def _score_technical(engine: DataEngine, code: str) -> dict:
-    """
-    技术面评分（满分 2 分）
-    维度：MA20/MA60 趋势（0.5）+ 成交量（0.5）+ 动量（0.5）+ 均线排列（0.5）
-    """
-    tech = engine.get_technical(code, 60)
-    if "error" in tech:
-        return {"score": 0, "detail": f"数据错误: {tech['error']}"}
-
-    price = tech.get("current_price", 0)
-    ma = tech.get("ma", {})
-    ma20 = ma.get("MA20", 0)
-    ma60 = ma.get("MA60", 0)
-
-    # 均线趋势得分（0.5）
-    ma_score = 0
-    if ma20 and ma60:
-        if price >= ma20 and price >= ma60:
-            ma_score = 0.5  # 价格站上双均线
-        elif price >= ma20:
-            ma_score = 0.3  # 仅站上 MA20
-        elif price < ma20:
-            ma_score = 0   # 跌破 MA20
-
-    # 成交量得分（0.5）- 简化：量比 > 1.2 得 0.5
-    vol_score = 0
-    vol_ratio = tech.get("volume_ratio", 1)
-    if vol_ratio >= 1.5:
-        vol_score = 0.5
-    elif vol_ratio >= 1.2:
-        vol_score = 0.3
-    elif vol_ratio >= 1.0:
-        vol_score = 0.1
-
-    # 动量得分（0.5）- 近5日涨幅
-    momentum = tech.get("momentum_5d", 0)
-    if momentum >= 5:
-        mom_score = 0.5
-    elif momentum >= 2:
-        mom_score = 0.3
-    elif momentum >= 0:
-        mom_score = 0.1
-    else:
-        mom_score = 0
-
-    # 均线排列得分（0.5）- MA5>MA20>MA60 得多分
-    ma5 = ma.get("MA5", 0)
-    arr_score = 0
-    if ma5 and ma20 and ma60:
-        if ma5 > ma20 > ma60:
-            arr_score = 0.5
-        elif ma20 > ma60:
-            arr_score = 0.3
-        elif ma5 < ma20:
-            arr_score = 0
-
-    total = min(ma_score + vol_score + mom_score + arr_score, 2.0)
-    return {
-        "score": round(total, 1),
-        "detail": f"均线:{ma_score}/0.5 量:{vol_score}/0.5 动量:{mom_score}/0.5 排列:{arr_score}/0.5",
-        "price": price,
-        "ma20": ma20,
-        "above_ma20": price >= ma20 if ma20 else False,
-    }
-
-
-def _score_fundamental(engine: DataEngine, code: str) -> dict:
-    """
-    基本面评分（满分 3 分）
-    维度：ROE（1）+ 营收增长（1）+ 现金流（1）
-    """
-    fin = engine.get_financial(code)
-    if "error" in fin:
-        return {"score": 0, "detail": f"数据错误: {fin['error']}"}
-
-    # ROE（0-1 分）
-    roe = fin.get("roe", 0)
-    if roe >= 15:
-        roe_score = 1.0
-    elif roe >= 10:
-        roe_score = 0.7
-    elif roe >= 5:
-        roe_score = 0.4
-    else:
-        roe_score = 0
-
-    # 营收增长（0-1 分）
-    rev_growth = fin.get("revenue_growth", 0)
-    if rev_growth >= 20:
-        rev_score = 1.0
-    elif rev_growth >= 10:
-        rev_score = 0.7
-    elif rev_growth >= 0:
-        rev_score = 0.3
-    else:
-        rev_score = 0
-
-    # 现金流（0-1 分）
-    cf_score = 0.5 if fin.get("operating_cash_flow", 0) > 0 else 0
-
-    total = min(roe_score + rev_score + cf_score, 3.0)
-    return {
-        "score": round(total, 1),
-        "detail": f"ROE:{roe_score:.1f}/1 营收:{rev_score:.1f}/1 现金流:{cf_score:.1f}/1",
-        "roe": roe,
-        "revenue_growth": rev_growth,
-    }
-
-
-def _score_fund_flow(engine: DataEngine, code: str) -> dict:
-    """
-    资金流评分（满分 2 分）
-    维度：主力净流入（1）+ 北向持股变化（1）
-    """
-    flow = engine.get_fund_flow(code)
-    if "error" in flow:
-        return {"score": 0, "detail": f"数据错误: {flow['error']}"}
-
-    # 主力净流入（0-1 分）
-    main_net = flow.get("main_net_inflow", 0)
-    if main_net > 1_000_000_000:
-        main_score = 1.0
-    elif main_net > 500_000_000:
-        main_score = 0.7
-    elif main_net > 0:
-        main_score = 0.4
-    else:
-        main_score = 0
-
-    # 北向资金（简化：持股比例增加为正面）
-    south_score = 0.5  # 默认中性
-
-    total = min(main_score + south_score, 2.0)
-    return {
-        "score": round(total, 1),
-        "detail": f"主力:{main_score}/1.0 北向:{south_score}/1.0",
-        "main_net_inflow": main_net,
-        "main_outflow": main_net < 0,
-    }
-
-
-def _score_sentiment(code: str, name: str) -> dict:
-    """
-    舆情评分（满分 3 分）
-    优先使用妙想资讯搜索获取研报/新闻。
-    """
-    try:
-        from scripts.mx.mx_search import MXSearch
-        mx = MXSearch()
-        result = mx.search(f"{name} 最新研报 机构评级")
-
-        data = result.get("data", {})
-        inner_data = data.get("data", {})
-        search_response = inner_data.get("llmSearchResponse", {})
-        items = search_response.get("data", [])
-
-        if not items:
-            return {"score": 1.5, "detail": "无相关资讯（MX）", "sentiment": "neutral"}
-
-        report_count = 0
-        positive_count = 0
-        negative_count = 0
-        for item in items:
-            info_type = item.get("informationType", "")
-            rating = str(item.get("rating", "")).lower()
-            if info_type == "REPORT":
-                report_count += 1
-            if any(w in rating for w in ["买入", "增持", "推荐", "强烈推荐"]):
-                positive_count += 1
-            elif any(w in rating for w in ["减持", "卖出", "回避"]):
-                negative_count += 1
-
-        score = 1.5
-        if report_count >= 5:
-            score += 0.5
-        elif report_count >= 2:
-            score += 0.3
-        if positive_count >= 2:
-            score += 0.5
-        elif positive_count >= 1:
-            score += 0.3
-        if negative_count >= 2:
-            score -= 0.5
-
-        score = max(0, min(score, 3.0))
-        sentiment = "positive" if score >= 2.0 else ("negative" if score < 1.0 else "neutral")
-
-        return {
-            "score": round(score, 1),
-            "detail": f"研报{report_count}篇 买入{positive_count} 减持{negative_count}（MX搜索）",
-            "sentiment": sentiment,
-        }
-    except Exception as e:
-        _logger.info(f"[sentiment] MX搜索失败 {name}: {e}")
-        return {"score": 1.5, "detail": "MX搜索失败，默认1.5分", "sentiment": "neutral"}
 
 
 def _build_report_content(scores: list, date_str: str) -> str:
@@ -357,10 +156,20 @@ def run() -> list:
 
     _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
 
+    update_pipeline_state(
+        "core_pool_scoring",
+        "success",
+        {
+            "scored_count": len(scores),
+            "report_path": str(report_path),
+            "core_pool_updated": True,
+        },
+        date_str,
+    )
+
     return scores
 
 
 if __name__ == "__main__":
-    import pandas as pd
     result = run()
     print(f"\n核心池评分完成，共 {len(result)} 只")

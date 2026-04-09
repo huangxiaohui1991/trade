@@ -255,7 +255,16 @@ def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
 
     if "consecutive_outflow" in veto_rules:
         if flow_data.get("major_outflow_streak", 0) >= 3:
-            veto_signals.append("consecutive_outflow")
+            # 豁免条件：站稳 MA20 + 成交额 > 5 亿 → 疑似洗盘，减分但不否决
+            above_ma20 = tech_data.get("above_ma20", False)
+            amount = tech_data.get("volume_analysis", {}).get("today", 0) * tech_data.get("current_price", 0)
+            # 也兼容直接传入的 amount 字段
+            if amount == 0:
+                amount = tech_data.get("amount", 0)
+            if above_ma20 and amount > 5e8:
+                veto_signals.append("consecutive_outflow_warn")  # 警告，不否决，scorer 减 2 分
+            else:
+                veto_signals.append("consecutive_outflow")
 
     if "red_market" in veto_rules:
         from scripts.engine.market_timer import get_signal
@@ -310,7 +319,9 @@ def score(code: str, name: Optional[str] = None) -> dict:
 
     # 一票否决
     veto_signals = apply_veto(tech, flow, strategy)
-    veto_triggered = len(veto_signals) > 0
+    # consecutive_outflow_warn 是警告不是否决，从 veto 中分离
+    hard_veto = [s for s in veto_signals if s != "consecutive_outflow_warn"]
+    veto_triggered = len(hard_veto) > 0
 
     # 加权总分（满分 10）
     raw = (
@@ -324,6 +335,9 @@ def score(code: str, name: Optional[str] = None) -> dict:
         total = 0.0
     else:
         total = round(raw, 1)
+        # consecutive_outflow_warn: 洗盘嫌疑，减 2 分但不归零
+        if "consecutive_outflow_warn" in veto_signals:
+            total = max(0, round(total - 2.0, 1))
 
     return {
         "name": name or tech.get("name", code),

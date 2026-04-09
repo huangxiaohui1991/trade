@@ -34,6 +34,7 @@ from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.stock_screener")
 
@@ -474,7 +475,9 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
     )
 
     if universe == "market":
-        _write_market_scan_watchlist(scored)
+        market_watch_path = _write_market_scan_watchlist(scored)
+    else:
+        market_watch_path = None
 
     # ------------------------------------------------------------------
     # 同步到东方财富自选股
@@ -493,6 +496,23 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 _logger.info(f">> 影子交易: {len(bought)} 只已在模拟盘买入")
         except Exception as e:
             _logger.warning(f">> 影子交易买入失败: {e}")
+
+    update_pipeline_state(
+        "stock_screener",
+        "success",
+        {
+            "pool": pool,
+            "universe": universe,
+            "source": source,
+            "candidate_count": len(candidates),
+            "scored_count": len(scored),
+            "actionable_count": len(actionable),
+            "report_path": report_path,
+            "market_watch_path": market_watch_path,
+            "used_fallback": "akshare" in source.lower() or "fallback" in source.lower(),
+        },
+        today_str,
+    )
 
     return scored
 

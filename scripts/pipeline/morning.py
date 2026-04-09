@@ -35,6 +35,7 @@ from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_morning_summary
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.morning")
 
@@ -351,6 +352,19 @@ def run() -> dict:
                 _logger.info(f"  模拟盘 {r['name']}: {r.get('reason', '持有')}")
     except Exception as e:
         _logger.info(f">> 影子交易预览跳过: {e}")
+
+    update_pipeline_state(
+        "morning",
+        "warning" if not ok else "success",
+        {
+            "market_signal": market_data.get("market_signal", ""),
+            "positions_count": len(positions),
+            "core_pool_count": len(core_items),
+            "weekly_bought": weekly_bought,
+            "discord_ok": ok,
+            "discord_error": err,
+        },
+    )
 
     return {
         "market_data": market_data,
