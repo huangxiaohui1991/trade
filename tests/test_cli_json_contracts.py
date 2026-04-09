@@ -156,6 +156,25 @@ class CLIJsonContractTests(unittest.TestCase):
                 "source_chain": payload["market_snapshot_source"]["source_chain"],
                 "as_of_date": payload["market_snapshot_source"]["as_of_date"],
             },
+            "order_snapshot": {
+                "scope": payload["order_snapshot"]["scope"],
+                "status": payload["order_snapshot"]["status"],
+                "summary": {
+                    "order_count": payload["order_snapshot"]["summary"]["order_count"],
+                    "pending_count": payload["order_snapshot"]["summary"]["pending_count"],
+                    "open_count": payload["order_snapshot"]["summary"]["open_count"],
+                    "exception_count": payload["order_snapshot"]["summary"]["exception_count"],
+                },
+                "condition_orders": {
+                    "count": payload["order_snapshot"]["condition_orders"]["count"],
+                    "pending_count": payload["order_snapshot"]["condition_orders"]["pending_count"],
+                    "open_count": payload["order_snapshot"]["condition_orders"]["open_count"],
+                    "exception_count": payload["order_snapshot"]["condition_orders"]["exception_count"],
+                    "status_counts": payload["order_snapshot"]["condition_orders"]["status_counts"],
+                    "condition_type_counts": payload["order_snapshot"]["condition_orders"]["condition_type_counts"],
+                    "sample": payload["order_snapshot"]["condition_orders"]["sample"],
+                },
+            },
             "signal_bus": {
                 "version": payload["signal_bus"]["version"],
                 "state": payload["signal_bus"]["state"],
@@ -204,6 +223,35 @@ class CLIJsonContractTests(unittest.TestCase):
                 "last_eval_date": payload["pool_management"]["last_eval_date"],
                 "summary": payload["pool_management"]["summary"],
                 "state_path": payload["pool_management"]["state_path"],
+            },
+        }
+
+    def _state_orders_contract(self, payload: dict) -> dict:
+        return {
+            "command": payload["command"],
+            "action": payload["action"],
+            "status": payload["status"],
+            "db_path": payload["db_path"],
+            "scope_filter": payload["scope_filter"],
+            "order_status_filter": payload["order_status_filter"],
+            "summary": {
+                "order_count": payload["summary"]["order_count"],
+                "pending_count": payload["summary"]["pending_count"],
+                "open_count": payload["summary"]["open_count"],
+                "exception_count": payload["summary"]["exception_count"],
+                "terminal_count": payload["summary"]["terminal_count"],
+                "status_counts": payload["summary"]["status_counts"],
+                "scope_counts": payload["summary"]["scope_counts"],
+                "class_counts": payload["summary"]["class_counts"],
+            },
+            "condition_orders": {
+                "count": payload["condition_orders"]["count"],
+                "pending_count": payload["condition_orders"]["pending_count"],
+                "open_count": payload["condition_orders"]["open_count"],
+                "exception_count": payload["condition_orders"]["exception_count"],
+                "status_counts": payload["condition_orders"]["status_counts"],
+                "condition_type_counts": payload["condition_orders"]["condition_type_counts"],
+                "sample": payload["condition_orders"]["sample"],
             },
         }
 
@@ -423,6 +471,91 @@ class CLIJsonContractTests(unittest.TestCase):
                 "source_chain": ["market_timer"],
                 "as_of_date": "2026-04-09",
             }),
+            mock.patch.object(trade, "load_order_snapshot", return_value={
+                "scope": "paper_mx",
+                "status": "all",
+                "db_path": "/tmp/trade_state.sqlite3",
+                "orders": [
+                    {
+                        "external_id": "paper:order:001",
+                        "scope": "paper_mx",
+                        "order_class": "condition",
+                        "condition_type": "take_profit_t1",
+                        "code": "300389",
+                        "name": "艾比森",
+                        "side": "sell",
+                        "status": "candidate",
+                        "requested_shares": 1000,
+                        "filled_shares": 0,
+                        "trigger_price": 20.5,
+                        "limit_price": 20.45,
+                        "confirm_status": "pending",
+                    },
+                    {
+                        "external_id": "paper:order:002",
+                        "scope": "paper_mx",
+                        "order_class": "condition",
+                        "condition_type": "manual_stop",
+                        "code": "603063",
+                        "name": "禾望电气",
+                        "side": "sell",
+                        "status": "placed",
+                        "requested_shares": 600,
+                        "filled_shares": 0,
+                        "trigger_price": 18.2,
+                        "limit_price": 18.1,
+                        "confirm_status": "not_required",
+                    },
+                    {
+                        "external_id": "paper:order:003",
+                        "scope": "paper_mx",
+                        "order_class": "manual",
+                        "condition_type": "",
+                        "code": "000001",
+                        "name": "上证指数",
+                        "side": "buy",
+                        "status": "exception",
+                        "requested_shares": 0,
+                        "filled_shares": 0,
+                        "trigger_price": 0.0,
+                        "limit_price": 0.0,
+                        "confirm_status": "not_required",
+                    },
+                    {
+                        "external_id": "paper:order:004",
+                        "scope": "paper_mx",
+                        "order_class": "manual",
+                        "condition_type": "",
+                        "code": "300750",
+                        "name": "宁德时代",
+                        "side": "buy",
+                        "status": "filled",
+                        "requested_shares": 100,
+                        "filled_shares": 100,
+                        "trigger_price": 0.0,
+                        "limit_price": 0.0,
+                        "confirm_status": "not_required",
+                    },
+                ],
+                "summary": {
+                    "order_count": 4,
+                    "open_count": 2,
+                    "terminal_count": 2,
+                    "status_counts": {
+                        "candidate": 1,
+                        "placed": 1,
+                        "exception": 1,
+                        "filled": 1,
+                    },
+                    "scope_counts": {
+                        "paper_mx": 4,
+                    },
+                    "class_counts": {
+                        "condition": 2,
+                        "manual": 2,
+                    },
+                },
+            }),
             mock.patch.object(trade, "_shadow_trade_snapshot", return_value={
                 "status": "drift",
                 "timestamp": "2026-04-09 10:00",
@@ -448,6 +581,74 @@ class CLIJsonContractTests(unittest.TestCase):
             patches,
             self._status_today_contract,
             "status_today.json",
+        )
+
+    def test_state_orders_json_contract(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "LEDGER_DB_PATH", "/tmp/trade_state.sqlite3"),
+            mock.patch.object(trade, "load_order_snapshot", return_value={
+                "scope": "all",
+                "status": "all",
+                "db_path": "/tmp/trade_state.sqlite3",
+                "orders": [
+                    {
+                        "external_id": "paper:order:001",
+                        "scope": "paper_mx",
+                        "order_class": "condition",
+                        "condition_type": "take_profit_t1",
+                        "code": "300389",
+                        "name": "艾比森",
+                        "side": "sell",
+                        "status": "candidate",
+                        "requested_shares": 1000,
+                        "filled_shares": 0,
+                        "trigger_price": 20.5,
+                        "limit_price": 20.45,
+                        "confirm_status": "pending",
+                    },
+                    {
+                        "external_id": "cn:order:002",
+                        "scope": "cn_a_system",
+                        "order_class": "manual",
+                        "condition_type": "",
+                        "code": "603063",
+                        "name": "禾望电气",
+                        "side": "buy",
+                        "status": "filled",
+                        "requested_shares": 600,
+                        "filled_shares": 600,
+                        "trigger_price": 0.0,
+                        "limit_price": 0.0,
+                        "confirm_status": "not_required",
+                    },
+                ],
+                "summary": {
+                    "order_count": 2,
+                    "open_count": 1,
+                    "terminal_count": 1,
+                    "status_counts": {
+                        "candidate": 1,
+                        "filled": 1,
+                    },
+                    "scope_counts": {
+                        "paper_mx": 1,
+                        "cn_a_system": 1,
+                    },
+                    "class_counts": {
+                        "condition": 1,
+                        "manual": 1,
+                    },
+                },
+            }),
+        ]
+
+        self._run_for_orders(
+            [["trade", "--json", "state", "orders"], ["trade", "state", "orders", "--json"]],
+            patches,
+            self._state_orders_contract,
+            "state_orders.json",
         )
 
 

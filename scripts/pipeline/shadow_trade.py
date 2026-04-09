@@ -29,7 +29,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from scripts.mx.mx_moni import MXMoni
 from scripts.engine.scorer import score as score_stock
-from scripts.state import load_activity_summary, record_trade_event
+from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 
@@ -50,6 +50,12 @@ AUTOMATION_SCOPE_NOTE = (
     "本波仅自动执行：动态止损、绝对止损、第一批止盈；"
     "时间止损与回撤止盈仅作为提示，不自动下单。"
 )
+ORDER_REASON_TO_CONDITION = {
+    "RISK_DYNAMIC_STOP": "dynamic_stop",
+    "RISK_ABSOLUTE_STOP": "absolute_stop",
+    "RISK_TAKE_PROFIT_T1": "take_profit_t1",
+    "BUY_CORE_POOL": "core_pool_entry",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +138,322 @@ def _trade_result(code: str, name: str, shares: int, status: str,
     }
     payload.update(extra)
     return payload
+
+
+def _pick_first(payload: dict, keys: list[str], default=""):
+    for key in keys:
+        value = payload.get(key)
+        if value not in [None, ""]:
+            return value
+    return default
+
+
+def _normalize_order_side(value) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"buy", "b", "1"} or "买" in text:
+        return "buy"
+    if text in {"sell", "s", "2"} or "卖" in text:
+        return "sell"
+    return text
+
+
+def _normalize_order_status(value) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "placed"
+    if any(token in text for token in ["part", "partial", "部分成交", "部成"]):
+        return "partially_filled"
+    if any(token in text for token in ["filled", "全部成交", "已成交", "成交", "success", "done"]):
+        return "filled"
+    if any(token in text for token in ["cancel", "撤单", "已撤", "撤销"]):
+        return "cancelled"
+    if any(token in text for token in ["reject", "error", "fail", "exception", "废单", "失败"]):
+        return "exception"
+    if any(token in text for token in ["review", "复核"]):
+        return "reviewed"
+    if any(token in text for token in ["candidate", "候选"]):
+        return "candidate"
+    return "placed"
+
+
+def _normalize_order_type(value, use_market_price: bool | None = None) -> str:
+    text = str(value or "").strip().lower()
+    if use_market_price is True:
+        return "market"
+    if any(token in text for token in ["market", "市价"]):
+        return "market"
+    if any(token in text for token in ["condition", "conditional", "条件"]):
+        return "conditional"
+    if any(token in text for token in ["limit", "限价"]):
+        return "limit"
+    return "market" if use_market_price else "limit"
+
+
+def _extract_broker_order_id(payload: dict) -> str:
+    return str(
+        _pick_first(
+            payload,
+            [
+                "orderId",
+                "order_id",
+                "brokerOrderId",
+                "broker_order_id",
+                "entrustNo",
+                "orderNo",
+                "tradeId",
+                "id",
+            ],
+            "",
+        )
+    ).strip()
+
+
+def _existing_order_maps(scope: str = "paper_mx") -> tuple[dict[str, dict], dict[str, dict]]:
+    snapshot = load_order_snapshot(scope=scope)
+    by_external = {}
+    by_broker = {}
+    for order in snapshot.get("orders", []):
+        external_id = str(order.get("external_id", "")).strip()
+        broker_order_id = str(order.get("broker_order_id", "")).strip()
+        if external_id:
+            by_external[external_id] = order
+        if broker_order_id:
+            by_broker[broker_order_id] = order
+    return by_external, by_broker
+
+
+def _sync_broker_orders(mx: MXMoni, scope: str = "paper_mx") -> dict:
+    try:
+        raw_orders = _get_orders(mx)
+    except Exception as exc:
+        _logger.warning(f"[shadow] 拉取委托失败: {exc}")
+        return {"status": "error", "error": str(exc), "fetched_count": 0, "synced_count": 0}
+
+    _, by_broker = _existing_order_maps(scope=scope)
+    synced_orders = []
+    for index, raw_order in enumerate(raw_orders):
+        broker_order_id = _extract_broker_order_id(raw_order)
+        existing = by_broker.get(broker_order_id, {})
+        external_id = (
+            existing.get("external_id")
+            or (f"paper_mx:order:{broker_order_id}" if broker_order_id else "")
+            or f"paper_mx:order:sync:{index}:{_pick_first(raw_order, ['stockCode', 'secuCode', 'code'], '')}"
+        )
+        side = _normalize_order_side(_pick_first(raw_order, ["type", "side", "orderSide", "bsFlag"], ""))
+        status = _normalize_order_status(
+            _pick_first(raw_order, ["status", "orderStatus", "statusDesc", "orderStatusDesc"], "")
+        )
+        use_market_price = bool(_pick_first(raw_order, ["useMarketPrice", "marketPriceFlag"], False))
+        filled_shares = _safe_int(
+            _pick_first(
+                raw_order,
+                ["filledQuantity", "filledQty", "dealQty", "成交数量", "dealQuantity"],
+                0,
+            ),
+            0,
+        )
+        requested_shares = _safe_int(
+            _pick_first(raw_order, ["quantity", "qty", "orderQty", "entrustQty", "委托数量"], filled_shares),
+            filled_shares,
+        )
+        avg_fill_price = _safe_float(
+            _pick_first(raw_order, ["avgPrice", "avgFillPrice", "dealPrice", "成交均价"], 0.0),
+            0.0,
+        )
+        trigger_price = _safe_float(
+            _pick_first(raw_order, ["triggerPrice", "stopPrice", "conditionPrice"], 0.0),
+            0.0,
+        )
+        limit_price = _safe_float(
+            _pick_first(raw_order, ["price", "orderPrice", "entrustPrice", "委托价格"], 0.0),
+            0.0,
+        )
+        payload = upsert_order_state(
+            {
+                "external_id": external_id,
+                "scope": scope,
+                "broker": "mx_moni",
+                "broker_order_id": broker_order_id,
+                "code": str(_pick_first(raw_order, ["stockCode", "secuCode", "code"], "")).strip(),
+                "name": str(_pick_first(raw_order, ["stockName", "secuName", "name"], "")).strip(),
+                "side": side,
+                "order_class": existing.get("order_class", "condition"),
+                "order_type": _normalize_order_type(
+                    _pick_first(raw_order, ["orderType", "priceType", "typeDesc"], ""),
+                    use_market_price=use_market_price,
+                ),
+                "condition_type": existing.get("condition_type", ""),
+                "requested_shares": requested_shares,
+                "filled_shares": filled_shares,
+                "trigger_price": trigger_price,
+                "limit_price": limit_price,
+                "avg_fill_price": avg_fill_price,
+                "status": status,
+                "confirm_status": existing.get("confirm_status", "not_required"),
+                "reason_code": existing.get("reason_code", ""),
+                "reason_text": existing.get("reason_text", ""),
+                "source": "mx_orders_sync",
+                "placed_at": str(
+                    _pick_first(raw_order, ["placedAt", "orderTime", "entrustTime", "createTime"], existing.get("placed_at", ""))
+                ).strip(),
+                "filled_at": str(
+                    _pick_first(raw_order, ["filledAt", "dealTime", "成交时间"], existing.get("filled_at", ""))
+                ).strip(),
+                "cancelled_at": str(
+                    _pick_first(raw_order, ["cancelledAt", "cancelTime", "撤单时间"], existing.get("cancelled_at", ""))
+                ).strip(),
+                "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "metadata": {
+                    "raw_order": raw_order,
+                },
+            }
+        )
+        payload = _materialize_filled_order(payload)
+        synced_orders.append(payload)
+
+    return {
+        "status": "ok",
+        "fetched_count": len(raw_orders),
+        "synced_count": len(synced_orders),
+    }
+
+
+def _materialize_filled_order(order: dict) -> dict:
+    metadata = order.get("metadata", {}) if isinstance(order.get("metadata", {}), dict) else {}
+    if metadata.get("trade_event_logged"):
+        return order
+    if str(order.get("status", "")).strip() != "filled":
+        return order
+
+    shares = _safe_int(order.get("filled_shares", order.get("requested_shares", 0)), 0)
+    price = _safe_float(order.get("avg_fill_price", order.get("limit_price", 0.0)), 0.0)
+    code = str(order.get("code", "")).strip()
+    if not code or shares <= 0 or price <= 0:
+        return order
+
+    side = _normalize_order_side(order.get("side", ""))
+    action_text = "买入" if side == "buy" else "卖出"
+    _log_trade(
+        action_text,
+        code,
+        order.get("name", code),
+        shares,
+        price,
+        str(order.get("reason_text", "")).strip(),
+        str(order.get("reason_code", "")).strip(),
+        source="shadow_order_sync",
+        metadata={"order_external_id": order.get("external_id", "")},
+    )
+    return upsert_order_state(
+        {
+            "external_id": order.get("external_id", ""),
+            "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "metadata": {
+                "trade_event_logged": True,
+                "trade_event_source": "shadow_order_sync",
+            },
+        }
+    )
+
+
+def _submit_shadow_order(
+    mx: MXMoni,
+    *,
+    side: str,
+    code: str,
+    name: str,
+    shares: int,
+    reason: str,
+    reason_code: str,
+    price: float = 0.0,
+    use_market_price: bool = True,
+    order_class: str = "manual",
+) -> tuple[dict, dict]:
+    now_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    external_id = f"paper_mx:order:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{code}:{side}:{shares}"
+    upsert_order_state(
+        {
+            "external_id": external_id,
+            "scope": "paper_mx",
+            "broker": "mx_moni",
+            "code": code,
+            "name": name,
+            "side": side,
+            "order_class": order_class,
+            "order_type": _normalize_order_type("", use_market_price=use_market_price),
+            "condition_type": ORDER_REASON_TO_CONDITION.get(reason_code, ""),
+            "requested_shares": shares,
+            "filled_shares": 0,
+            "limit_price": price if not use_market_price else 0.0,
+            "avg_fill_price": 0.0,
+            "status": "candidate",
+            "confirm_status": "not_required",
+            "reason_code": reason_code,
+            "reason_text": reason,
+            "source": "shadow_trade",
+            "placed_at": now_ts,
+            "updated_at": now_ts,
+            "metadata": {"trade_event_logged": False},
+        }
+    )
+
+    if use_market_price:
+        trade_result = mx.trade(side, code, shares, use_market_price=True)
+    else:
+        trade_result = mx.trade(side, code, shares, price=price, use_market_price=False)
+
+    broker_order_id = _extract_broker_order_id(trade_result)
+    trade_code = str(trade_result.get("code", ""))
+    is_market_filled = trade_code == "200" and use_market_price
+    order_status = "exception"
+    if trade_code == "200":
+        order_status = "filled" if is_market_filled else "placed"
+
+    order = upsert_order_state(
+        {
+            "external_id": external_id,
+            "scope": "paper_mx",
+            "broker": "mx_moni",
+            "broker_order_id": broker_order_id,
+            "status": order_status,
+            "requested_shares": shares,
+            "filled_shares": shares if is_market_filled else 0,
+            "avg_fill_price": price if is_market_filled else 0.0,
+            "limit_price": price if not use_market_price else 0.0,
+            "reason_code": reason_code,
+            "reason_text": reason,
+            "filled_at": now_ts if is_market_filled else "",
+            "updated_at": now_ts,
+            "metadata": {
+                "raw_trade_result": trade_result,
+                "trade_event_logged": False,
+            },
+        }
+    )
+
+    if is_market_filled:
+        _log_trade(
+            "买入" if side == "buy" else "卖出",
+            code,
+            name,
+            shares,
+            price,
+            reason,
+            reason_code,
+            metadata={"order_external_id": external_id},
+        )
+        order = upsert_order_state(
+            {
+                "external_id": external_id,
+                "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "metadata": {
+                    "trade_event_logged": True,
+                    "trade_event_source": "shadow_trade",
+                },
+            }
+        )
+
+    return trade_result, order
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -755,7 +1077,18 @@ def buy_new_picks(dry_run: bool = False) -> list:
 
         # 执行市价买入
         _logger.info(f"[shadow] 买入 {name}({code}) {shares}股 @ ¥{price:.2f}")
-        trade_result = mx.trade("buy", code, shares, use_market_price=True)
+        trade_result, order_state = _submit_shadow_order(
+            mx,
+            side="buy",
+            code=code,
+            name=name,
+            shares=shares,
+            reason=f"核心池评分{total_score:.1f}",
+            reason_code="BUY_CORE_POOL",
+            price=price,
+            use_market_price=True,
+            order_class="manual",
+        )
         trade_code = str(trade_result.get("code", ""))
         trade_msg = trade_result.get("message", "")
 
@@ -763,11 +1096,33 @@ def buy_new_picks(dry_run: bool = False) -> list:
             available -= actual_cost
             held_codes.add(code)
             _logger.info(f"[shadow] ✅ {name} 买入成功 {shares}股")
-            _log_trade("买入", code, name, shares, price, f"核心池评分{total_score:.1f}", "BUY_CORE_POOL")
-            results.append(_trade_result(code, name, shares, "成功", f"核心池评分{total_score:.1f}", "BUY_CORE_POOL", price=price))
+            results.append(
+                _trade_result(
+                    code,
+                    name,
+                    shares,
+                    "成功",
+                    f"核心池评分{total_score:.1f}",
+                    "BUY_CORE_POOL",
+                    price=price,
+                    order_status=order_state.get("status", ""),
+                    order_external_id=order_state.get("external_id", ""),
+                )
+            )
         else:
             _logger.warning(f"[shadow] ❌ {name} 买入失败: {trade_code} {trade_msg}")
-            results.append(_trade_result(code, name, 0, "失败", trade_msg, "BROKER_REJECTED"))
+            results.append(
+                _trade_result(
+                    code,
+                    name,
+                    0,
+                    "失败",
+                    trade_msg,
+                    "BROKER_REJECTED",
+                    order_status=order_state.get("status", ""),
+                    order_external_id=order_state.get("external_id", ""),
+                )
+            )
 
     return results
 
@@ -949,22 +1304,34 @@ def check_stop_signals(dry_run: bool = False) -> list:
             continue
 
         # 止损用市价确保成交，止盈用限价锁定利润
-        if "止损" in reason:
-            trade_result = mx.trade("sell", code, sell_qty, use_market_price=True)
-        else:
-            trade_result = mx.trade("sell", code, sell_qty, price=sell_price, use_market_price=False)
-
+        use_market_price = "止损" in reason
+        trade_result, order_state = _submit_shadow_order(
+            mx,
+            side="sell",
+            code=code,
+            name=name,
+            shares=sell_qty,
+            reason=reason,
+            reason_code=reason_code or "",
+            price=sell_price or price,
+            use_market_price=use_market_price,
+            order_class="risk",
+        )
         trade_code = str(trade_result.get("code", ""))
         if trade_code == "200":
-            _logger.info(f"[shadow] ✅ {name} {action} 成功")
-            _log_trade("卖出", code, name, sell_qty, price, reason, reason_code)
+            if order_state.get("status") == "filled":
+                _logger.info(f"[shadow] ✅ {name} {action} 成功")
+            else:
+                _logger.info(f"[shadow] ✅ {name} {action} 已挂单")
             results.append({
                 "code": code,
                 "name": name,
                 "action": action,
                 "reason": reason,
                 "reason_code": reason_code,
-                "status": "成功",
+                "status": "成功" if order_state.get("status") == "filled" else "挂单",
+                "order_status": order_state.get("status", ""),
+                "order_external_id": order_state.get("external_id", ""),
                 "advisory_signals": advisory_signals,
                 "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
@@ -998,6 +1365,8 @@ def get_status() -> dict:
     mx = _get_moni()
     balance = _get_balance(mx)
     positions = _get_positions(mx)
+    order_sync = _sync_broker_orders(mx)
+    order_snapshot = load_order_snapshot(scope="paper_mx")
     risk_cfg = get_strategy().get("risk", {})
     paper_position_context = _load_paper_position_context(window=180)
     history_cache = {}
@@ -1049,6 +1418,9 @@ def get_status() -> dict:
             "triggered_rules": sorted(triggered_rules),
             "positions": advisory_positions,
         },
+        "orders": order_snapshot.get("orders", []),
+        "order_summary": order_snapshot.get("summary", {}),
+        "order_sync": order_sync,
     }
 
 

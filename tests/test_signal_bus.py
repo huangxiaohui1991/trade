@@ -43,6 +43,8 @@ class SignalBusTests(unittest.TestCase):
                 "holding_count": 0,
                 "positions_summary": {"holding_count": 0, "current_exposure": 0.0},
                 "risk": {"can_buy": False},
+                "portfolio_risk": {"state": "block"},
+                "reason_codes": ["TRADE_CONSECUTIVE_LOSS_COOLDOWN"],
                 "reasons": ["market_signal=GREEN", "本周买入次数已满 (1/1)"],
             },
         ), mock.patch("scripts.cli.trade.load_portfolio_snapshot", return_value={
@@ -95,6 +97,7 @@ class SignalBusTests(unittest.TestCase):
         self.assertIn("POOL_WARNING", signal_bus["pool"]["reason_codes"])
         self.assertEqual(signal_bus["pool"]["state"], "warning")
         self.assertIn("TRADE_WEEKLY_BUY_LIMIT", signal_bus["trade"]["reason_codes"])
+        self.assertIn("TRADE_CONSECUTIVE_LOSS_COOLDOWN", signal_bus["trade"]["reason_codes"])
         self.assertIn("TRADE_PAPER_RECONCILE_DRIFT", signal_bus["trade"]["reason_codes"])
         self.assertIn("RISK_TIME_STOP", signal_bus["trade"]["reason_codes"])
         self.assertEqual(signal_bus["trade"]["state"], "drift")

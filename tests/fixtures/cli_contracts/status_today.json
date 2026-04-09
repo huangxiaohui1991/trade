@@ -24,6 +24,58 @@
     ],
     "as_of_date": "2026-04-09"
   },
+  "order_snapshot": {
+    "scope": "paper_mx",
+    "status": "all",
+    "summary": {
+      "order_count": 4,
+      "pending_count": 1,
+      "open_count": 1,
+      "exception_count": 1
+    },
+    "condition_orders": {
+      "count": 2,
+      "pending_count": 1,
+      "open_count": 1,
+      "exception_count": 0,
+      "status_counts": {
+        "candidate": 1,
+        "placed": 1
+      },
+      "condition_type_counts": {
+        "take_profit_t1": 1,
+        "manual_stop": 1
+      },
+      "sample": [
+        {
+          "external_id": "paper:order:001",
+          "code": "300389",
+          "name": "艾比森",
+          "side": "sell",
+          "status": "candidate",
+          "condition_type": "take_profit_t1",
+          "requested_shares": 1000,
+          "filled_shares": 0,
+          "trigger_price": 20.5,
+          "limit_price": 20.45,
+          "confirm_status": "pending"
+        },
+        {
+          "external_id": "paper:order:002",
+          "code": "603063",
+          "name": "禾望电气",
+          "side": "sell",
+          "status": "placed",
+          "condition_type": "manual_stop",
+          "requested_shares": 600,
+          "filled_shares": 0,
+          "trigger_price": 18.2,
+          "limit_price": 18.1,
+          "confirm_status": "not_required"
+        }
+      ]
+    }
+  },
   "signal_bus": {
     "version": 1,
     "state": "drift",

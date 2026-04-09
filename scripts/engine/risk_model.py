@@ -15,6 +15,7 @@ engine/risk_model.py — 风控校验模块
 import os
 import sys
 import warnings
+from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,58 @@ from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 
 _logger = get_logger("risk_model")
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value in [None, ""]:
+            return default
+        if isinstance(value, str):
+            value = value.replace("¥", "").replace("%", "").replace(",", "").strip()
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_trade_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) >= 10:
+        text = text[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _event_trade_date(event: dict) -> date | None:
+    return _parse_trade_date(
+        event.get("trade_date")
+        or event.get("event_date")
+        or event.get("date")
+    )
+
+
+def _daily_realized_pnl(trade_events: list[dict]) -> dict[str, float]:
+    by_day = {}
+    for event in trade_events or []:
+        trade_day = _event_trade_date(event)
+        if not trade_day:
+            continue
+        action = str(event.get("action") or event.get("side") or "").strip().upper()
+        if action not in {"SELL", "SELL_PARTIAL"} and str(event.get("side", "")).strip().lower() != "sell":
+            continue
+        day_key = trade_day.isoformat()
+        by_day[day_key] = round(
+            by_day.get(day_key, 0.0) + _safe_float(event.get("realized_pnl", event.get("pnl", 0.0)), 0.0),
+            2,
+        )
+    return by_day
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +232,118 @@ def check_risk(current_exposure: float, this_week_buys: int,
             "holding_max": holding_max,
             "holding_count": holding_count,
         }
+    }
+
+
+def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
+                         total_capital: float,
+                         today: Optional[date] = None,
+                         strategy: Optional[dict] = None) -> dict:
+    """
+    组合级风控：连续亏损冷却 + 单日亏损上限 + 持仓集中度预警。
+
+    Returns:
+        {
+            "can_trade": bool,
+            "state": "ok"|"warning"|"block",
+            "reason_codes": [str],
+            "reasons": [str],
+            "metrics": {...},
+        }
+    """
+    strategy = strategy or get_strategy()
+    today = today or date.today()
+    portfolio_cfg = strategy.get("risk", {}).get("portfolio", {})
+
+    daily_loss_limit_pct = _safe_float(portfolio_cfg.get("daily_loss_limit_pct", 0.03), 0.03)
+    consecutive_loss_days_limit = int(portfolio_cfg.get("consecutive_loss_days_limit", 2) or 2)
+    cooldown_days = int(portfolio_cfg.get("cooldown_days", 2) or 2)
+    max_single_warn_pct = _safe_float(portfolio_cfg.get("max_single_position_warn_pct", 0.25), 0.25)
+
+    day_pnl = _daily_realized_pnl(trade_events or [])
+    today_key = today.isoformat()
+    today_realized_pnl = round(day_pnl.get(today_key, 0.0), 2)
+    today_realized_loss = abs(min(today_realized_pnl, 0.0))
+    today_loss_pct = (today_realized_loss / total_capital) if total_capital else 0.0
+
+    sorted_days = sorted(day_pnl.keys())
+    consecutive_loss_days = 0
+    streak_end_date = None
+    if sorted_days:
+        for day_key in reversed(sorted_days):
+            pnl = _safe_float(day_pnl.get(day_key, 0.0), 0.0)
+            if pnl < 0:
+                consecutive_loss_days += 1
+                if streak_end_date is None:
+                    streak_end_date = _parse_trade_date(day_key)
+            else:
+                break
+
+    cooldown_active = False
+    cooldown_until = ""
+    if (
+        streak_end_date
+        and consecutive_loss_days >= consecutive_loss_days_limit > 0
+        and cooldown_days > 0
+    ):
+        cooldown_until_date = streak_end_date + timedelta(days=cooldown_days)
+        cooldown_until = cooldown_until_date.isoformat()
+        cooldown_active = today <= cooldown_until_date
+
+    largest_position_pct = 0.0
+    largest_position_code = ""
+    for position in positions or []:
+        market_value = _safe_float(position.get("market_value", 0.0), 0.0)
+        if total_capital <= 0 or market_value <= 0:
+            continue
+        pct = market_value / total_capital
+        if pct > largest_position_pct:
+            largest_position_pct = pct
+            largest_position_code = str(position.get("code", "")).strip()
+
+    reason_codes = []
+    reasons = []
+    if today_loss_pct >= daily_loss_limit_pct > 0:
+        reason_codes.append("TRADE_PORTFOLIO_DAILY_LOSS_LIMIT")
+        reasons.append(
+            f"单日已实现亏损达上限 (¥{today_realized_loss:,.2f} / {today_loss_pct:.1%})"
+        )
+    if cooldown_active:
+        reason_codes.append("TRADE_CONSECUTIVE_LOSS_COOLDOWN")
+        reasons.append(
+            f"连续亏损冷却中 ({consecutive_loss_days} 个亏损交易日，冷却至 {cooldown_until})"
+        )
+    if largest_position_pct >= max_single_warn_pct > 0:
+        reason_codes.append("TRADE_POSITION_CONCENTRATION_WARNING")
+        reasons.append(
+            f"持仓集中度预警 ({largest_position_code or 'unknown'} 占总资金 {largest_position_pct:.1%})"
+        )
+
+    state = "ok"
+    if any(code in {"TRADE_PORTFOLIO_DAILY_LOSS_LIMIT", "TRADE_CONSECUTIVE_LOSS_COOLDOWN"} for code in reason_codes):
+        state = "block"
+    elif "TRADE_POSITION_CONCENTRATION_WARNING" in reason_codes:
+        state = "warning"
+
+    return {
+        "can_trade": state != "block",
+        "state": state,
+        "reason_codes": reason_codes,
+        "reasons": reasons,
+        "metrics": {
+            "today_realized_pnl": today_realized_pnl,
+            "today_realized_loss": today_realized_loss,
+            "today_loss_pct": round(today_loss_pct, 4),
+            "daily_loss_limit_pct": round(daily_loss_limit_pct, 4),
+            "consecutive_loss_days": consecutive_loss_days,
+            "consecutive_loss_days_limit": consecutive_loss_days_limit,
+            "cooldown_days": cooldown_days,
+            "cooldown_active": cooldown_active,
+            "cooldown_until": cooldown_until,
+            "largest_position_pct": round(largest_position_pct, 4),
+            "largest_position_code": largest_position_code,
+            "max_single_position_warn_pct": round(max_single_warn_pct, 4),
+        },
     }
 
 

@@ -41,6 +41,7 @@ from scripts.state import (
     audit_state,
     bootstrap_state,
     load_market_snapshot,
+    load_order_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
     sync_activity_state,
@@ -288,6 +289,75 @@ def _shadow_trade_snapshot() -> dict:
         }
 
 
+def _order_count_from_statuses(status_counts: dict, statuses: list[str]) -> int:
+    total = 0
+    for status in statuses:
+        total += int(status_counts.get(status, 0) or 0)
+    return total
+
+
+def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> dict:
+    orders = order_snapshot.get("orders", []) if isinstance(order_snapshot, dict) else []
+    summary = dict(order_snapshot.get("summary", {}) if isinstance(order_snapshot, dict) else {})
+    status_counts = dict(summary.get("status_counts", {}) or {})
+
+    pending_count = _order_count_from_statuses(status_counts, ["candidate", "pending", "confirm_pending"])
+    open_count = _order_count_from_statuses(status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"])
+    exception_count = _order_count_from_statuses(status_counts, ["exception", "rejected", "failed", "cancel_failed"])
+
+    condition_orders = []
+    for order in orders:
+        order_class = str(order.get("order_class", "")).strip()
+        condition_type = str(order.get("condition_type", "")).strip()
+        if order_class == "condition" or condition_type:
+            condition_orders.append(order)
+
+    condition_status_counts: dict[str, int] = {}
+    condition_type_counts: dict[str, int] = {}
+    for order in condition_orders:
+        status = str(order.get("status", "")).strip() or "unknown"
+        condition_status_counts[status] = condition_status_counts.get(status, 0) + 1
+        condition_type = str(order.get("condition_type", "")).strip() or "unknown"
+        condition_type_counts[condition_type] = condition_type_counts.get(condition_type, 0) + 1
+
+    compact_condition_orders = {
+        "count": len(condition_orders),
+        "pending_count": _order_count_from_statuses(condition_status_counts, ["candidate", "pending", "confirm_pending"]),
+        "open_count": _order_count_from_statuses(condition_status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"]),
+        "exception_count": _order_count_from_statuses(condition_status_counts, ["exception", "rejected", "failed", "cancel_failed"]),
+        "status_counts": condition_status_counts,
+        "condition_type_counts": condition_type_counts,
+        "sample": [],
+    }
+    for order in condition_orders[:sample_size]:
+        compact_condition_orders["sample"].append({
+            "external_id": order.get("external_id", ""),
+            "code": order.get("code", ""),
+            "name": order.get("name", ""),
+            "side": order.get("side", ""),
+            "status": order.get("status", ""),
+            "condition_type": order.get("condition_type", ""),
+            "requested_shares": order.get("requested_shares", 0),
+            "filled_shares": order.get("filled_shares", 0),
+            "trigger_price": order.get("trigger_price", 0.0),
+            "limit_price": order.get("limit_price", 0.0),
+            "confirm_status": order.get("confirm_status", ""),
+        })
+
+    return {
+        "scope": order_snapshot.get("scope", "all") if isinstance(order_snapshot, dict) else "all",
+        "status": order_snapshot.get("status", "all") if isinstance(order_snapshot, dict) else "all",
+        "db_path": order_snapshot.get("db_path", str(LEDGER_DB_PATH)) if isinstance(order_snapshot, dict) else str(LEDGER_DB_PATH),
+        "summary": {
+            **summary,
+            "pending_count": pending_count,
+            "open_count": open_count,
+            "exception_count": exception_count,
+        },
+        "condition_orders": compact_condition_orders,
+    }
+
+
 def _combined_state_audit() -> dict:
     base_audit = audit_state()
     shadow_snapshot = _shadow_trade_snapshot()
@@ -446,6 +516,19 @@ def state_command(action: str, args) -> dict:
             apply=getattr(args, "apply", False),
             window=getattr(args, "window", 180),
         )
+    elif action == "orders":
+        snapshot = _compact_order_snapshot(
+            load_order_snapshot(
+                scope=getattr(args, "scope", None),
+                status=getattr(args, "status", None),
+            )
+        )
+        result = {
+            **snapshot,
+            "status": "ok",
+            "scope_filter": snapshot.get("scope", "all"),
+            "order_status_filter": snapshot.get("status", "all"),
+        }
     else:
         result = _combined_state_audit()
     return sanitize_for_json({
@@ -660,6 +743,33 @@ def status_today(sync_state: bool = True) -> dict:
     pool_sync_state = audit_state()
     market_snapshot = load_market_snapshot()
     shadow_snapshot = _shadow_trade_snapshot()
+    try:
+        order_snapshot = _compact_order_snapshot(load_order_snapshot(scope="paper_mx"))
+    except Exception as e:
+        order_snapshot = {
+            "scope": "paper_mx",
+            "status": "error",
+            "db_path": str(LEDGER_DB_PATH),
+            "summary": {
+                "order_count": 0,
+                "pending_count": 0,
+                "open_count": 0,
+                "exception_count": 0,
+                "status_counts": {},
+                "scope_counts": {},
+                "class_counts": {},
+            },
+            "condition_orders": {
+                "count": 0,
+                "pending_count": 0,
+                "open_count": 0,
+                "exception_count": 0,
+                "status_counts": {},
+                "condition_type_counts": {},
+                "sample": [],
+                "error": str(e),
+            },
+        }
     signal_bus = build_signal_bus_summary(
         market_snapshot=market_snapshot,
         pool_snapshot=pool_snapshot,
@@ -695,6 +805,7 @@ def status_today(sync_state: bool = True) -> dict:
         "signal_bus": signal_bus,
         "pool_sync_state": pool_sync_state,
         "paper_trade_audit": shadow_snapshot.get("consistency", {}),
+        "order_snapshot": order_snapshot,
         "shadow_trade_state": {
             "status": shadow_snapshot.get("status", "error"),
             "timestamp": shadow_snapshot.get("timestamp", ""),
@@ -866,6 +977,9 @@ def main():
     state_reconcile = state_sub.add_parser("reconcile")
     state_reconcile.add_argument("--apply", action="store_true", help="Write reconcile events into paper ledger/log")
     state_reconcile.add_argument("--window", type=int, default=180, help="Lookback window for paper event inference")
+    state_orders = state_sub.add_parser("orders")
+    state_orders.add_argument("--scope", default=None, help="Optional scope filter for structured orders")
+    state_orders.add_argument("--status", default=None, help="Optional status filter for structured orders")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -962,6 +1076,15 @@ def main():
         elif result.get("command") == "state":
             print(f"state {result.get('action')}: {result.get('status', 'ok')}")
             print(f"db_path: {result.get('db_path', '')}")
+            if result.get("action") == "orders":
+                summary = result.get("summary", {})
+                print(
+                    "orders: "
+                    f"total={summary.get('order_count', 0)} "
+                    f"pending={summary.get('pending_count', 0)} "
+                    f"open={summary.get('open_count', 0)} "
+                    f"exception={summary.get('exception_count', 0)}"
+                )
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")

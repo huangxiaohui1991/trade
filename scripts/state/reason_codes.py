@@ -36,6 +36,9 @@ REASON_CODE_REGISTRY: dict[str, dict[str, str]] = {
     "TRADE_WEEKLY_BUY_LIMIT": {"category": "trade", "label": "周买入上限", "state": "block"},
     "TRADE_EXPOSURE_LIMIT": {"category": "trade", "label": "总仓位限制", "state": "block"},
     "TRADE_HOLDING_LIMIT": {"category": "trade", "label": "持仓数限制", "state": "block"},
+    "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT": {"category": "trade", "label": "单日亏损上限", "state": "block"},
+    "TRADE_CONSECUTIVE_LOSS_COOLDOWN": {"category": "trade", "label": "连续亏损冷却", "state": "block"},
+    "TRADE_POSITION_CONCENTRATION_WARNING": {"category": "trade", "label": "持仓集中度预警", "state": "warning"},
     "TRADE_PAPER_RECONCILE_DRIFT": {"category": "trade", "label": "模拟盘对账漂移", "state": "drift"},
     "TRADE_PAPER_RECONCILE_OPEN": {"category": "trade", "label": "补录缺失开仓", "state": "repair"},
     "TRADE_PAPER_RECONCILE_FLATTEN": {"category": "trade", "label": "补录缺失平仓", "state": "repair"},
@@ -52,6 +55,9 @@ REASON_CODE_ALIASES = {
     "paper_trade_drift": "TRADE_PAPER_RECONCILE_DRIFT",
     "risk_time_stop": "RISK_TIME_STOP",
     "risk_drawdown_take_profit": "RISK_DRAWDOWN_TAKE_PROFIT",
+    "trade_portfolio_daily_loss_limit": "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT",
+    "trade_consecutive_loss_cooldown": "TRADE_CONSECUTIVE_LOSS_COOLDOWN",
+    "trade_position_concentration_warning": "TRADE_POSITION_CONCENTRATION_WARNING",
 }
 
 TRADE_REASON_PATTERNS = (
@@ -61,6 +67,9 @@ TRADE_REASON_PATTERNS = (
     (re.compile(r"总仓位将超限"), "TRADE_EXPOSURE_LIMIT"),
     (re.compile(r"单只仓位超限"), "TRADE_EXPOSURE_LIMIT"),
     (re.compile(r"持仓只数已达上限"), "TRADE_HOLDING_LIMIT"),
+    (re.compile(r"单日已实现亏损达上限"), "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT"),
+    (re.compile(r"连续亏损冷却中"), "TRADE_CONSECUTIVE_LOSS_COOLDOWN"),
+    (re.compile(r"持仓集中度预警"), "TRADE_POSITION_CONCENTRATION_WARNING"),
     (re.compile(r"^\[?RISK_TIME_STOP\]?$", re.IGNORECASE), "RISK_TIME_STOP"),
     (re.compile(r"^\[?RISK_DRAWDOWN_TAKE_PROFIT\]?$", re.IGNORECASE), "RISK_DRAWDOWN_TAKE_PROFIT"),
 )
@@ -263,7 +272,15 @@ def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) ->
     today_decision = today_decision or {}
     shadow_snapshot = shadow_snapshot or {}
 
-    reason_codes, source_codes = _trade_reason_codes_from_texts(today_decision.get("reasons", []))
+    explicit_reason_codes = _dedupe(
+        [
+            normalize_reason_code(code, category="trade")
+            for code in (today_decision.get("reason_codes", []) or [])
+            if code
+        ]
+    )
+    text_reason_codes, source_codes = _trade_reason_codes_from_texts(today_decision.get("reasons", []))
+    reason_codes = _dedupe(explicit_reason_codes + text_reason_codes)
 
     consistency = shadow_snapshot.get("consistency", {}) or {}
     advisory_summary = shadow_snapshot.get("advisory_summary", {}) or {}
@@ -282,9 +299,12 @@ def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) ->
         reason_codes,
         [
             "TRADE_PAPER_RECONCILE_DRIFT",
+            "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT",
+            "TRADE_CONSECUTIVE_LOSS_COOLDOWN",
             "TRADE_WEEKLY_BUY_LIMIT",
             "TRADE_EXPOSURE_LIMIT",
             "TRADE_HOLDING_LIMIT",
+            "TRADE_POSITION_CONCENTRATION_WARNING",
             "RISK_TIME_STOP",
             "RISK_DRAWDOWN_TAKE_PROFIT",
             "TRADE_ADVISORY",
@@ -297,9 +317,26 @@ def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) ->
     state = "ok"
     if "TRADE_PAPER_RECONCILE_DRIFT" in reason_codes:
         state = "drift"
-    elif any(code in {"TRADE_WEEKLY_BUY_LIMIT", "TRADE_EXPOSURE_LIMIT", "TRADE_HOLDING_LIMIT"} for code in reason_codes):
+    elif any(
+        code in {
+            "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT",
+            "TRADE_CONSECUTIVE_LOSS_COOLDOWN",
+            "TRADE_WEEKLY_BUY_LIMIT",
+            "TRADE_EXPOSURE_LIMIT",
+            "TRADE_HOLDING_LIMIT",
+        }
+        for code in reason_codes
+    ):
         state = "block"
-    elif any(code in {"RISK_TIME_STOP", "RISK_DRAWDOWN_TAKE_PROFIT", "TRADE_ADVISORY"} for code in reason_codes):
+    elif any(
+        code in {
+            "TRADE_POSITION_CONCENTRATION_WARNING",
+            "RISK_TIME_STOP",
+            "RISK_DRAWDOWN_TAKE_PROFIT",
+            "TRADE_ADVISORY",
+        }
+        for code in reason_codes
+    ):
         state = "warning"
 
     return summarize_reason_codes(
@@ -311,6 +348,7 @@ def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) ->
             "decision": today_decision.get("decision", ""),
             "market_signal": today_decision.get("market_signal", ""),
             "risk": today_decision.get("risk", {}),
+            "portfolio_risk": today_decision.get("portfolio_risk", {}),
             "shadow_status": shadow_snapshot.get("status", ""),
             "consistency_status": consistency.get("status", ""),
             "triggered_signal_count": advisory_summary.get("triggered_signal_count", 0),

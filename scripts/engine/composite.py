@@ -41,7 +41,7 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.market_timer import MarketTimer, get_signal as get_market_signal
-from scripts.engine.risk_model import check_risk
+from scripts.engine.risk_model import check_portfolio_risk, check_risk
 from scripts.state import load_activity_summary, load_market_snapshot, load_portfolio_snapshot
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
@@ -302,12 +302,19 @@ def build_today_decision(strategy: Optional[dict] = None) -> dict:
     positions_summary = portfolio_snapshot.get("summary", {})
     current_exposure = float(positions_summary.get("current_exposure", 0.0) or 0.0)
     holding_count = int(positions_summary.get("holding_count", 0) or 0)
+    total_capital = float(
+        positions_summary.get("total_capital", strategy.get("capital", decider.total_capital))
+        or strategy.get("capital", decider.total_capital)
+        or 0.0
+    )
     weekly_buys = 0
+    trade_events = []
     try:
-        activity = load_activity_summary("week", scope="cn_a_system")
+        activity = load_activity_summary(30, scope="cn_a_system")
         weekly_buys = int(
             activity.get("weekly_buy_count", activity.get("weekly_buys", activity.get("buy_count", 0))) or 0
         )
+        trade_events = list(activity.get("trade_events", []))
     except Exception as e:
         _logger.warning(f"[composite] build_today_decision 读取交易活动失败: {e}")
 
@@ -317,23 +324,54 @@ def build_today_decision(strategy: Optional[dict] = None) -> dict:
         holding_count=holding_count,
         proposed_amount=0,
     )
+    portfolio_risk = check_portfolio_risk(
+        trade_events=trade_events,
+        positions=portfolio_snapshot.get("positions", []),
+        total_capital=total_capital,
+        strategy=strategy,
+    )
 
     reasons = []
+    reason_codes = []
     if market_signal in ["CLEAR", "RED"]:
         decision = "NO_TRADE"
         reasons.append(f"market_signal={market_signal}")
+    else:
+        reasons.append(f"market_signal={market_signal}")
+
+    if market_signal in ["CLEAR", "RED"]:
+        decision = "NO_TRADE"
     elif not risk.get("can_buy", False):
         decision = "NO_TRADE"
         reasons.extend(risk.get("reasons", []))
-    elif market_signal == "YELLOW" or market_multiplier < 1.0:
+    elif not portfolio_risk.get("can_trade", True):
+        decision = "NO_TRADE"
+        reasons.extend(portfolio_risk.get("reasons", []))
+    elif market_signal == "YELLOW":
         decision = "REDUCED_BUY"
-        reasons.append("market_signal=YELLOW")
     else:
         decision = "BUY_ALLOWED"
-        reasons.append("market_signal=GREEN")
+
+    reason_codes.extend(portfolio_risk.get("reason_codes", []))
+    deduped_reason_codes = []
+    seen_codes = set()
+    for code in reason_codes:
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        deduped_reason_codes.append(code)
+
+    deduped_reasons = []
+    seen_reasons = set()
+    for reason in reasons:
+        if not reason or reason in seen_reasons:
+            continue
+        seen_reasons.add(reason)
+        deduped_reasons.append(reason)
 
     return {
         "decision": decision,
+        "action": decision,
         "market_signal": market_signal,
         "market_multiplier": market_multiplier,
         "current_exposure": round(current_exposure, 3),
@@ -341,7 +379,9 @@ def build_today_decision(strategy: Optional[dict] = None) -> dict:
         "holding_count": holding_count,
         "positions_summary": positions_summary,
         "risk": risk,
-        "reasons": reasons,
+        "portfolio_risk": portfolio_risk,
+        "reason_codes": deduped_reason_codes,
+        "reasons": deduped_reasons,
     }
 
 

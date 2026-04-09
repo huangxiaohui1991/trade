@@ -105,6 +105,37 @@ CREATE TABLE IF NOT EXISTS trade_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_id TEXT UNIQUE,
+  scope TEXT NOT NULL,
+  broker TEXT DEFAULT '',
+  broker_order_id TEXT DEFAULT '',
+  code TEXT DEFAULT '',
+  name TEXT DEFAULT '',
+  side TEXT DEFAULT '',
+  order_class TEXT DEFAULT '',
+  order_type TEXT DEFAULT '',
+  condition_type TEXT DEFAULT '',
+  requested_shares INTEGER NOT NULL DEFAULT 0,
+  filled_shares INTEGER NOT NULL DEFAULT 0,
+  trigger_price REAL NOT NULL DEFAULT 0,
+  limit_price REAL NOT NULL DEFAULT 0,
+  avg_fill_price REAL NOT NULL DEFAULT 0,
+  status TEXT DEFAULT '',
+  confirm_status TEXT DEFAULT '',
+  reason_code TEXT DEFAULT '',
+  reason_text TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  placed_at TEXT DEFAULT '',
+  triggered_at TEXT DEFAULT '',
+  filled_at TEXT DEFAULT '',
+  cancelled_at TEXT DEFAULT '',
+  confirmed_at TEXT DEFAULT '',
+  updated_at TEXT NOT NULL,
+  metadata_json TEXT DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS pool_entries (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -491,6 +522,194 @@ def _upsert_trade_event(conn: sqlite3.Connection, event: dict) -> None:
             event.get("created_at", _now_ts()),
         ),
     )
+
+
+_ORDER_TERMINAL_STATUSES = {"filled", "cancelled", "reviewed", "exception"}
+
+
+def _normalize_order_payload(order: dict, existing: dict | None = None) -> dict:
+    existing = existing or {}
+    metadata = existing.get("metadata", {})
+    payload_metadata = order.get("metadata", {})
+    if isinstance(metadata, dict) and isinstance(payload_metadata, dict):
+        metadata = {**metadata, **payload_metadata}
+    elif isinstance(payload_metadata, dict):
+        metadata = payload_metadata
+
+    external_id = str(
+        order.get("external_id")
+        or order.get("broker_order_id")
+        or order.get("client_order_id")
+        or existing.get("external_id", "")
+    ).strip()
+    if not external_id:
+        raise ValueError("order requires external_id or broker_order_id")
+
+    scope = str(order.get("scope", existing.get("scope", PRIMARY_SCOPE))).strip() or PRIMARY_SCOPE
+    updated_at = str(order.get("updated_at", existing.get("updated_at", _now_ts()))).strip() or _now_ts()
+
+    def pick(key: str, default: Any = "") -> Any:
+        value = order.get(key, existing.get(key, default))
+        if value in (None, "") and key in existing:
+            return existing.get(key, default)
+        return value if value is not None else default
+
+    return {
+        "external_id": external_id,
+        "scope": scope,
+        "broker": str(pick("broker", "")).strip(),
+        "broker_order_id": str(pick("broker_order_id", order.get("external_id", ""))).strip(),
+        "code": _normalize_code(pick("code", "")),
+        "name": str(pick("name", "")).strip(),
+        "side": str(pick("side", "")).strip(),
+        "order_class": str(pick("order_class", "")).strip(),
+        "order_type": str(pick("order_type", "")).strip(),
+        "condition_type": str(pick("condition_type", "")).strip(),
+        "requested_shares": _safe_int(pick("requested_shares", existing.get("requested_shares", 0))),
+        "filled_shares": _safe_int(pick("filled_shares", existing.get("filled_shares", 0))),
+        "trigger_price": _safe_float(pick("trigger_price", existing.get("trigger_price", 0.0))),
+        "limit_price": _safe_float(pick("limit_price", existing.get("limit_price", 0.0))),
+        "avg_fill_price": _safe_float(pick("avg_fill_price", existing.get("avg_fill_price", 0.0))),
+        "status": str(pick("status", existing.get("status", "candidate"))).strip() or "candidate",
+        "confirm_status": str(pick("confirm_status", existing.get("confirm_status", "not_required"))).strip() or "not_required",
+        "reason_code": str(pick("reason_code", "")).strip(),
+        "reason_text": str(pick("reason_text", "")).strip(),
+        "source": str(pick("source", "runtime")).strip() or "runtime",
+        "placed_at": str(pick("placed_at", existing.get("placed_at", updated_at))).strip(),
+        "triggered_at": str(pick("triggered_at", existing.get("triggered_at", ""))).strip(),
+        "filled_at": str(pick("filled_at", existing.get("filled_at", ""))).strip(),
+        "cancelled_at": str(pick("cancelled_at", existing.get("cancelled_at", ""))).strip(),
+        "confirmed_at": str(pick("confirmed_at", existing.get("confirmed_at", ""))).strip(),
+        "updated_at": updated_at,
+        "metadata": metadata,
+    }
+
+
+def _load_order_row(conn: sqlite3.Connection, external_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM orders WHERE external_id = ?", (external_id,)).fetchone()
+    if not row:
+        return None
+    order = dict(row)
+    order["metadata"] = _json_loads(order.pop("metadata_json", "{}"), {})
+    return order
+
+
+def _order_rows(scope: str | None = None, status: str | None = None, conn: sqlite3.Connection | None = None) -> list[dict]:
+    close_after = conn is None
+    if close_after:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        query = "SELECT * FROM orders"
+        params: list[Any] = []
+        clauses = []
+        if scope:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC, id DESC"
+        rows = conn.execute(query, params).fetchall()
+        orders = []
+        for row in rows:
+            order = dict(row)
+            order["metadata"] = _json_loads(order.pop("metadata_json", "{}"), {})
+            orders.append(order)
+        return orders
+    finally:
+        if close_after:
+            context.__exit__(None, None, None)
+
+
+def upsert_order_state(order: dict, conn: sqlite3.Connection | None = None) -> dict:
+    """Insert or update a structured order row without touching trade events."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        external_id = str(
+            order.get("external_id")
+            or order.get("broker_order_id")
+            or order.get("client_order_id")
+            or ""
+        ).strip()
+        existing = _load_order_row(conn, external_id) if external_id else None
+        payload = _normalize_order_payload(order, existing)
+        conn.execute(
+            """
+            INSERT INTO orders(
+              external_id, scope, broker, broker_order_id, code, name, side, order_class,
+              order_type, condition_type, requested_shares, filled_shares, trigger_price,
+              limit_price, avg_fill_price, status, confirm_status, reason_code, reason_text,
+              source, placed_at, triggered_at, filled_at, cancelled_at, confirmed_at,
+              updated_at, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(external_id) DO UPDATE SET
+              scope = excluded.scope,
+              broker = excluded.broker,
+              broker_order_id = excluded.broker_order_id,
+              code = excluded.code,
+              name = excluded.name,
+              side = excluded.side,
+              order_class = excluded.order_class,
+              order_type = excluded.order_type,
+              condition_type = excluded.condition_type,
+              requested_shares = excluded.requested_shares,
+              filled_shares = excluded.filled_shares,
+              trigger_price = excluded.trigger_price,
+              limit_price = excluded.limit_price,
+              avg_fill_price = excluded.avg_fill_price,
+              status = excluded.status,
+              confirm_status = excluded.confirm_status,
+              reason_code = excluded.reason_code,
+              reason_text = excluded.reason_text,
+              source = excluded.source,
+              placed_at = excluded.placed_at,
+              triggered_at = excluded.triggered_at,
+              filled_at = excluded.filled_at,
+              cancelled_at = excluded.cancelled_at,
+              confirmed_at = excluded.confirmed_at,
+              updated_at = excluded.updated_at,
+              metadata_json = excluded.metadata_json
+            """,
+            (
+                payload["external_id"],
+                payload["scope"],
+                payload["broker"],
+                payload["broker_order_id"],
+                payload["code"],
+                payload["name"],
+                payload["side"],
+                payload["order_class"],
+                payload["order_type"],
+                payload["condition_type"],
+                payload["requested_shares"],
+                payload["filled_shares"],
+                payload["trigger_price"],
+                payload["limit_price"],
+                payload["avg_fill_price"],
+                payload["status"],
+                payload["confirm_status"],
+                payload["reason_code"],
+                payload["reason_text"],
+                payload["source"],
+                payload["placed_at"],
+                payload["triggered_at"],
+                payload["filled_at"],
+                payload["cancelled_at"],
+                payload["confirmed_at"],
+                payload["updated_at"],
+                _json_dumps(payload["metadata"]),
+            ),
+        )
+        return {**payload, "db_path": str(_db_path())}
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
 
 
 def _project_stocks_yaml(snapshot: dict) -> str:
@@ -1044,6 +1263,40 @@ def load_portfolio_snapshot(scope: str | None = None) -> dict:
             "total_capital": round(primary.get("total_capital", 0.0), 2),
             "scopes": scopes,
         },
+    }
+
+
+def load_order_snapshot(scope: str | None = None, status: str | None = None) -> dict:
+    """Return the structured order snapshot without mutating any other table."""
+    with _connect() as conn:
+        orders = _order_rows(scope=scope, status=status, conn=conn)
+
+    status_counts: dict[str, int] = {}
+    scope_counts: dict[str, int] = {}
+    class_counts: dict[str, int] = {}
+    for order in orders:
+        order_status = str(order.get("status", "")).strip() or "unknown"
+        order_scope = str(order.get("scope", "")).strip() or "unknown"
+        order_class = str(order.get("order_class", "")).strip() or "unknown"
+        status_counts[order_status] = status_counts.get(order_status, 0) + 1
+        scope_counts[order_scope] = scope_counts.get(order_scope, 0) + 1
+        class_counts[order_class] = class_counts.get(order_class, 0) + 1
+
+    terminal_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_TERMINAL_STATUSES)
+    unresolved_count = len(orders) - terminal_count
+    return {
+        "scope": scope or "all",
+        "status": status or "all",
+        "orders": orders,
+        "summary": {
+            "order_count": len(orders),
+            "open_count": unresolved_count,
+            "terminal_count": terminal_count,
+            "status_counts": status_counts,
+            "scope_counts": scope_counts,
+            "class_counts": class_counts,
+        },
+        "db_path": str(_db_path()),
     }
 
 
