@@ -70,7 +70,8 @@ class TradeReviewTests(unittest.TestCase):
             }
         )
 
-        review = load_trade_review(window=30, scope="cn_a_system")
+        with mock.patch("scripts.state.service._load_trade_history_rows", return_value=[]):
+            review = load_trade_review(window=30, scope="cn_a_system")
 
         self.assertEqual(review["closed_trade_count"], 1)
         self.assertEqual(review["win_count"], 1)
@@ -86,6 +87,58 @@ class TradeReviewTests(unittest.TestCase):
         self.assertIsNotNone(trade["mfe_pct"])
         self.assertIsNotNone(trade["mae_pct"])
         self.assertEqual(review["mfe_mae_status"], "proxy_market_history")
+
+    def test_load_trade_review_prefers_actual_market_history_for_excursion(self):
+        from scripts.state import load_trade_review, record_trade_event
+
+        self._bootstrap_empty()
+        record_trade_event(
+            {
+                "external_id": "t1",
+                "scope": "cn_a_system",
+                "code": "300389",
+                "name": "艾比森",
+                "side": "buy",
+                "shares": 1000,
+                "price": 19.1,
+                "amount": 19100,
+                "event_date": "2026-04-07",
+                "reason_code": "BUY_CORE_POOL",
+                "reason_text": "核心池评分7.6",
+                "source": "unit_test",
+            }
+        )
+        record_trade_event(
+            {
+                "external_id": "t2",
+                "scope": "cn_a_system",
+                "code": "300389",
+                "name": "艾比森",
+                "side": "sell",
+                "shares": 1000,
+                "price": 21.3,
+                "amount": 21300,
+                "realized_pnl": 2200,
+                "event_date": "2026-04-09",
+                "reason_code": "RISK_TAKE_PROFIT_T1",
+                "reason_text": "第一批止盈",
+                "source": "unit_test",
+            }
+        )
+
+        with mock.patch("scripts.state.service._load_trade_history_rows", return_value=[
+            {"日期": "2026-04-07", "最高": 19.5, "最低": 18.9},
+            {"日期": "2026-04-08", "最高": 22.0, "最低": 19.2},
+            {"日期": "2026-04-09", "最高": 21.6, "最低": 20.8},
+        ]):
+            review = load_trade_review(window=30, scope="cn_a_system")
+
+        trade = review["closed_trades"][0]
+        self.assertEqual(trade["excursion_source"], "actual_market_history")
+        self.assertEqual(trade["mfe_pct"], 15.18)
+        self.assertEqual(trade["mae_pct"], -1.05)
+        self.assertEqual(review["mfe_mae_status"], "actual_market_history")
+        self.assertEqual(review["summary_stats"]["actual_excursion_coverage_pct"], 100.0)
 
     def test_load_trade_review_adds_summary_and_weekly_section(self):
         from scripts.pipeline.weekly_review import _build_weekly_report
@@ -154,7 +207,14 @@ class TradeReviewTests(unittest.TestCase):
         ]:
             record_trade_event(event)
 
-        review = load_trade_review(window=30, scope="cn_a_system")
+        with mock.patch("scripts.state.service._load_trade_history_rows", side_effect=[
+            [
+                {"日期": "2026-04-01", "最高": 21.8, "最低": 18.8},
+                {"日期": "2026-04-03", "最高": 21.3, "最低": 20.9},
+            ],
+            [],
+        ]):
+            review = load_trade_review(window=30, scope="cn_a_system")
         summary = review["summary_stats"]
         self.assertEqual(review["closed_trade_count"], 2)
         self.assertEqual(summary["avg_holding_days"], 3.0)
@@ -163,17 +223,21 @@ class TradeReviewTests(unittest.TestCase):
         self.assertEqual(summary["rule_break_count"], 1)
         self.assertIsNotNone(summary["avg_mfe_pct"])
         self.assertIsNotNone(summary["avg_mae_pct"])
+        self.assertEqual(summary["actual_excursion_coverage_pct"], 50.0)
 
         trades = {item["code"]: item for item in review["closed_trades"]}
         self.assertEqual(trades["300389"]["holding_days_bucket"], "0-3天")
         self.assertEqual(trades["300389"]["exit_style"], "risk")
+        self.assertEqual(trades["300389"]["excursion_source"], "actual_market_history")
         self.assertEqual(trades["300389"]["rule_compliance"]["status"], "compliant")
         self.assertEqual(trades["300389"]["rule_compliance"]["rule_break_count"], 0)
         self.assertEqual(trades["688001"]["holding_days_bucket"], "4-7天")
         self.assertEqual(trades["688001"]["exit_style"], "manual")
+        self.assertEqual(trades["688001"]["excursion_source"], "proxy_market_history")
         self.assertEqual(trades["688001"]["rule_compliance"]["status"], "reconcile")
         self.assertTrue(trades["688001"]["rule_compliance"]["has_reconcile"])
         self.assertEqual(trades["688001"]["rule_compliance"]["rule_break_count"], 1)
+        self.assertEqual(review["mfe_mae_status"], "mixed_market_history")
 
         vault = mock.Mock(vault_path=self._tmpdir.name, read_core_pool=mock.Mock(return_value=[]))
         activity = load_activity_summary(30, scope="cn_a_system")

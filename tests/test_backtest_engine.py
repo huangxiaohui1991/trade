@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class BacktestEngineTests(unittest.TestCase):
@@ -106,7 +107,8 @@ class BacktestEngineTests(unittest.TestCase):
 
         self._seed_trade_rounds()
 
-        result = run_backtest(start="2026-03-01", end="2026-04-09", scope="cn_a_system")
+        with mock.patch("scripts.state.service._load_trade_history_rows", return_value=[]):
+            result = run_backtest(start="2026-03-01", end="2026-04-09", scope="cn_a_system")
 
         self.assertEqual(result["command"], "backtest")
         self.assertEqual(result["action"], "run")
@@ -124,7 +126,8 @@ class BacktestEngineTests(unittest.TestCase):
 
         self._seed_trade_rounds()
 
-        result = run_walk_forward(start="2026-03-01", end="2026-04-09", scope="cn_a_system", folds=3)
+        with mock.patch("scripts.state.service._load_trade_history_rows", return_value=[]):
+            result = run_walk_forward(start="2026-03-01", end="2026-04-09", scope="cn_a_system", folds=3)
 
         self.assertEqual(result["command"], "backtest")
         self.assertEqual(result["action"], "walk-forward")

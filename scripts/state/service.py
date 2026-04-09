@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - same behavior as config_loader
     yaml = None
 
 from scripts.utils.config_loader import clear_config_cache, get_stocks
+from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.parser import parse_md_table, parse_user_reply
@@ -2497,6 +2498,97 @@ def _estimate_trade_excursion(
     return mfe_pct, mae_pct, "proxy_market_history"
 
 
+def _load_trade_history_rows(code: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    cache_key = f"{_normalize_code(code)}_{start_date}_{end_date}"
+    cached = load_json_cache("trade_history", cache_key, max_age_seconds=86400 * 7)
+    if cached and isinstance(cached.get("data"), list):
+        return [row for row in cached["data"] if isinstance(row, dict)]
+
+    try:
+        from scripts.engine.technical import _get_hist_data
+    except Exception:
+        return []
+
+    if not code or not start_date or not end_date:
+        return []
+
+    try:
+        df = _get_hist_data(str(code), start_date, end_date)
+    except TypeError:
+        try:
+            df = _get_hist_data(str(code), 120)
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+    if df is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    try:
+        if hasattr(df, "to_dict"):
+            records = df.to_dict(orient="records")
+        else:
+            records = list(df)
+    except Exception:
+        return []
+
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        row_date = str(row.get("日期", row.get("date", ""))).strip()[:10]
+        if not row_date or row_date < start_date or row_date > end_date:
+            continue
+        rows.append(row)
+    if rows:
+        save_json_cache("trade_history", cache_key, rows, meta={"code": _normalize_code(code), "start": start_date, "end": end_date})
+    return rows
+
+
+def _compute_actual_trade_excursion(
+    *,
+    code: str,
+    entry_date: str,
+    exit_date: str,
+    entry_price: float,
+    exit_price: float,
+) -> tuple[float | None, float | None, str]:
+    entry = _safe_float(entry_price, 0.0)
+    if entry <= 0 or not code or not entry_date or not exit_date:
+        return None, None, "pending_market_history"
+
+    rows = _load_trade_history_rows(code, entry_date, exit_date)
+    if not rows:
+        return None, None, "pending_market_history"
+
+    highs = []
+    lows = []
+    for row in rows:
+        high = row.get("最高", row.get("high", row.get("High")))
+        low = row.get("最低", row.get("low", row.get("Low")))
+        if high not in (None, ""):
+            highs.append(_safe_float(high, 0.0))
+        if low not in (None, ""):
+            lows.append(_safe_float(low, 0.0))
+
+    exit_value = _safe_float(exit_price, entry)
+    if exit_value > 0:
+        highs.append(exit_value)
+        lows.append(exit_value)
+    highs.append(entry)
+    lows.append(entry)
+
+    valid_highs = [value for value in highs if value > 0]
+    valid_lows = [value for value in lows if value > 0]
+    if not valid_highs or not valid_lows:
+        return None, None, "pending_market_history"
+
+    mfe_pct = round(((max(valid_highs) - entry) / entry) * 100, 2)
+    mae_pct = round(((min(valid_lows) - entry) / entry) * 100, 2)
+    return mfe_pct, mae_pct, "actual_market_history"
+
+
 def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
     activity = load_activity_summary(window, scope=scope)
     trade_events = list(activity.get("trade_events", []))
@@ -2594,12 +2686,20 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
             all_reason_codes = list(position["entry_reason_codes"]) + list(position["exit_reason_codes"])
             exit_style, exit_style_code = _trade_exit_style(position["exit_reason_codes"])
             rule_compliance = _trade_rule_compliance(all_reason_codes)
-            mfe_pct, mae_pct, excursion_source = _estimate_trade_excursion(
+            mfe_pct, mae_pct, excursion_source = _compute_actual_trade_excursion(
+                code=code,
+                entry_date=position["entry_date"],
+                exit_date=event_date,
                 entry_price=position["entry_price"],
                 exit_price=price,
-                realized_pnl=position["realized_pnl"],
-                exit_reason_codes=position["exit_reason_codes"],
             )
+            if mfe_pct is None or mae_pct is None:
+                mfe_pct, mae_pct, excursion_source = _estimate_trade_excursion(
+                    entry_price=position["entry_price"],
+                    exit_price=price,
+                    realized_pnl=position["realized_pnl"],
+                    exit_reason_codes=position["exit_reason_codes"],
+                )
             closed_trades.append(
                 {
                     "code": code,
@@ -2645,6 +2745,7 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
     ) if losers else 0.0
     mfe_values = [_safe_float(item.get("mfe_pct"), 0.0) for item in closed_trades if item.get("mfe_pct") is not None]
     mae_values = [_safe_float(item.get("mae_pct"), 0.0) for item in closed_trades if item.get("mae_pct") is not None]
+    actual_excursion_count = sum(1 for item in closed_trades if item.get("excursion_source") == "actual_market_history")
     rule_break_count = sum(_safe_int(item.get("rule_break_count", 0), 0) for item in closed_trades)
     summary_stats = {
         "avg_holding_days": avg_holding_days,
@@ -2653,7 +2754,17 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
         "rule_break_count": rule_break_count,
         "avg_mfe_pct": round(sum(mfe_values) / len(mfe_values), 2) if mfe_values else None,
         "avg_mae_pct": round(sum(mae_values) / len(mae_values), 2) if mae_values else None,
+        "actual_excursion_coverage_pct": round(actual_excursion_count / len(closed_trades) * 100, 1) if closed_trades else 0.0,
     }
+    excursion_sources = {str(item.get("excursion_source", "")).strip() for item in closed_trades if str(item.get("excursion_source", "")).strip()}
+    if not mfe_values:
+        mfe_mae_status = "pending_market_history"
+    elif excursion_sources == {"actual_market_history"}:
+        mfe_mae_status = "actual_market_history"
+    elif "actual_market_history" in excursion_sources:
+        mfe_mae_status = "mixed_market_history"
+    else:
+        mfe_mae_status = "proxy_market_history"
     return {
         "scope": scope,
         "window": window,
@@ -2667,7 +2778,7 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
         "open_positions": list(open_positions.values()),
         "summary_stats": summary_stats,
         "source": activity.get("source", "structured_ledger"),
-        "mfe_mae_status": "proxy_market_history" if mfe_values else "pending_market_history",
+        "mfe_mae_status": mfe_mae_status,
     }
 
 

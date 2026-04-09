@@ -267,6 +267,7 @@ def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
         "",
         f"- Risk State: {risk_summary.get('risk_state', risk_summary.get('worst_risk_state', ''))}",
         f"- Pool Sync State: {risk_summary.get('pool_sync_state', risk_summary.get('worst_pool_sync_state', ''))}",
+        f"- Excursion Source: {risk_summary.get('mfe_mae_status', '')}",
         "",
         "## Artifacts",
         "",
@@ -564,10 +565,11 @@ def run_backtest(
         end=inputs["end"],
         source_mode=inputs["source_mode"],
     )
+    excursion_status = str((inputs.get("trade_review", {}) or {}).get("mfe_mae_status", "proxy_market_history"))
     sample_store = {
         "sample_count": sample_payload["sample_count"],
         "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
-        "source": "proxy_market_history",
+        "source": excursion_status,
     }
     score_summary = _summarize_score(inputs)
     risk_summary = _summarize_risk(inputs)
@@ -642,6 +644,7 @@ def run_parameter_sweep(
         end=inputs["end"],
         source_mode=inputs["source_mode"],
     )
+    excursion_status = str((inputs.get("trade_review", {}) or {}).get("mfe_mae_status", "proxy_market_history"))
     result = {
         "command": "backtest",
         "action": "sweep",
@@ -663,7 +666,7 @@ def run_parameter_sweep(
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
             "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
-            "source": "proxy_market_history",
+            "source": excursion_status,
         },
     }
     result_path, report_path = _persist_backtest_outputs("sweep", result)
@@ -767,6 +770,7 @@ def run_walk_forward(
         end=inputs["end"],
         source_mode=inputs["source_mode"],
     )
+    excursion_status = str((inputs.get("trade_review", {}) or {}).get("mfe_mae_status", "proxy_market_history"))
     score_summary = {
         "fold_count": len(fold_reports),
         "mean_win_rate": round(
@@ -808,7 +812,7 @@ def run_walk_forward(
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
             "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
-            "source": "proxy_market_history",
+            "source": excursion_status,
         },
     }
     result_path, report_path = _persist_backtest_outputs("walk_forward", result)
