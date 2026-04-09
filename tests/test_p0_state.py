@@ -162,6 +162,82 @@ class P0StateTests(unittest.TestCase):
         self.assertEqual(advisory["hold_days"], 39)
         self.assertAlmostEqual(advisory["drawdown_pct"], 0.1583, places=4)
 
+    def test_combined_state_audit_includes_paper_trade_consistency(self):
+        from scripts.cli.trade import _combined_state_audit
+
+        with mock.patch("scripts.cli.trade.audit_state", return_value={
+            "status": "ok",
+            "snapshot_date": "2026-04-09",
+            "checks": {"stocks_yaml": {"ok": True}},
+        }), mock.patch("scripts.cli.trade._shadow_trade_snapshot", return_value={
+            "status": "drift",
+            "consistency": {
+                "ok": False,
+                "status": "drift",
+                "event_only_codes": ["300389"],
+                "broker_only_codes": [],
+            },
+        }):
+            result = _combined_state_audit()
+
+        self.assertEqual(result["status"], "drift")
+        self.assertIn("paper_trade_consistency", result["checks"])
+        self.assertEqual(
+            result["checks"]["paper_trade_consistency"]["event_only_codes"],
+            ["300389"],
+        )
+
+    def test_status_today_exposes_shadow_trade_summary(self):
+        from scripts.cli.trade import status_today
+
+        with mock.patch("scripts.cli.trade.load_daily_state", return_value={
+            "date": "2026-04-09",
+            "updated_at": "2026-04-09T10:00:00",
+            "pipelines": {},
+        }), mock.patch("scripts.cli.trade.get_strategy", return_value={}), mock.patch(
+            "scripts.cli.trade.build_today_decision",
+            return_value={"action": "CLEAR", "weekly_buys": 0},
+        ), mock.patch("scripts.cli.trade.load_portfolio_snapshot", return_value={
+            "summary": {"holding_count": 0, "current_exposure": 0.0},
+        }), mock.patch("scripts.cli.trade.load_pool_snapshot", return_value={
+            "updated_at": "2026-04-09T09:30:00",
+            "snapshot_date": "2026-04-09",
+            "summary": {"core_count": 2, "watch_count": 5, "other_count": 0},
+        }), mock.patch("scripts.cli.trade.audit_state", return_value={
+            "status": "ok",
+            "checks": {},
+        }), mock.patch("scripts.cli.trade.load_market_snapshot", return_value={
+            "signal": "CLEAR",
+            "source": "market_timer",
+            "source_chain": ["market_timer"],
+            "as_of_date": "2026-04-09",
+        }), mock.patch("scripts.cli.trade._shadow_trade_snapshot", return_value={
+            "status": "drift",
+            "timestamp": "2026-04-09 10:00",
+            "positions_count": 1,
+            "automation_scope": "advisory only",
+            "advisory_summary": {
+                "triggered_signal_count": 2,
+                "triggered_position_count": 1,
+                "triggered_rules": ["RISK_TIME_STOP", "RISK_DRAWDOWN_TAKE_PROFIT"],
+                "positions": [{"code": "300389", "summary": "test"}],
+            },
+            "consistency": {
+                "ok": False,
+                "status": "drift",
+                "event_only_codes": ["300389"],
+                "broker_only_codes": [],
+            },
+        }):
+            result = status_today(sync_state=False)
+
+        self.assertEqual(result["paper_trade_audit"]["status"], "drift")
+        self.assertEqual(result["shadow_trade_state"]["positions_count"], 1)
+        self.assertEqual(
+            result["shadow_trade_state"]["advisory_summary"]["triggered_signal_count"],
+            2,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

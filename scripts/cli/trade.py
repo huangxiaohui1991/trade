@@ -39,6 +39,7 @@ from scripts.state import (
     LEDGER_DB_PATH,
     audit_state,
     bootstrap_state,
+    load_activity_summary,
     load_market_snapshot,
     load_pool_snapshot,
     load_portfolio_snapshot,
@@ -229,6 +230,104 @@ def _requests_ok(url: str, timeout: int = 8) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _shadow_trade_snapshot() -> dict:
+    empty_advisory = {
+        "triggered_signal_count": 0,
+        "triggered_position_count": 0,
+        "triggered_rules": [],
+        "positions": [],
+    }
+    try:
+        from scripts.pipeline.shadow_trade import _build_open_position_context, get_status
+
+        activity = load_activity_summary(180, scope="paper_mx")
+        inferred_context = _build_open_position_context(activity.get("trade_events", []))
+        inferred_codes = sorted(inferred_context.keys())
+
+        shadow_status = get_status()
+        actual_positions = [
+            {
+                "code": str(item.get("code", "")).strip(),
+                "name": str(item.get("name", "")).strip(),
+                "shares": int(float(item.get("shares", 0) or 0)),
+            }
+            for item in shadow_status.get("positions", [])
+            if str(item.get("code", "")).strip() and int(float(item.get("shares", 0) or 0)) > 0
+        ]
+        actual_codes = sorted(item["code"] for item in actual_positions)
+        event_only_codes = sorted(code for code in inferred_codes if code not in actual_codes)
+        broker_only_codes = sorted(code for code in actual_codes if code not in inferred_codes)
+        consistency_ok = not event_only_codes and not broker_only_codes
+
+        consistency = {
+            "ok": consistency_ok,
+            "status": "ok" if consistency_ok else "drift",
+            "inferred_open_codes": inferred_codes,
+            "actual_open_codes": actual_codes,
+            "event_only_codes": event_only_codes,
+            "broker_only_codes": broker_only_codes,
+            "event_trade_count": int(activity.get("trade_count", 0) or 0),
+        }
+        return {
+            "ok": True,
+            "status": consistency["status"],
+            "timestamp": shadow_status.get("timestamp", ""),
+            "automation_scope": shadow_status.get("automation_scope", ""),
+            "automated_rules": shadow_status.get("automated_rules", []),
+            "advisory_rules": shadow_status.get("advisory_rules", []),
+            "positions_count": len(actual_positions),
+            "positions": actual_positions,
+            "advisory_summary": shadow_status.get("advisory_summary", empty_advisory),
+            "consistency": consistency,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "error": str(e),
+            "timestamp": "",
+            "automation_scope": "",
+            "automated_rules": [],
+            "advisory_rules": [],
+            "positions_count": 0,
+            "positions": [],
+            "advisory_summary": empty_advisory,
+            "consistency": {
+                "ok": False,
+                "status": "error",
+                "error": str(e),
+                "inferred_open_codes": [],
+                "actual_open_codes": [],
+                "event_only_codes": [],
+                "broker_only_codes": [],
+                "event_trade_count": 0,
+            },
+        }
+
+
+def _combined_state_audit() -> dict:
+    base_audit = audit_state()
+    shadow_snapshot = _shadow_trade_snapshot()
+    checks = dict(base_audit.get("checks", {}))
+    checks["paper_trade_consistency"] = shadow_snapshot.get("consistency", {})
+
+    pool_ok = base_audit.get("status") == "ok"
+    paper_check = shadow_snapshot.get("consistency", {})
+    paper_ok = bool(paper_check.get("ok"))
+    if pool_ok and paper_ok:
+        status = "ok"
+    elif pool_ok and paper_check.get("status") == "error":
+        status = "warning"
+    else:
+        status = "drift"
+
+    return {
+        "status": status,
+        "snapshot_date": base_audit.get("snapshot_date", ""),
+        "checks": checks,
+    }
+
+
 def doctor() -> dict:
     started_at = now_ts()
     vault = ObsidianVault()
@@ -284,7 +383,7 @@ def doctor() -> dict:
         checks["daily_state"] = {"ok": False, "error": str(e)}
 
     try:
-        state_audit = audit_state()
+        state_audit = _combined_state_audit()
         checks["state_audit"] = {
             "ok": state_audit.get("status") == "ok",
             "status": state_audit.get("status", "drift"),
@@ -358,7 +457,7 @@ def state_command(action: str, args) -> dict:
             activity_result = sync_activity_state()
             result["steps"].append({"step": "activity", **activity_result})
     else:
-        result = audit_state()
+        result = _combined_state_audit()
     return sanitize_for_json({
         "command": "state",
         "action": action,
@@ -570,6 +669,7 @@ def status_today(sync_state: bool = True) -> dict:
     pool_snapshot = load_pool_snapshot()
     pool_sync_state = audit_state()
     market_snapshot = load_market_snapshot()
+    shadow_snapshot = _shadow_trade_snapshot()
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -596,6 +696,14 @@ def status_today(sync_state: bool = True) -> dict:
             "as_of_date": market_snapshot.get("as_of_date", ""),
         },
         "pool_sync_state": pool_sync_state,
+        "paper_trade_audit": shadow_snapshot.get("consistency", {}),
+        "shadow_trade_state": {
+            "status": shadow_snapshot.get("status", "error"),
+            "timestamp": shadow_snapshot.get("timestamp", ""),
+            "positions_count": shadow_snapshot.get("positions_count", 0),
+            "automation_scope": shadow_snapshot.get("automation_scope", ""),
+            "advisory_summary": shadow_snapshot.get("advisory_summary", {}),
+        },
         "rule_automation_scope": AUTOMATED_RULES,
         "pool_management": {
             "updated_at": pool_snapshot.get("updated_at", ""),
