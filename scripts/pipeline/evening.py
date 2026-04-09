@@ -189,6 +189,7 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
 
     # 写回（带备份）
     vault.write(vault.portfolio_path, updated_content)
+    vault.sync_portfolio_state()
     return changes
 
 

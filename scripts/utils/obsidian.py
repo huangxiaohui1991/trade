@@ -86,6 +86,11 @@ class ObsidianVault:
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
+    def sync_portfolio_state(self) -> dict:
+        """将 portfolio.md 当前内容同步到结构化账本。"""
+        from scripts.state import sync_portfolio_state
+        return sync_portfolio_state()
+
     def read_portfolio(self) -> dict:
         """
         读取并解析 portfolio.md
@@ -159,6 +164,7 @@ class ObsidianVault:
                 new_content = new_frontmatter + "\n" + new_content[end_marker + 4:]
 
         self.write(self.portfolio_path, new_content)
+        self.sync_portfolio_state()
 
     def read_core_pool(self) -> list:
         """

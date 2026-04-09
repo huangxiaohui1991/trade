@@ -48,6 +48,16 @@ class P0StateTests(unittest.TestCase):
         self.assertNotIn("一票否决", recommendation)
         self.assertIn("流出预警", recommendation)
 
+    def test_sync_portfolio_state_refreshes_structured_snapshot(self):
+        from scripts.state import load_portfolio_snapshot, sync_portfolio_state
+
+        result = sync_portfolio_state()
+        self.assertEqual(result["status"], "success")
+
+        snapshot = load_portfolio_snapshot(scope="cn_a_system")
+        self.assertEqual(snapshot["summary"]["holding_count"], 0)
+        self.assertEqual(snapshot["summary"]["current_exposure"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -716,6 +716,23 @@ def bootstrap_state(force: bool = False) -> dict:
         }
 
 
+def sync_portfolio_state() -> dict:
+    """Refresh structured portfolio balances/positions from portfolio.md."""
+    positions, balances, as_of_date = _bootstrap_portfolio_snapshot()
+    with _connect() as conn:
+        _write_positions(conn, positions)
+        _write_balances(conn, balances)
+        _meta_set(conn, "portfolio_sync_at", _now_ts())
+        _meta_set(conn, "portfolio_sync_date", as_of_date)
+    return {
+        "status": "success",
+        "db_path": str(_db_path()),
+        "positions": len(positions),
+        "scopes": [balance.get("scope", "") for balance in balances],
+        "as_of_date": as_of_date,
+    }
+
+
 def _portfolio_rows(scope: str | None = None, conn: sqlite3.Connection | None = None) -> tuple[list[dict], list[dict]]:
     close_after = conn is None
     if close_after:
