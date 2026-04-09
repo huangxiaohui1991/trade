@@ -215,7 +215,7 @@ def _build_noon_check(data: dict) -> str:
         low = info.get("low", 0)
         lines.append(f"  {name}: {price:.2f} ({_fmt_pct(chg)})")
         if high and low:
-            lines.append(f"    区间: {_fmt_pct(low)} ~ {_fmt_pct(high)}")
+            lines.append(f"    区间: {low:.2f} ~ {high:.2f}")
 
     lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "💼 持仓状态", "━━━━━━━━━━━━━━━━━━━━"])
     for pos in data.get("positions", []):

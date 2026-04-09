@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore")
 
 import akshare as ak
 
+from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
@@ -375,14 +376,7 @@ def _write_screening_result(results: list, pool_name: str, source: str) -> str:
 
     for i, r in enumerate(results, 1):
         total = r.get("total_score", 0)
-        if r.get("veto_triggered"):
-            suggestion = "❌ 一票否决"
-        elif total >= 7:
-            suggestion = "✅ 可买入"
-        elif total >= 5:
-            suggestion = "🟡 观察"
-        else:
-            suggestion = "❌ 规避"
+        suggestion = get_recommendation(r)
 
         lines.append(
             f"| {i} | {r.get('name','')} | {r.get('code','')} | "
@@ -463,7 +457,6 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
     # 四维评分
     # ------------------------------------------------------------------
     _logger.info(f">> 四维评分（来源: {source}）...")
-    from scripts.engine.scorer import batch_score
     scored = batch_score(candidates)
 
     # 过滤一票否决（用于统计）

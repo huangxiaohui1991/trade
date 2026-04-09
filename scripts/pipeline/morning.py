@@ -61,6 +61,9 @@ def _get_market_data(engine: DataEngine) -> dict:
         }
     """
     result = {"market": {}, "market_signal": ""}
+    strategy = get_strategy()
+    market_timer_cfg = strategy.get("market_timer", {})
+    clear_days = market_timer_cfg.get("clear_days_ma60", 15)
 
     for name, code in _INDEX_CODES.items():
         tech = engine.get_technical(code, 60)
@@ -82,8 +85,9 @@ def _get_market_data(engine: DataEngine) -> dict:
         hist = tech.get("hist", pd.DataFrame())
         if not hist.empty and ma60:
             below_days = 0
-            for _, row in hist.iterrows():
-                if row.get("close", 0) < ma60:
+            for _, row in hist.iloc[::-1].iterrows():
+                close_price = row.get("收盘", row.get("close", 0))
+                if close_price < ma60:
                     below_days += 1
                 else:
                     break
@@ -102,9 +106,12 @@ def _get_market_data(engine: DataEngine) -> dict:
         }
 
     # 综合信号
+    clear_count = sum(1 for v in result["market"].values() if v.get("ma60_days", 0) >= clear_days)
     green_count = sum(1 for v in result["market"].values() if v.get("above_ma20"))
     total = len(result["market"])
     if total == 0:
+        result["market_signal"] = "CLEAR"
+    elif clear_count >= total * 0.6:
         result["market_signal"] = "CLEAR"
     elif green_count >= total * 0.6:
         result["market_signal"] = "GREEN"
@@ -150,6 +157,7 @@ def _get_portfolio_positions(vault: ObsidianVault) -> list:
 def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
     """检查核心池异动（跌破 MA20 / 主力流出）"""
     core_items = []
+    from scripts.engine.scorer import score as score_stock
     try:
         core_pool = vault.read_core_pool()
         for item in core_pool:
@@ -182,7 +190,11 @@ def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
 
             # 获取评分
             if score == 0:
-                score = tech.get("overall_score", 0)
+                try:
+                    score = score_stock(code, name).get("total_score", 0)
+                except Exception as e:
+                    _logger.warning(f"[core_pool] 评分获取失败 {name}({code}): {e}")
+                    score = 0
 
             core_items.append({
                 "name": name,

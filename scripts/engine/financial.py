@@ -243,13 +243,13 @@ def get_financial(code: str) -> dict:
                             for i in range(min(2, len(revenues) - 1))
                         ]
                     break
+            break
         except Exception as e:
             if attempt < 2:
                 time.sleep(2)
                 _logger.info(f"[get_financial] 营收东财重试 ({attempt+2}/3) code={code}")
             else:
                 _logger.warning(f"[get_financial] 营收获取失败 code={code}: {e}")
-        break
     if "revenue_growth" not in result:
         missing_fields.append("revenue")
 
@@ -264,12 +264,13 @@ def get_financial(code: str) -> dict:
                     result["operating_cash_flow"] = float(df_cash[cash_col].iloc[0])
                     result["cash_flow_positive"] = result["operating_cash_flow"] > 0
                     break
+            break
         except Exception as e:
             if attempt < 2:
                 time.sleep(2)
+                _logger.info(f"[get_financial] 现金流东财重试 ({attempt+2}/3) code={code}")
             else:
                 _logger.warning(f"[get_financial] 现金流获取失败 code={code}: {e}")
-        break
     if "operating_cash_flow" not in result:
         missing_fields.append("cash_flow")
 

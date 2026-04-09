@@ -31,9 +31,9 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 import pandas as pd
-from scripts.engine.data_engine import DataEngine
+from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.utils.obsidian import ObsidianVault
-from scripts.utils.config_loader import get_strategy, get_stocks
+from scripts.utils.config_loader import get_stocks
 from scripts.utils.logger import get_logger
 
 _logger = get_logger("pipeline.core_pool_scoring")
@@ -240,31 +240,6 @@ def _score_sentiment(code: str, name: str) -> dict:
         return {"score": 1.5, "detail": "MX搜索失败，默认1.5分", "sentiment": "neutral"}
 
 
-def _get_total_score(tech_score: float, fin_score: float,
-                      flow_score: float, sentiment_score: float,
-                      veto_signals: list) -> float:
-    """计算总分（10分制），应用 veto 规则"""
-    strategy = get_strategy()
-    weights = strategy.get("scoring", {}).get("weights", {})
-
-    # 各维度权重归一化（满分 10）
-    raw = (
-        tech_score * weights.get("technical", 2) / 2 +
-        fin_score * weights.get("fundamental", 3) / 3 +
-        flow_score * weights.get("flow", 2) / 2 +
-        sentiment_score * weights.get("sentiment", 3) / 3
-    )
-    total = round(raw, 1)
-
-    # veto 检查
-    veto = strategy.get("scoring", {}).get("veto", [])
-    for signal in veto_signals:
-        if signal in veto:
-            return 0.0
-
-    return total
-
-
 def _build_report_content(scores: list, date_str: str) -> str:
     """生成评分报告 markdown 内容"""
     weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -292,14 +267,7 @@ def _build_report_content(scores: list, date_str: str) -> str:
         total = s.get("total_score", 0)
         veto_signals = s.get("veto_signals", [])
 
-        if veto_signals:
-            suggestion = "❌ 一票否决"
-        elif total >= 7:
-            suggestion = "✅ 可买入"
-        elif total >= 5:
-            suggestion = "🟡 观察"
-        else:
-            suggestion = "❌ 规避"
+        suggestion = get_recommendation(s)
 
         lines.append(
             f"| {name} | {code} | {tech:.1f} | {fin:.1f} | {flow:.1f} | "
@@ -341,7 +309,6 @@ def run() -> list:
     _logger.info(f"[SCORING] 核心池评分 {date_str}")
 
     vault = ObsidianVault()
-    engine = DataEngine()
     stocks_cfg = get_stocks()
 
     # 读取核心池列表
@@ -361,68 +328,13 @@ def run() -> list:
 
     _logger.info(f">> 核心池: {len(core_pool)} 只")
 
-    scores = []
     for item in core_pool:
         code = str(item.get("code", "")).strip()
         name = str(item.get("name", "")).strip()
-        if not code:
-            continue
+        if code:
+            _logger.info(f">> 评分 {name}({code})...")
 
-        _logger.info(f">> 评分 {name}({code})...")
-        try:
-            tech = _score_technical(engine, code)
-            fin = _score_fundamental(engine, code)
-            flow = _score_fund_flow(engine, code)
-            sentiment = _score_sentiment(code, name)
-
-            # 收集 veto 信号
-            veto_signals = []
-            if not tech.get("above_ma20", True):
-                veto_signals.append("below_ma20")
-            if flow.get("main_outflow", False):
-                veto_signals.append("consecutive_outflow")
-
-            total = _get_total_score(
-                tech["score"], fin["score"],
-                flow["score"], sentiment["score"],
-                veto_signals
-            )
-
-            score_entry = {
-                "name": name,
-                "code": code,
-                "technical_score": tech["score"],
-                "fundamental_score": fin["score"],
-                "flow_score": flow["score"],
-                "sentiment_score": sentiment["score"],
-                "total_score": total,
-                "technical_detail": tech["detail"],
-                "fundamental_detail": fin["detail"],
-                "flow_detail": flow["detail"],
-                "sentiment_detail": sentiment["detail"],
-                "veto_signals": veto_signals,
-            }
-            scores.append(score_entry)
-
-            veto_msg = f" ❌ veto:{','.join(veto_signals)}" if veto_signals else ""
-            _logger.info(
-                f"  {name}: 技术{tech['score']:.1f} 基本面{fin['score']:.1f} "
-                f"资金{flow['score']:.1f} 舆情{sentiment['score']:.1f} "
-                f"→ 总分{total:.1f}{veto_msg}"
-            )
-
-        except Exception as e:
-            _logger.error(f"  {name}({code}) 评分失败: {e}")
-            scores.append({
-                "name": name,
-                "code": code,
-                "technical_score": 0,
-                "fundamental_score": 0,
-                "flow_score": 0,
-                "sentiment_score": 0,
-                "total_score": 0,
-                "veto_signals": ["score_error"],
-            })
+    scores = batch_score(core_pool)
 
     # 写入评分报告
     _logger.info(">> 写入评分报告...")

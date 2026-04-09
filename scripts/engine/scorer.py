@@ -265,6 +265,18 @@ def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
     return veto_signals
 
 
+def get_recommendation(score_result: dict) -> str:
+    """根据统一评分结果生成建议文案。"""
+    total = float(score_result.get("total_score", 0) or 0)
+    if score_result.get("veto_triggered") or score_result.get("veto_signals"):
+        return "❌ 一票否决"
+    if total >= 7:
+        return "✅ 可买入"
+    if total >= 5:
+        return "🟡 观察"
+    return "❌ 规避"
+
+
 def score(code: str, name: Optional[str] = None) -> dict:
     """
     对单个股票进行四维评分

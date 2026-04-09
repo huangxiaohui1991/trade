@@ -28,6 +28,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.mx.mx_moni import MXMoni
+from scripts.engine.scorer import score as score_stock
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 
@@ -113,14 +114,34 @@ def buy_new_picks(dry_run: bool = False) -> list:
     balance = _get_balance(mx)
     available = balance["available"]
     _logger.info(f"[shadow] 可用资金: ¥{available:,.0f}  持仓: {len(held_codes)} 只")
+    strategy = get_strategy()
+    buy_threshold = strategy.get("scoring", {}).get("thresholds", {}).get("buy", 7)
 
     results = []
     for item in core_pool:
         code = str(item.get("code", "")).strip()
         name = str(item.get("name", "")).strip()
-        score = item.get("score", 0)
 
         if not code or not name:
+            continue
+
+        try:
+            score_result = score_stock(code, name)
+        except Exception as e:
+            _logger.warning(f"[shadow] {name}({code}) 评分失败，跳过: {e}")
+            results.append({"code": code, "name": name, "shares": 0, "status": "评分失败"})
+            continue
+
+        total_score = float(score_result.get("total_score", 0) or 0)
+        veto_signals = score_result.get("veto_signals", [])
+        if veto_signals:
+            status = f"veto:{','.join(veto_signals)}"
+            _logger.info(f"[shadow] {name}({code}) 触发一票否决，跳过: {status}")
+            results.append({"code": code, "name": name, "shares": 0, "status": status})
+            continue
+        if total_score < buy_threshold:
+            _logger.info(f"[shadow] {name}({code}) 分数{total_score:.1f}<{buy_threshold}，跳过")
+            results.append({"code": code, "name": name, "shares": 0, "status": f"分数不足:{total_score:.1f}"})
             continue
 
         if code in held_codes:
