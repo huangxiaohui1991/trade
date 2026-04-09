@@ -488,6 +488,19 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
     # ------------------------------------------------------------------
     _sync_to_zixuan(actionable)
 
+    # ------------------------------------------------------------------
+    # 影子交易：模拟盘买入核心池新股票
+    # ------------------------------------------------------------------
+    if universe == "market":
+        try:
+            from scripts.pipeline.shadow_trade import buy_new_picks
+            shadow_results = buy_new_picks()
+            bought = [r for r in shadow_results if r.get("status") == "成功"]
+            if bought:
+                _logger.info(f">> 影子交易: {len(bought)} 只已在模拟盘买入")
+        except Exception as e:
+            _logger.warning(f">> 影子交易买入失败: {e}")
+
     return scored
 
 

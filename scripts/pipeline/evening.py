@@ -472,6 +472,16 @@ def run() -> dict:
 
     _logger.info(f"[EVENING] 收盘流程完成 → 明日日志: {tomorrow_str}.md")
 
+    # 7. 影子交易：检查模拟盘止损止盈
+    try:
+        from scripts.pipeline.shadow_trade import check_stop_signals
+        shadow_results = check_stop_signals()
+        triggered = [r for r in shadow_results if r.get("action") != "持有"]
+        if triggered:
+            _logger.info(f">> 影子交易: {len(triggered)} 只触发信号")
+    except Exception as e:
+        _logger.warning(f">> 影子交易检查失败: {e}")
+
     return {
         "market_data": market_data,
         "position_changes": position_changes,
