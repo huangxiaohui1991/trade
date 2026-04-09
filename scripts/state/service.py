@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover - same behavior as config_loader
     yaml = None
 
-from scripts.utils.config_loader import clear_config_cache, get_stocks
+from scripts.utils.config_loader import clear_config_cache, get_stocks, get_strategy
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault

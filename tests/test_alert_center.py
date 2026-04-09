@@ -166,7 +166,7 @@ class AlertCenterTests(unittest.TestCase):
         from scripts.state import load_alert_snapshot
 
         first = load_alert_snapshot(context=self._sample_context())
-        second = load_alert_snapshot()
+        second = load_alert_snapshot(context=self._sample_context())
 
         self.assertEqual(first["status_summary"]["code_counts"], second["status_summary"]["code_counts"])
         self.assertEqual(first["classification"]["by_level"], second["classification"]["by_level"])

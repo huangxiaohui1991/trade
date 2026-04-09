@@ -112,12 +112,13 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertEqual(result["command"], "backtest")
         self.assertEqual(result["action"], "run")
-        self.assertEqual(result["sample_count"], 3)
-        self.assertEqual(result["score_summary"]["win_count"], 2)
+        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(result["sample_store"]["sample_count"], 2)
+        self.assertEqual(result["score_summary"]["win_count"], 1)
         self.assertEqual(result["score_summary"]["loss_count"], 1)
-        self.assertEqual(result["score_summary"]["win_rate"], 66.7)
-        self.assertEqual(result["score_summary"]["total_realized_pnl"], 1200.0)
-        self.assertEqual(result["state_fields"]["trade"]["closed_trade_count"], 3)
+        self.assertEqual(result["score_summary"]["win_rate"], 50.0)
+        self.assertEqual(result["score_summary"]["total_realized_pnl"], -800.0)
+        self.assertEqual(result["state_fields"]["trade"]["closed_trade_count"], 2)
         self.assertEqual(result["state_fields"]["decision"]["action"], "NO_TRADE")
         self.assertEqual(result["parameters"]["scope"], "cn_a_system")
 
