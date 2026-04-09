@@ -15,12 +15,14 @@
 
 ```bash
 bin/trade workflows --json
+bin/trade templates --json
 ```
 
 用途：
 - 列出所有共享 workflow
 - 获取推荐超时
 - 获取可重试步骤
+- 获取可复用的 agent 响应模板
 
 ### 2. 再做健康检查
 
@@ -76,6 +78,23 @@ bin/trade orchestrate market_scan --json
 - `status=warning`：通常不自动重试，直接继续并提示
 - `market_scan`：可重试 1 次；若仍失败，改跑 `tracked_scan`
 
+## 推荐读取字段
+
+Hermes-Agent / OpenClaw 在读取 `run` 或 `orchestrate` 结果时，优先消费：
+
+- `status`
+- `doctor`
+- `steps`
+- `artifacts`
+- `next_actions`
+- `status_after.today_decision`
+- `status_after.pool_management`
+
+不要优先依赖：
+
+- `result` 的大对象原文
+- pipeline 内部打印日志
+
 ## Hermes-Agent 建议
 
 - 定时任务统一调用 `orchestrate`
@@ -85,6 +104,7 @@ bin/trade orchestrate market_scan --json
 ## OpenClaw 建议
 
 - 会话开始先跑 `workflows --json`
+- 会话开始先跑 `templates --json`
 - 根据用户意图选择 workflow，而不是手拼多步命令
 - 只从以下字段取摘要：
   - `status`

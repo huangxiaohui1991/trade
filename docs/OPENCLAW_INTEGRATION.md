@@ -15,6 +15,7 @@
 
 ```bash
 bin/trade workflows --json
+bin/trade templates --json
 bin/trade doctor --json
 bin/trade status today --json
 bin/trade orchestrate morning_brief --json
@@ -38,6 +39,7 @@ python3 -m scripts.cli.trade --json doctor
 
 ```bash
 bin/trade workflows --json
+bin/trade templates --json
 ```
 
 ## CLI 契约
@@ -61,6 +63,26 @@ bin/trade workflows --json
       "retryable_steps": ["evening", "scoring"]
     }
   ]
+}
+```
+
+### 0.1 `templates`
+
+用途：
+- 返回 Hermes-Agent / OpenClaw 的响应模板
+- 减少外层自行拼接失败文案
+
+返回关键字段：
+
+```json
+{
+  "command": "templates",
+  "items": {
+    "warning": {
+      "Hermes-Agent": "...",
+      "OpenClaw": "..."
+    }
+  }
 }
 ```
 
@@ -190,6 +212,7 @@ bin/trade run screener --universe market --pool all --json
   "doctor": {},
   "steps": [],
   "artifacts": [],
+  "next_actions": [],
   "status_before": {},
   "status_after": {}
 }

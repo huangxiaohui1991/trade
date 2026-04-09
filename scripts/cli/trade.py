@@ -71,6 +71,7 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 90,
         "retryable_steps": ["morning"],
+        "fallback_workflow": None,
         "notes": "盘前摘要，优先读取今日状态再执行盘前流程。",
     },
     "noon_check": {
@@ -78,6 +79,7 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 90,
         "retryable_steps": ["noon"],
+        "fallback_workflow": None,
         "notes": "午休检查，适合定时巡检和会话内补跑。",
     },
     "close_review": {
@@ -85,6 +87,7 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 180,
         "retryable_steps": ["evening", "scoring"],
+        "fallback_workflow": "tracked_scan",
         "notes": "收盘更新 + 核心池评分，适合作为日终主工作流。",
     },
     "weekly_review": {
@@ -92,6 +95,7 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 120,
         "retryable_steps": ["weekly"],
+        "fallback_workflow": None,
         "notes": "周报汇总，外层可直接消费 artifacts 生成摘要。",
     },
     "tracked_scan": {
@@ -99,6 +103,7 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 240,
         "retryable_steps": ["screener"],
+        "fallback_workflow": None,
         "notes": "已跟踪池扫描，稳定性高于全市场模式。",
         "default_args": {"pool": "all", "universe": "tracked"},
     },
@@ -107,8 +112,28 @@ WORKFLOWS = {
         "preferred_for": ["Hermes-Agent", "OpenClaw"],
         "timeout_seconds": 360,
         "retryable_steps": ["screener"],
+        "fallback_workflow": "tracked_scan",
         "notes": "全市场扫描，依赖外部接口，建议外层保留超时和重试。",
         "default_args": {"pool": "all", "universe": "market"},
+    },
+}
+
+AGENT_TEMPLATES = {
+    "success": {
+        "Hermes-Agent": "流程已完成。优先汇总 artifacts、today_decision 和 pool_management，再决定是否继续后续 workflow。",
+        "OpenClaw": "流程执行成功。结合 status_after.today_decision、artifacts 和 steps，生成面向用户的简要结论。",
+    },
+    "warning": {
+        "Hermes-Agent": "流程完成但存在降级或依赖问题。继续汇报结果，同时明确 warning 原因，不自动中止。",
+        "OpenClaw": "结果可用但存在风险。展示核心结论时附带 warning，并优先引用 artifacts 而不是原始 result。",
+    },
+    "blocked": {
+        "Hermes-Agent": "流程被 doctor 或运行锁阻断。停止后续步骤，汇报 blocked 原因；若 workflow 有 fallback_workflow，可建议切换。",
+        "OpenClaw": "流程被阻断。不要继续手拼 pipeline，优先提示原因；若存在 fallback_workflow，可征得用户同意后切换。",
+    },
+    "error": {
+        "Hermes-Agent": "流程失败。停止后续执行，汇报 failed_step、error 和是否 retryable。",
+        "OpenClaw": "流程失败。向用户解释失败步骤和原因；只有在 retryable=true 时才建议重试。",
     },
 }
 
@@ -128,6 +153,50 @@ def list_workflows() -> dict:
             for name, spec in WORKFLOWS.items()
         ],
     }
+
+
+def list_agent_templates() -> dict:
+    return {
+        "command": "templates",
+        "items": AGENT_TEMPLATES,
+    }
+
+
+def _recommend_next_actions(status: str, workflow_name: str | None = None, error: str = "", retryable: bool = False) -> list:
+    workflow = WORKFLOWS.get(workflow_name or "", {})
+    actions = []
+
+    if status == "success":
+        actions.append("读取 status_after.today_decision")
+        actions.append("读取 artifacts 生成摘要")
+    elif status == "warning":
+        actions.append("继续消费 artifacts 和 status_after")
+        actions.append("在输出里附带 doctor.warning 或步骤 warning")
+    elif status == "blocked":
+        actions.append("停止后续 workflow")
+        if workflow.get("fallback_workflow"):
+            actions.append(f"可改跑 orchestrate {workflow['fallback_workflow']}")
+        if retryable:
+            actions.append("等待 30-60 秒后重试 1 次")
+    elif status == "error":
+        actions.append("停止后续 workflow")
+        actions.append("汇报 failed_step 和 error")
+        if retryable:
+            actions.append("可人工触发重试 1 次")
+
+    if workflow_name == "market_scan" and status in {"warning", "blocked", "error"}:
+        actions.append("优先降级到 tracked_scan")
+    if error == "doctor_failed":
+        actions.append("先处理 doctor.hard_fail，再重试")
+
+    deduped = []
+    seen = set()
+    for item in actions:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
 
 
 def _check_path_writable(path: Path) -> dict:
@@ -267,6 +336,12 @@ def run_pipeline(name: str, args) -> dict:
             payload["status"] = "blocked"
             payload["error"] = "doctor_failed"
             payload["details"] = {"doctor": doctor_result}
+            payload["next_actions"] = _recommend_next_actions(
+                status=payload["status"],
+                workflow_name=None,
+                error=payload["error"],
+                retryable=payload["retryable"],
+            )
             return _finalize_run(payload, started)
 
         with pipeline_lock(name):
@@ -290,6 +365,12 @@ def run_pipeline(name: str, args) -> dict:
         payload["error"] = str(e)
         payload["traceback"] = traceback.format_exc()
 
+    payload["next_actions"] = _recommend_next_actions(
+        status=payload["status"],
+        workflow_name=None,
+        error=payload.get("error", ""),
+        retryable=payload.get("retryable", False),
+    )
     return _finalize_run(payload, started)
 
 
@@ -465,6 +546,12 @@ def orchestrate_workflow(name: str, args) -> dict:
         payload["status"] = "blocked"
         payload["error"] = "doctor_failed"
         payload["steps"].append({"step": "doctor", "status": "error"})
+        payload["next_actions"] = _recommend_next_actions(
+            status=payload["status"],
+            workflow_name=name,
+            error=payload["error"],
+            retryable=payload["retryable"],
+        )
         finished = datetime.now()
         payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
         payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
@@ -521,6 +608,12 @@ def orchestrate_workflow(name: str, args) -> dict:
         "pipelines": status_after.get("pipelines", {}),
     }
     payload["steps"].append({"step": "status_after", "status": "success"})
+    payload["next_actions"] = _recommend_next_actions(
+        status=payload["status"],
+        workflow_name=name,
+        error=payload.get("error", ""),
+        retryable=payload.get("retryable", False),
+    )
 
     finished = datetime.now()
     payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
@@ -535,6 +628,7 @@ def main():
 
     sub.add_parser("doctor", help="Run health checks")
     sub.add_parser("workflows", help="List shared workflows for Hermes/OpenClaw")
+    sub.add_parser("templates", help="List agent response templates")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -569,6 +663,8 @@ def main():
                     result = doctor()
                 elif args.command == "workflows":
                     result = list_workflows()
+                elif args.command == "templates":
+                    result = list_agent_templates()
                 elif args.command == "run":
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
@@ -592,6 +688,8 @@ def main():
             result = doctor()
         elif args.command == "workflows":
             result = list_workflows()
+        elif args.command == "templates":
+            result = list_agent_templates()
         elif args.command == "run":
             result = run_pipeline(args.pipeline, args)
         elif args.command == "orchestrate":
@@ -611,6 +709,9 @@ def main():
         elif result.get("command") == "workflows":
             for item in result.get("items", []):
                 print(f"{item['name']}: {', '.join(item.get('steps', []))}")
+        elif result.get("command") == "templates":
+            for status, agents in result.get("items", {}).items():
+                print(f"{status}: {', '.join(sorted(agents.keys()))}")
         elif result.get("command") == "status":
             print(f"status today: {result.get('date')}")
             print(f"today_decision: {result.get('today_decision', {}).get('decision')}")
