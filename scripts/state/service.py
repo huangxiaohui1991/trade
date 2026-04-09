@@ -937,7 +937,7 @@ def load_market_snapshot(refresh: bool = False) -> dict:
     with _connect() as conn:
         if not refresh:
             row = conn.execute("SELECT * FROM market_snapshots WHERE id = 1").fetchone()
-            if row:
+            if row and row["as_of_date"] == _today_str():
                 return {
                     "as_of_date": row["as_of_date"],
                     "updated_at": row["updated_at"],

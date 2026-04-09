@@ -283,6 +283,17 @@ def doctor() -> dict:
     except Exception as e:
         checks["daily_state"] = {"ok": False, "error": str(e)}
 
+    try:
+        state_audit = audit_state()
+        checks["state_audit"] = {
+            "ok": state_audit.get("status") == "ok",
+            "status": state_audit.get("status", "drift"),
+            "snapshot_date": state_audit.get("snapshot_date", ""),
+            "checks": state_audit.get("checks", {}),
+        }
+    except Exception as e:
+        checks["state_audit"] = {"ok": False, "error": str(e)}
+
     checks["mx_connectivity"] = _requests_ok("https://mkapi2.dfcfs.com/")
     checks["akshare_connectivity"] = _requests_ok("https://push2.eastmoney.com/")
 
@@ -304,6 +315,8 @@ def doctor() -> dict:
         warning.append("mx_connectivity")
     if not checks["akshare_connectivity"]["ok"]:
         warning.append("akshare_connectivity")
+    if not checks["state_audit"]["ok"]:
+        warning.append("state_audit")
 
     status = "success"
     if hard_fail:
@@ -321,6 +334,15 @@ def doctor() -> dict:
         "warning": warning,
         "checks": checks,
     }
+
+
+def _preflight_state_sync(target: str = "all") -> dict:
+    result = {"status": "success", "target": target, "steps": []}
+    if target in {"portfolio", "all"}:
+        result["steps"].append({"step": "portfolio", **sync_portfolio_state()})
+    if target in {"activity", "all"}:
+        result["steps"].append({"step": "activity", **sync_activity_state()})
+    return sanitize_for_json(result)
 
 
 def state_command(action: str, args) -> dict:
@@ -359,6 +381,20 @@ def run_pipeline(name: str, args) -> dict:
     }
 
     try:
+        state_sync = _preflight_state_sync("all")
+        payload["state_sync"] = state_sync
+        if state_sync.get("status") == "error":
+            payload["status"] = "blocked"
+            payload["error"] = "state_sync_failed"
+            payload["details"] = {"state_sync": state_sync}
+            payload["next_actions"] = _recommend_next_actions(
+                status=payload["status"],
+                workflow_name=None,
+                error=payload["error"],
+                retryable=payload["retryable"],
+            )
+            return _finalize_run(payload, started)
+
         doctor_result = doctor()
         payload["doctor"] = {
             "status": doctor_result["status"],
@@ -589,6 +625,38 @@ def orchestrate_workflow(name: str, args) -> dict:
         "hard_fail": doctor_result.get("hard_fail", []),
         "warning": doctor_result.get("warning", []),
     }
+    try:
+        state_sync = _preflight_state_sync("all")
+        payload["state_sync"] = state_sync
+        payload["steps"].append({"step": "state_sync", "status": state_sync.get("status", "success")})
+        if state_sync.get("status") == "error":
+            payload["status"] = "blocked"
+            payload["error"] = "state_sync_failed"
+            payload["next_actions"] = _recommend_next_actions(
+                status=payload["status"],
+                workflow_name=name,
+                error=payload["error"],
+                retryable=payload["retryable"],
+            )
+            finished = datetime.now()
+            payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+            payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+            return sanitize_for_json(payload)
+    except Exception as e:
+        payload["status"] = "blocked"
+        payload["error"] = "state_sync_failed"
+        payload["steps"].append({"step": "state_sync", "status": "error", "error": str(e)})
+        payload["next_actions"] = _recommend_next_actions(
+            status=payload["status"],
+            workflow_name=name,
+            error=payload["error"],
+            retryable=payload["retryable"],
+        )
+        finished = datetime.now()
+        payload["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+        payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
+        return sanitize_for_json(payload)
+
     if doctor_result.get("status") == "error":
         payload["status"] = "blocked"
         payload["error"] = "doctor_failed"

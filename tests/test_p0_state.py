@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class P0StateTests(unittest.TestCase):
@@ -73,6 +74,52 @@ class P0StateTests(unittest.TestCase):
         self.assertEqual(secondary_summary["sell_count"], 3)
         self.assertEqual(secondary_summary["trade_count"], 3)
         self.assertEqual(secondary_summary["realized_pnl"], -62452.0)
+
+    def test_stale_market_snapshot_is_refreshed(self):
+        from scripts.state import load_market_snapshot, save_market_snapshot
+
+        save_market_snapshot({
+            "as_of_date": "2026-04-08",
+            "updated_at": "2026-04-08T09:30:00",
+            "signal": "RED",
+            "source": "stale_test",
+            "source_chain": ["stale_test"],
+            "indices": {},
+        })
+
+        fresh_snapshot = {
+            "as_of_date": "2026-04-09",
+            "updated_at": "2026-04-09T09:30:00",
+            "signal": "GREEN",
+            "market_signal": "GREEN",
+            "source": "market_timer_test",
+            "source_chain": ["market_timer_test"],
+            "indices": {
+                "上证指数": {
+                    "name": "上证指数",
+                    "symbol": "sh000001",
+                    "market_code": "000001",
+                    "as_of_date": "2026-04-09",
+                    "close": 3200,
+                    "ma20": 3180,
+                    "ma60": 3150,
+                    "ma20_pct": 0.6,
+                    "ma60_pct": 1.6,
+                    "above_ma20": True,
+                    "below_ma60_days": 0,
+                    "signal": "GREEN",
+                    "source": "market_timer_test",
+                    "source_chain": ["market_timer_test"],
+                }
+            },
+        }
+
+        with mock.patch("scripts.engine.market_timer.load_market_snapshot", return_value=fresh_snapshot):
+            snapshot = load_market_snapshot()
+
+        self.assertEqual(snapshot["signal"], "GREEN")
+        self.assertEqual(snapshot["as_of_date"], "2026-04-09")
+        self.assertEqual(snapshot["source"], "market_timer_test")
 
 
 if __name__ == "__main__":
