@@ -7,7 +7,6 @@
 """
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,6 +19,19 @@ RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
 def _state_path(date_str: str) -> Path:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     return RUNTIME_DIR / f"daily_state_{date_str}.json"
+
+
+def _json_safe(value):
+    """将 Path / datetime / 容器等转换为可序列化结构。"""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def load_daily_state(date_str: Optional[str] = None) -> dict:
@@ -55,7 +67,7 @@ def update_pipeline_state(name: str, status: str, details: Optional[dict] = None
     state["pipelines"][name] = {
         "status": status,
         "updated_at": state["updated_at"],
-        "details": details or {},
+        "details": _json_safe(details or {}),
     }
 
     path = _state_path(date_str)

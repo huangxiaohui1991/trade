@@ -291,88 +291,92 @@ def run() -> dict:
     """
     weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     weekday = weekday_names[datetime.now().weekday()]
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
     _logger.info(f"[MORNING] 盘前流程 {datetime.now().strftime('%Y-%m-%d %H:%M')} ({weekday})")
 
-    # 初始化组件
-    vault = ObsidianVault()
-    engine = DataEngine()
-    strategy_cfg = get_strategy()
-
-    # 1. 大盘数据
-    _logger.info(">> 大盘数据")
-    market_data = _get_market_data(engine)
-    for name, info in market_data.get("market", {}).items():
-        _logger.info(
-            f"  {name}: {info.get('price'):.2f} "
-            f"({info.get('chg_pct'):+.2f}%) "
-            f"MA20:{info.get('ma20_pct'):+.2f}% "
-            f"MA60:{info.get('ma60_pct'):+.2f}% "
-            f"[{info.get('signal', '')}]"
-        )
-    _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
-
-    # 2. 持仓状态
-    _logger.info(">> 持仓状态")
-    positions = _get_portfolio_positions(vault)
-    if positions:
-        for pos in positions:
-            _logger.info(f"  {pos['name']} {pos['shares']}股 @ ¥{pos['price']:.2f}")
-    else:
-        _logger.info("  空仓")
-
-    # 3. 核心池异动
-    _logger.info(">> 核心池异动检查")
-    core_items = _get_core_pool_status(vault, engine)
-    for item in core_items:
-        _logger.info(f"  {item['name']}: {item.get('status', 'OK')}")
-
-    # 4. 本周买入统计
-    weekly_bought = _get_weekly_buy_count(vault)
-    _logger.info(f">> 本周买入: {weekly_bought}/2")
-
-    # 5. 推送 Discord
-    discord_data = _build_discord_data(market_data, positions, core_items, weekly_bought, weekday)
-    ok, err = send_morning_summary(discord_data)
-    if ok:
-        _logger.info(">> Discord 推送成功")
-    else:
-        _logger.warning(f">> Discord 推送失败: {err}")
-
-    _logger.info("[MORNING] 盘前流程完成")
-
-    # 6. 影子交易：盘前预览止损止盈价（不下单，只记录）
     try:
-        from scripts.pipeline.shadow_trade import check_stop_signals
-        shadow_results = check_stop_signals(dry_run=True)
-        for r in shadow_results:
-            if r.get("action") != "持有":
-                _logger.info(f"  ⚠️ 模拟盘 {r['name']}: {r['action']} — {r['reason']}")
-            else:
-                _logger.info(f"  模拟盘 {r['name']}: {r.get('reason', '持有')}")
-    except Exception as e:
-        _logger.info(f">> 影子交易预览跳过: {e}")
+        vault = ObsidianVault()
+        engine = DataEngine()
+        get_strategy()
 
-    update_pipeline_state(
-        "morning",
-        "warning" if not ok else "success",
-        {
-            "market_signal": market_data.get("market_signal", ""),
-            "positions_count": len(positions),
-            "core_pool_count": len(core_items),
+        _logger.info(">> 大盘数据")
+        market_data = _get_market_data(engine)
+        for name, info in market_data.get("market", {}).items():
+            _logger.info(
+                f"  {name}: {info.get('price'):.2f} "
+                f"({info.get('chg_pct'):+.2f}%) "
+                f"MA20:{info.get('ma20_pct'):+.2f}% "
+                f"MA60:{info.get('ma60_pct'):+.2f}% "
+                f"[{info.get('signal', '')}]"
+            )
+        _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
+
+        _logger.info(">> 持仓状态")
+        positions = _get_portfolio_positions(vault)
+        if positions:
+            for pos in positions:
+                _logger.info(f"  {pos['name']} {pos['shares']}股 @ ¥{pos['price']:.2f}")
+        else:
+            _logger.info("  空仓")
+
+        _logger.info(">> 核心池异动检查")
+        core_items = _get_core_pool_status(vault, engine)
+        for item in core_items:
+            _logger.info(f"  {item['name']}: {item.get('status', 'OK')}")
+
+        weekly_bought = _get_weekly_buy_count(vault)
+        _logger.info(f">> 本周买入: {weekly_bought}/2")
+
+        discord_data = _build_discord_data(market_data, positions, core_items, weekly_bought, weekday)
+        ok, err = send_morning_summary(discord_data)
+        if ok:
+            _logger.info(">> Discord 推送成功")
+        else:
+            _logger.warning(f">> Discord 推送失败: {err}")
+
+        _logger.info("[MORNING] 盘前流程完成")
+
+        try:
+            from scripts.pipeline.shadow_trade import check_stop_signals
+            shadow_results = check_stop_signals(dry_run=True)
+            for r in shadow_results:
+                if r.get("action") != "持有":
+                    _logger.info(f"  ⚠️ 模拟盘 {r['name']}: {r['action']} — {r['reason']}")
+                else:
+                    _logger.info(f"  模拟盘 {r['name']}: {r.get('reason', '持有')}")
+        except Exception as e:
+            _logger.info(f">> 影子交易预览跳过: {e}")
+
+        update_pipeline_state(
+            "morning",
+            "warning" if not ok else "success",
+            {
+                "market_signal": market_data.get("market_signal", ""),
+                "positions_count": len(positions),
+                "core_pool_count": len(core_items),
+                "weekly_bought": weekly_bought,
+                "discord_ok": ok,
+                "discord_error": err,
+            },
+            today_str,
+        )
+
+        return {
+            "market_data": market_data,
+            "positions": positions,
+            "core_pool": core_items,
             "weekly_bought": weekly_bought,
-            "discord_ok": ok,
-            "discord_error": err,
-        },
-    )
-
-    return {
-        "market_data": market_data,
-        "positions": positions,
-        "core_pool": core_items,
-        "weekly_bought": weekly_bought,
-        "discord_data": discord_data,
-    }
+            "discord_data": discord_data,
+        }
+    except Exception as e:
+        update_pipeline_state(
+            "morning",
+            "error",
+            {"error": str(e)},
+            today_str,
+        )
+        raise
 
 
 if __name__ == "__main__":

@@ -106,68 +106,81 @@ def run() -> list:
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     _logger.info(f"[SCORING] 核心池评分 {date_str}")
-
-    vault = ObsidianVault()
-    stocks_cfg = get_stocks()
-
-    # 读取核心池列表
-    core_pool = stocks_cfg.get("core_pool", [])
-    if not core_pool:
-        _logger.warning("核心池为空，从 vault 读取")
-        vault_pool = vault.read_core_pool()
-        core_pool = [
-            {"code": str(row.get("代码", "")).strip(), "name": str(row.get("股票", "")).strip()}
-            for row in vault_pool
-            if str(row.get("代码", "")).strip() not in ["", "—"]
-        ]
-
-    if not core_pool:
-        _logger.warning("核心池为空，退出")
-        return []
-
-    _logger.info(f">> 核心池: {len(core_pool)} 只")
-
-    for item in core_pool:
-        code = str(item.get("code", "")).strip()
-        name = str(item.get("name", "")).strip()
-        if code:
-            _logger.info(f">> 评分 {name}({code})...")
-
-    scores = batch_score(core_pool)
-
-    # 写入评分报告
-    _logger.info(">> 写入评分报告...")
-    report_content = _build_report_content(scores, date_str)
-    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    time_str = datetime.now().strftime("%H%M%S")
-    report_path = report_dir / f"核心池_评分报告_{date_str.replace('-', '')}_{time_str}.md"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(report_content)
-    _logger.info(f"  已写入: {report_path.name}")
-
-    # 更新核心池.md 的评分列
-    _logger.info(">> 更新核心池.md 评分列...")
     try:
-        vault.update_core_pool_scores(scores)
-        _logger.info("  核心池.md 已更新")
+        vault = ObsidianVault()
+        stocks_cfg = get_stocks()
+
+        core_pool = stocks_cfg.get("core_pool", [])
+        if not core_pool:
+            _logger.warning("核心池为空，从 vault 读取")
+            vault_pool = vault.read_core_pool()
+            core_pool = [
+                {"code": str(row.get("代码", "")).strip(), "name": str(row.get("股票", "")).strip()}
+                for row in vault_pool
+                if str(row.get("代码", "")).strip() not in ["", "—"]
+            ]
+
+        if not core_pool:
+            _logger.warning("核心池为空，退出")
+            update_pipeline_state(
+                "core_pool_scoring",
+                "skipped",
+                {"reason": "core_pool_empty"},
+                date_str,
+            )
+            return []
+
+        _logger.info(f">> 核心池: {len(core_pool)} 只")
+
+        for item in core_pool:
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", "")).strip()
+            if code:
+                _logger.info(f">> 评分 {name}({code})...")
+
+        scores = batch_score(core_pool)
+
+        _logger.info(">> 写入评分报告...")
+        report_content = _build_report_content(scores, date_str)
+        report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        time_str = datetime.now().strftime("%H%M%S")
+        report_path = report_dir / f"核心池_评分报告_{date_str.replace('-', '')}_{time_str}.md"
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        _logger.info(f"  已写入: {report_path.name}")
+
+        _logger.info(">> 更新核心池.md 评分列...")
+        core_pool_updated = False
+        try:
+            vault.update_core_pool_scores(scores)
+            core_pool_updated = True
+            _logger.info("  核心池.md 已更新")
+        except Exception as e:
+            _logger.warning(f"  更新核心池.md 失败: {e}")
+
+        _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
+
+        update_pipeline_state(
+            "core_pool_scoring",
+            "success",
+            {
+                "scored_count": len(scores),
+                "report_path": str(report_path),
+                "core_pool_updated": core_pool_updated,
+            },
+            date_str,
+        )
+
+        return scores
     except Exception as e:
-        _logger.warning(f"  更新核心池.md 失败: {e}")
-
-    _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
-
-    update_pipeline_state(
-        "core_pool_scoring",
-        "success",
-        {
-            "scored_count": len(scores),
-            "report_path": str(report_path),
-            "core_pool_updated": True,
-        },
-        date_str,
-    )
-
-    return scores
+        update_pipeline_state(
+            "core_pool_scoring",
+            "error",
+            {"error": str(e)},
+            date_str,
+        )
+        raise
 
 
 if __name__ == "__main__":

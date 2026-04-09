@@ -426,95 +426,100 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
     _logger.info(f"[SCREENER] 选股流水线 {today_str} pool={pool} universe={universe}")
+    try:
+        vault = ObsidianVault()
+        stocks_cfg = get_stocks()
+        strategy_cfg = get_strategy()
 
-    vault = ObsidianVault()
-    stocks_cfg = get_stocks()
-    strategy_cfg = get_strategy()
+        blacklist = _get_blacklist(stocks_cfg)
 
-    blacklist = _get_blacklist(stocks_cfg)
+        screening_cfg = strategy_cfg.get("screening", {})
+        default_query = screening_cfg.get("mx_query", "")
+        select_type = screening_cfg.get("mx_select_type", "A股")
 
-    # ------------------------------------------------------------------
-    # 优先 mx-screener，失败则 fallback
-    # ------------------------------------------------------------------
-    # 构造查询：核心池用宽松条件，观察池用严格条件
-    screening_cfg = strategy_cfg.get("screening", {})
-    default_query = screening_cfg.get("mx_query", "")
-    select_type = screening_cfg.get("mx_select_type", "A股")
+        if universe == "market":
+            candidates, source = _resolve_market_candidates(default_query, select_type, strategy_cfg, blacklist)
+            pool_name = "市场扫描"
+            _logger.info(f">> 市场扫描候选: {len(candidates)} 只")
+        else:
+            candidates, pool_name, source = _resolve_tracked_candidates(
+                pool, stocks_cfg, blacklist, default_query, select_type
+            )
 
-    if universe == "market":
-        candidates, source = _resolve_market_candidates(default_query, select_type, strategy_cfg, blacklist)
-        pool_name = "市场扫描"
-        _logger.info(f">> 市场扫描候选: {len(candidates)} 只")
-    else:
-        candidates, pool_name, source = _resolve_tracked_candidates(
-            pool, stocks_cfg, blacklist, default_query, select_type
+        if not candidates:
+            _logger.warning("无候选股票，退出")
+            update_pipeline_state(
+                "stock_screener",
+                "skipped",
+                {
+                    "pool": pool,
+                    "universe": universe,
+                    "reason": "no_candidates",
+                    "source": source,
+                },
+                today_str,
+            )
+            return []
+
+        _logger.info(f">> 四维评分（来源: {source}）...")
+        scored = batch_score(candidates)
+        actionable = [r for r in scored if not r.get("veto_triggered", False)]
+
+        _logger.info(">> 写入筛选报告...")
+        report_path = _write_screening_result(scored, pool_name, source)
+
+        _logger.info(
+            f"[SCREENER] 完成: {len(scored)} 只评分, "
+            f"{len(actionable)} 只可操作 → {report_path}"
         )
 
-    if not candidates:
-        _logger.warning("无候选股票，退出")
-        return []
+        if universe == "market":
+            market_watch_path = _write_market_scan_watchlist(scored)
+        else:
+            market_watch_path = None
 
-    # ------------------------------------------------------------------
-    # 四维评分
-    # ------------------------------------------------------------------
-    _logger.info(f">> 四维评分（来源: {source}）...")
-    scored = batch_score(candidates)
+        _sync_to_zixuan(actionable)
 
-    # 过滤一票否决（用于统计）
-    actionable = [r for r in scored if not r.get("veto_triggered", False)]
+        if universe == "market":
+            try:
+                from scripts.pipeline.shadow_trade import buy_new_picks
+                shadow_results = buy_new_picks()
+                bought = [r for r in shadow_results if r.get("status") == "成功"]
+                if bought:
+                    _logger.info(f">> 影子交易: {len(bought)} 只已在模拟盘买入")
+            except Exception as e:
+                _logger.warning(f">> 影子交易买入失败: {e}")
 
-    # ------------------------------------------------------------------
-    # 写入 Obsidian
-    # ------------------------------------------------------------------
-    _logger.info(">> 写入筛选报告...")
-    report_path = _write_screening_result(scored, pool_name, source)
+        update_pipeline_state(
+            "stock_screener",
+            "success",
+            {
+                "pool": pool,
+                "universe": universe,
+                "source": source,
+                "candidate_count": len(candidates),
+                "scored_count": len(scored),
+                "actionable_count": len(actionable),
+                "report_path": report_path,
+                "market_watch_path": market_watch_path,
+                "used_fallback": "akshare" in source.lower() or "fallback" in source.lower(),
+            },
+            today_str,
+        )
 
-    _logger.info(
-        f"[SCREENER] 完成: {len(scored)} 只评分, "
-        f"{len(actionable)} 只可操作 → {report_path}"
-    )
-
-    if universe == "market":
-        market_watch_path = _write_market_scan_watchlist(scored)
-    else:
-        market_watch_path = None
-
-    # ------------------------------------------------------------------
-    # 同步到东方财富自选股
-    # ------------------------------------------------------------------
-    _sync_to_zixuan(actionable)
-
-    # ------------------------------------------------------------------
-    # 影子交易：模拟盘买入核心池新股票
-    # ------------------------------------------------------------------
-    if universe == "market":
-        try:
-            from scripts.pipeline.shadow_trade import buy_new_picks
-            shadow_results = buy_new_picks()
-            bought = [r for r in shadow_results if r.get("status") == "成功"]
-            if bought:
-                _logger.info(f">> 影子交易: {len(bought)} 只已在模拟盘买入")
-        except Exception as e:
-            _logger.warning(f">> 影子交易买入失败: {e}")
-
-    update_pipeline_state(
-        "stock_screener",
-        "success",
-        {
-            "pool": pool,
-            "universe": universe,
-            "source": source,
-            "candidate_count": len(candidates),
-            "scored_count": len(scored),
-            "actionable_count": len(actionable),
-            "report_path": report_path,
-            "market_watch_path": market_watch_path,
-            "used_fallback": "akshare" in source.lower() or "fallback" in source.lower(),
-        },
-        today_str,
-    )
-
-    return scored
+        return scored
+    except Exception as e:
+        update_pipeline_state(
+            "stock_screener",
+            "error",
+            {
+                "pool": pool,
+                "universe": universe,
+                "error": str(e),
+            },
+            today_str,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------

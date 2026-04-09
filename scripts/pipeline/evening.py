@@ -39,6 +39,7 @@ from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_evening_report
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.evening")
 
@@ -365,130 +366,144 @@ def run() -> dict:
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     _logger.info(f"[EVENING] 收盘流程 {today_str} ({weekday})")
-
-    vault = ObsidianVault()
-    engine = DataEngine()
-    strategy_cfg = get_strategy()
-
-    # 1. 大盘数据
-    _logger.info(">> 大盘数据")
-    from scripts.pipeline.morning import _get_market_data
-    market_data = _get_market_data(engine)
-    for name, info in market_data.get("market", {}).items():
-        _logger.info(f"  {name}: {info.get('price'):.2f} ({info.get('chg_pct'):+.2f}%) [{info.get('signal', '')}]")
-    _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
-
-    # 2. 更新持仓价格 + 触发检查
-    _logger.info(">> 更新持仓价格...")
-    position_changes = _update_portfolio_prices(vault, engine)
-
-    # 3. 生成明日计划
-    _logger.info(">> 生成明日计划...")
-    tomorrow = _next_trading_day()
-    tomorrow_str = tomorrow.strftime("%Y-%m-%d")
-    plan_content = _generate_tomorrow_plan(vault, engine, market_data, position_changes)
-
-    # 4. 创建明日日志
-    _logger.info(f">> 创建明日日志: {tomorrow_str}.md")
-    _create_tomorrow_journal(vault, tomorrow_str, plan_content)
-
-    # 5. 准备 Discord 推送数据
-    discord_positions = []
-    total_value = 0
-    for change in position_changes:
-        new_value = change.get("new_value", 0)
-        total_value += new_value
-        discord_positions.append({
-            "name": change["name"],
-            "shares": change.get("shares", 0),
-            "value": new_value,
-            "currency": "¥",
-            "status": "持有中",
-        })
-
-    # 触发事项
-    alerts = []
-    for change in position_changes:
-        for t in change.get("triggered", []):
-            alerts.append(f"{change['name']}: {t}@{change.get('new_price', '?')}")
-
-    # 从 vault 读取最新持仓（已更新价格）
-    portfolio = vault.read_portfolio()
-    holdings = portfolio.get("holdings", [])
-    weekly_bought = sum(
-        int(float(h.get("加仓次数", 0) or 0)) + 1
-        for h in holdings
-        if str(h.get("股票", "")).strip() not in ["", "—", "空仓"]
-        and int(float(h.get("持有股数", 0) or 0)) > 0
-    )
-    weekly_limit = strategy_cfg.get("risk", {}).get("position", {}).get("weekly_max", 2)
-
-    # 核心池评分（从 vault 读取最新评分）
-    core_pool = vault.read_core_pool()
-    discord_core = []
-    for item in core_pool:
-        name = str(item.get("股票", ""))
-        score = float(item.get("四维总分", item.get("总分", 0)))
-        note = str(item.get("备注", ""))
-        if name and name not in ["", "—"]:
-            discord_core.append({"name": name, "score": score, "note": note})
-
-    # 明日计划（简化版）
-    tomorrow_plan = []
-    signal = market_data.get("market_signal", "")
-    if signal == "GREEN":
-        tomorrow_plan.append("🟢 GREEN信号，可正常买入")
-    elif signal == "YELLOW":
-        tomorrow_plan.append("🟡 YELLOW信号，如买入需减半金额")
-    else:
-        tomorrow_plan.append("🔴 RED/CLEAR信号，不买入，只观察")
-    tomorrow_plan.append(f"本周买入: {weekly_bought}/{weekly_limit}")
-
-    discord_data = {
-        "date": today_str,
-        "weekday": weekday,
-        "market": {
-            name: {
-                "price": info.get("price", 0),
-                "chg_pct": info.get("chg_pct", 0),
-                "signal": info.get("signal", ""),
-            }
-            for name, info in market_data.get("market", {}).items()
-        },
-        "positions": discord_positions,
-        "total_value": total_value,
-        "currency": "¥",
-        "alerts": alerts,
-        "core_pool": discord_core,
-        "tomorrow_plan": tomorrow_plan,
-    }
-
-    # 6. 推送 Discord
-    ok, err = send_evening_report(discord_data)
-    if ok:
-        _logger.info(">> Discord 推送成功")
-    else:
-        _logger.warning(f">> Discord 推送失败: {err}")
-
-    _logger.info(f"[EVENING] 收盘流程完成 → 明日日志: {tomorrow_str}.md")
-
-    # 7. 影子交易：检查模拟盘止损止盈
     try:
-        from scripts.pipeline.shadow_trade import check_stop_signals
-        shadow_results = check_stop_signals()
-        triggered = [r for r in shadow_results if r.get("action") != "持有"]
-        if triggered:
-            _logger.info(f">> 影子交易: {len(triggered)} 只触发信号")
-    except Exception as e:
-        _logger.warning(f">> 影子交易检查失败: {e}")
+        vault = ObsidianVault()
+        engine = DataEngine()
+        strategy_cfg = get_strategy()
 
-    return {
-        "market_data": market_data,
-        "position_changes": position_changes,
-        "tomorrow_plan": plan_content,
-        "tomorrow_date": tomorrow_str,
-        "discord_data": discord_data,
-    }
+        _logger.info(">> 大盘数据")
+        from scripts.pipeline.morning import _get_market_data
+        market_data = _get_market_data(engine)
+        for name, info in market_data.get("market", {}).items():
+            _logger.info(f"  {name}: {info.get('price'):.2f} ({info.get('chg_pct'):+.2f}%) [{info.get('signal', '')}]")
+        _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
+
+        _logger.info(">> 更新持仓价格...")
+        position_changes = _update_portfolio_prices(vault, engine)
+
+        _logger.info(">> 生成明日计划...")
+        tomorrow = _next_trading_day()
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+        plan_content = _generate_tomorrow_plan(vault, engine, market_data, position_changes)
+
+        _logger.info(f">> 创建明日日志: {tomorrow_str}.md")
+        _create_tomorrow_journal(vault, tomorrow_str, plan_content)
+
+        discord_positions = []
+        total_value = 0
+        for change in position_changes:
+            new_value = change.get("new_value", 0)
+            total_value += new_value
+            discord_positions.append({
+                "name": change["name"],
+                "shares": change.get("shares", 0),
+                "value": new_value,
+                "currency": "¥",
+                "status": "持有中",
+            })
+
+        alerts = []
+        for change in position_changes:
+            for t in change.get("triggered", []):
+                alerts.append(f"{change['name']}: {t}@{change.get('new_price', '?')}")
+
+        portfolio = vault.read_portfolio()
+        holdings = portfolio.get("holdings", [])
+        weekly_bought = sum(
+            int(float(h.get("加仓次数", 0) or 0)) + 1
+            for h in holdings
+            if str(h.get("股票", "")).strip() not in ["", "—", "空仓"]
+            and int(float(h.get("持有股数", 0) or 0)) > 0
+        )
+        weekly_limit = strategy_cfg.get("risk", {}).get("position", {}).get("weekly_max", 2)
+
+        core_pool = vault.read_core_pool()
+        discord_core = []
+        for item in core_pool:
+            name = str(item.get("股票", ""))
+            raw_score = str(item.get("四维总分", item.get("总分", 0))).replace("**", "").strip()
+            try:
+                score = float(raw_score) if raw_score else 0.0
+            except (TypeError, ValueError):
+                score = 0.0
+            note = str(item.get("备注", ""))
+            if name and name not in ["", "—"]:
+                discord_core.append({"name": name, "score": score, "note": note})
+
+        tomorrow_plan = []
+        signal = market_data.get("market_signal", "")
+        if signal == "GREEN":
+            tomorrow_plan.append("🟢 GREEN信号，可正常买入")
+        elif signal == "YELLOW":
+            tomorrow_plan.append("🟡 YELLOW信号，如买入需减半金额")
+        else:
+            tomorrow_plan.append("🔴 RED/CLEAR信号，不买入，只观察")
+        tomorrow_plan.append(f"本周买入: {weekly_bought}/{weekly_limit}")
+
+        discord_data = {
+            "date": today_str,
+            "weekday": weekday,
+            "market": {
+                name: {
+                    "price": info.get("price", 0),
+                    "chg_pct": info.get("chg_pct", 0),
+                    "signal": info.get("signal", ""),
+                }
+                for name, info in market_data.get("market", {}).items()
+            },
+            "positions": discord_positions,
+            "total_value": total_value,
+            "currency": "¥",
+            "alerts": alerts,
+            "core_pool": discord_core,
+            "tomorrow_plan": tomorrow_plan,
+        }
+
+        ok, err = send_evening_report(discord_data)
+        if ok:
+            _logger.info(">> Discord 推送成功")
+        else:
+            _logger.warning(f">> Discord 推送失败: {err}")
+
+        _logger.info(f"[EVENING] 收盘流程完成 → 明日日志: {tomorrow_str}.md")
+
+        try:
+            from scripts.pipeline.shadow_trade import check_stop_signals
+            shadow_results = check_stop_signals()
+            triggered = [r for r in shadow_results if r.get("action") != "持有"]
+            if triggered:
+                _logger.info(f">> 影子交易: {len(triggered)} 只触发信号")
+        except Exception as e:
+            _logger.warning(f">> 影子交易检查失败: {e}")
+
+        update_pipeline_state(
+            "evening",
+            "warning" if not ok else "success",
+            {
+                "market_signal": market_data.get("market_signal", ""),
+                "position_change_count": len(position_changes),
+                "tomorrow_date": tomorrow_str,
+                "discord_ok": ok,
+                "discord_error": err,
+            },
+            today_str,
+        )
+
+        return {
+            "market_data": market_data,
+            "position_changes": position_changes,
+            "tomorrow_plan": plan_content,
+            "tomorrow_date": tomorrow_str,
+            "discord_data": discord_data,
+        }
+    except Exception as e:
+        update_pipeline_state(
+            "evening",
+            "error",
+            {"error": str(e)},
+            today_str,
+        )
+        raise
 
 
 if __name__ == "__main__":
