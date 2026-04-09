@@ -34,10 +34,18 @@ from scripts.pipeline.morning import run as run_morning
 from scripts.pipeline.noon import run as run_noon
 from scripts.pipeline.stock_screener import run as run_screener
 from scripts.pipeline.weekly_review import run as run_weekly
+from scripts.state import (
+    AUTOMATED_RULES,
+    LEDGER_DB_PATH,
+    audit_state,
+    bootstrap_state,
+    load_market_snapshot,
+    load_pool_snapshot,
+    load_portfolio_snapshot,
+)
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_strategy
 from scripts.utils.obsidian import ObsidianVault
-from scripts.utils.pool_manager import POOL_STATE_PATH, load_pool_state
 from scripts.utils.run_context import (
     LOCK_DIR,
     RUNS_DIR,
@@ -255,6 +263,7 @@ def doctor() -> dict:
         "runtime": _check_path_writable(RUNTIME_DIR),
         "runs": _check_path_writable(RUNS_DIR),
         "locks": _check_path_writable(LOCK_DIR),
+        "ledger": _check_path_writable(Path(LEDGER_DB_PATH).parent),
         "screening": _check_path_writable(vault_path / "04-选股" / "筛选结果"),
     }
 
@@ -310,6 +319,19 @@ def doctor() -> dict:
         "warning": warning,
         "checks": checks,
     }
+
+
+def state_command(action: str, args) -> dict:
+    if action == "bootstrap":
+        result = bootstrap_state(force=getattr(args, "force", False))
+    else:
+        result = audit_state()
+    return sanitize_for_json({
+        "command": "state",
+        "action": action,
+        "db_path": str(LEDGER_DB_PATH),
+        **result,
+    })
 
 
 def run_pipeline(name: str, args) -> dict:
@@ -388,8 +410,9 @@ def _summarize_pipeline_result(name: str, result, args) -> dict:
         for key in ["review_path", "tomorrow_date", "weekly_bought"]:
             if key in result:
                 summary[key] = result.get(key)
-        if "market_data" in result:
-            summary["market_signal"] = result["market_data"].get("market_signal", "")
+        market_data = result.get("market_data") or result.get("market_snapshot")
+        if isinstance(market_data, dict):
+            summary["market_signal"] = market_data.get("signal", market_data.get("market_signal", ""))
     elif isinstance(result, list):
         summary["count"] = len(result)
     return summary
@@ -494,7 +517,10 @@ def status_today() -> dict:
     today = load_daily_state()
     strategy = get_strategy()
     today_decision = build_today_decision(strategy=strategy)
-    pool_state = load_pool_state()
+    portfolio_snapshot = load_portfolio_snapshot(scope="cn_a_system")
+    pool_snapshot = load_pool_snapshot()
+    pool_sync_state = audit_state()
+    market_snapshot = load_market_snapshot()
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():
@@ -512,11 +538,21 @@ def status_today() -> dict:
         "pipelines": normalized,
         "updated_at": today.get("updated_at", ""),
         "today_decision": today_decision,
+        "positions_summary": portfolio_snapshot.get("summary", {}),
+        "market_snapshot": market_snapshot,
+        "market_signal": market_snapshot.get("signal", market_snapshot.get("market_signal", "")),
+        "market_snapshot_source": {
+            "source": market_snapshot.get("source", ""),
+            "source_chain": market_snapshot.get("source_chain", []),
+            "as_of_date": market_snapshot.get("as_of_date", ""),
+        },
+        "pool_sync_state": pool_sync_state,
+        "rule_automation_scope": AUTOMATED_RULES,
         "pool_management": {
-            "updated_at": pool_state.get("updated_at", ""),
-            "last_eval_date": pool_state.get("last_eval_date", ""),
-            "summary": pool_state.get("last_summary", {}),
-            "state_path": str(POOL_STATE_PATH),
+            "updated_at": pool_snapshot.get("updated_at", ""),
+            "last_eval_date": pool_snapshot.get("snapshot_date", ""),
+            "summary": pool_snapshot.get("summary", {}),
+            "state_path": str(LEDGER_DB_PATH),
         },
     }
 
@@ -622,6 +658,9 @@ def orchestrate_workflow(name: str, args) -> dict:
 
 
 def main():
+    argv = [arg for arg in sys.argv[1:] if arg != "--json"]
+    json_output = any(arg == "--json" for arg in sys.argv[1:])
+
     parser = argparse.ArgumentParser(description="Trade system unified CLI")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -629,6 +668,12 @@ def main():
     sub.add_parser("doctor", help="Run health checks")
     sub.add_parser("workflows", help="List shared workflows for Hermes/OpenClaw")
     sub.add_parser("templates", help="List agent response templates")
+
+    state_parser = sub.add_parser("state", help="Manage structured ledger state")
+    state_sub = state_parser.add_subparsers(dest="action", required=True)
+    state_bootstrap = state_sub.add_parser("bootstrap")
+    state_bootstrap.add_argument("--force", action="store_true", help="Rebuild ledger from current markdown/config")
+    state_sub.add_parser("audit")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -649,9 +694,10 @@ def main():
     orch_parser.add_argument("--pool", choices=["core", "watch", "all"], default="all")
     orch_parser.add_argument("--universe", choices=["tracked", "market"], default="tracked")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    args.json = json_output
 
-    if args.json:
+    if json_output:
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
         previous_disable = logging.root.manager.disable
@@ -669,6 +715,8 @@ def main():
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
                     result = orchestrate_workflow(args.workflow, args)
+                elif args.command == "state":
+                    result = state_command(args.action, args)
                 else:
                     result = status_today()
         finally:
@@ -694,6 +742,8 @@ def main():
             result = run_pipeline(args.pipeline, args)
         elif args.command == "orchestrate":
             result = orchestrate_workflow(args.workflow, args)
+        elif args.command == "state":
+            result = state_command(args.action, args)
         else:
             result = status_today()
 
@@ -715,7 +765,11 @@ def main():
         elif result.get("command") == "status":
             print(f"status today: {result.get('date')}")
             print(f"today_decision: {result.get('today_decision', {}).get('decision')}")
+            print(f"market_signal: {result.get('market_signal', '')}")
             print("pipelines:", ", ".join(sorted(result.get("pipelines", {}).keys())))
+        elif result.get("command") == "state":
+            print(f"state {result.get('action')}: {result.get('status', 'ok')}")
+            print(f"db_path: {result.get('db_path', '')}")
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")

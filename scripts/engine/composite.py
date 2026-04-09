@@ -42,9 +42,9 @@ warnings.filterwarnings("ignore")
 
 from scripts.engine.market_timer import MarketTimer, get_signal as get_market_signal
 from scripts.engine.risk_model import check_risk
+from scripts.state import load_activity_summary, load_market_snapshot, load_portfolio_snapshot
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
-from scripts.utils.obsidian import ObsidianVault
 
 _logger = get_logger("composite")
 
@@ -269,51 +269,13 @@ class CompositeDecider:
     # ---------------------------------------------------------------------------
 
     def _get_current_exposure(self) -> float:
-        """获取当前已用仓位占总资金比例（简化版）"""
+        """获取当前已用仓位占总资金比例。"""
         try:
-            vault = ObsidianVault()
-            portfolio = vault.read_portfolio()
-            holdings = portfolio.get("holdings", [])
+            snapshot = load_portfolio_snapshot(scope="cn_a_system")
+            return float(snapshot.get("summary", {}).get("current_exposure", 0.0) or 0.0)
         except Exception as e:
             _logger.warning(f"[composite] 读取持仓失败，按空仓处理: {e}")
             return 0.0
-
-        def _safe_float(value) -> float:
-            if value is None:
-                return 0.0
-            if isinstance(value, (int, float)):
-                return float(value)
-            cleaned = re.sub(r"[^\d.\-]", "", str(value))
-            if not cleaned:
-                return 0.0
-            try:
-                return float(cleaned)
-            except ValueError:
-                return 0.0
-
-        exposure_amount = 0.0
-        for row in holdings:
-            code = str(row.get("代码", "")).strip()
-            name = str(row.get("股票", "")).strip()
-            if not code.isdigit() or len(code) != 6:
-                continue
-            if name in ["", "—", "空仓"]:
-                continue
-
-            shares = int(_safe_float(row.get("持有股数", 0)))
-            if shares <= 0:
-                continue
-
-            market_value = _safe_float(row.get("持仓市值", row.get("市值", 0)))
-            if market_value <= 0:
-                price = _safe_float(row.get("最新价", row.get("平均成本", 0)))
-                market_value = price * shares
-
-            exposure_amount += market_value
-
-        if self.total_capital <= 0:
-            return 0.0
-        return min(exposure_amount / self.total_capital, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -333,29 +295,21 @@ def build_today_decision(strategy: Optional[dict] = None) -> dict:
     """
     strategy = strategy or get_strategy()
     decider = CompositeDecider(capital=strategy.get("capital"))
-    market_signal = decider.market_timer.get_signal()
-    market_multiplier = decider.market_timer.get_position_multiplier()
-    current_exposure = decider._get_current_exposure()
-
+    market_snapshot = load_market_snapshot()
+    market_signal = market_snapshot.get("signal", market_snapshot.get("market_signal", "CLEAR"))
+    market_multiplier = {"GREEN": 1.0, "YELLOW": 0.5, "RED": 0.0, "CLEAR": 0.0}.get(market_signal, 0.0)
+    portfolio_snapshot = load_portfolio_snapshot(scope="cn_a_system")
+    positions_summary = portfolio_snapshot.get("summary", {})
+    current_exposure = float(positions_summary.get("current_exposure", 0.0) or 0.0)
+    holding_count = int(positions_summary.get("holding_count", 0) or 0)
     weekly_buys = 0
-    holding_count = 0
     try:
-        vault = ObsidianVault()
-        portfolio = vault.read_portfolio()
-        holdings = portfolio.get("holdings", [])
-        holding_count = sum(
-            1 for row in holdings
-            if str(row.get("股票", "")).strip() not in ["", "—", "空仓"]
-            and int(float(row.get("持有股数", 0) or 0)) > 0
-        )
-        weekly_buys = sum(
-            int(float(row.get("加仓次数", 0) or 0)) + 1
-            for row in holdings
-            if str(row.get("股票", "")).strip() not in ["", "—", "空仓"]
-            and int(float(row.get("持有股数", 0) or 0)) > 0
+        activity = load_activity_summary("week", scope="cn_a_system")
+        weekly_buys = int(
+            activity.get("weekly_buy_count", activity.get("weekly_buys", activity.get("buy_count", 0))) or 0
         )
     except Exception as e:
-        _logger.warning(f"[composite] build_today_decision 读取持仓失败: {e}")
+        _logger.warning(f"[composite] build_today_decision 读取交易活动失败: {e}")
 
     risk = check_risk(
         current_exposure=current_exposure,
@@ -385,6 +339,7 @@ def build_today_decision(strategy: Optional[dict] = None) -> dict:
         "current_exposure": round(current_exposure, 3),
         "weekly_buys": weekly_buys,
         "holding_count": holding_count,
+        "positions_summary": positions_summary,
         "risk": risk,
         "reasons": reasons,
     }

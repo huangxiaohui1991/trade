@@ -29,6 +29,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from scripts.mx.mx_moni import MXMoni
 from scripts.engine.scorer import score as score_stock
+from scripts.state import record_trade_event
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 
@@ -36,6 +37,19 @@ _logger = get_logger("pipeline.shadow_trade")
 
 # 每只股票的模拟买入金额（元）
 POSITION_SIZE = 20000
+AUTOMATED_RISK_RULES = {
+    "RISK_DYNAMIC_STOP": "动态止损",
+    "RISK_ABSOLUTE_STOP": "绝对止损",
+    "RISK_TAKE_PROFIT_T1": "第一批止盈",
+}
+ADVISORY_RISK_RULES = {
+    "RISK_TIME_STOP": "时间止损",
+    "RISK_DRAWDOWN_TAKE_PROFIT": "回撤止盈",
+}
+AUTOMATION_SCOPE_NOTE = (
+    "本波仅自动执行：动态止损、绝对止损、第一批止盈；"
+    "时间止损与回撤止盈仅作为提示，不自动下单。"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +61,7 @@ def _get_moni() -> MXMoni:
 
 
 def _log_trade(action: str, code: str, name: str, shares: int,
-               price: float, reason: str = "") -> None:
+               price: float, reason: str = "", reason_code: str = "") -> None:
     """
     记录模拟盘交易到 Obsidian 交易日志。
     追加到 03-复盘/模拟盘/交易记录.md
@@ -70,11 +84,52 @@ def _log_trade(action: str, code: str, name: str, shares: int,
         log_path.write_text(header, encoding="utf-8")
 
     # 追加一行
-    line = f"| {now} | {action} | {name} | {code} | {shares} | ¥{price:.2f} | ¥{amount:,.0f} | {reason} |\n"
+    reason_text = f"[{reason_code}] {reason}".strip() if reason_code else reason
+    line = f"| {now} | {action} | {name} | {code} | {shares} | ¥{price:.2f} | ¥{amount:,.0f} | {reason_text} |\n"
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(line)
 
+    try:
+        side = "buy" if "买" in action else "sell" if "卖" in action else action.lower()
+        record_trade_event({
+            "external_id": f"shadow:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{code}:{side}:{shares}",
+            "scope": "paper_mx",
+            "market": "MX_PAPER",
+            "code": code,
+            "name": name,
+            "side": side,
+            "event_type": side,
+            "shares": shares,
+            "price": price,
+            "amount": amount,
+            "event_date": datetime.now().strftime("%Y-%m-%d"),
+            "reason_code": reason_code or f"paper_{side}",
+            "reason_text": reason,
+            "source": "shadow_trade",
+            "metadata": {
+                "action": action,
+                "log_path": str(log_path),
+            },
+        })
+    except Exception as exc:
+        _logger.warning(f"[shadow] 结构化事件写入失败: {exc}")
+
     _logger.info(f"[shadow] 交易记录: {action} {name}({code}) {shares}股 @ ¥{price:.2f}")
+
+
+def _trade_result(code: str, name: str, shares: int, status: str,
+                  reason: str = "", reason_code: str = "",
+                  **extra) -> dict:
+    payload = {
+        "code": code,
+        "name": name,
+        "shares": shares,
+        "status": status,
+        "reason": reason,
+        "reason_code": reason_code,
+    }
+    payload.update(extra)
+    return payload
 
 
 def _get_positions(mx: MXMoni) -> list:
@@ -160,29 +215,30 @@ def buy_new_picks(dry_run: bool = False) -> list:
             score_result = score_stock(code, name)
         except Exception as e:
             _logger.warning(f"[shadow] {name}({code}) 评分失败，跳过: {e}")
-            results.append({"code": code, "name": name, "shares": 0, "status": "评分失败"})
+            results.append(_trade_result(code, name, 0, "评分失败", str(e), "SCORE_ERROR"))
             continue
 
         total_score = float(score_result.get("total_score", 0) or 0)
         veto_signals = score_result.get("veto_signals", [])
         if veto_signals:
-            status = f"veto:{','.join(veto_signals)}"
-            _logger.info(f"[shadow] {name}({code}) 触发一票否决，跳过: {status}")
-            results.append({"code": code, "name": name, "shares": 0, "status": status})
+            reason_code = "POOL_VETO"
+            reason = f"veto:{','.join(veto_signals)}"
+            _logger.info(f"[shadow] {name}({code}) 触发一票否决，跳过: {reason}")
+            results.append(_trade_result(code, name, 0, "跳过", reason, reason_code, score=total_score))
             continue
         if total_score < buy_threshold:
             _logger.info(f"[shadow] {name}({code}) 分数{total_score:.1f}<{buy_threshold}，跳过")
-            results.append({"code": code, "name": name, "shares": 0, "status": f"分数不足:{total_score:.1f}"})
+            results.append(_trade_result(code, name, 0, "跳过", f"分数不足:{total_score:.1f}", "SCORE_TOO_LOW", score=total_score))
             continue
 
         if code in held_codes:
             _logger.info(f"[shadow] {name}({code}) 已持有，跳过")
-            results.append({"code": code, "name": name, "shares": 0, "status": "已持有"})
+            results.append(_trade_result(code, name, 0, "跳过", "已持有", "POSITION_HELD"))
             continue
 
         if available < POSITION_SIZE * 0.5:
             _logger.warning(f"[shadow] 可用资金不足 ¥{available:,.0f}，停止买入")
-            results.append({"code": code, "name": name, "shares": 0, "status": "资金不足"})
+            results.append(_trade_result(code, name, 0, "跳过", "资金不足", "CAPITAL_INSUFFICIENT"))
             continue
 
         # 用 MX 查最新价
@@ -205,7 +261,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
 
         if price <= 0:
             _logger.warning(f"[shadow] {name}({code}) 无法获取价格，跳过")
-            results.append({"code": code, "name": name, "shares": 0, "status": "无价格"})
+            results.append(_trade_result(code, name, 0, "跳过", "无价格", "PRICE_UNAVAILABLE"))
             continue
 
         shares = _calc_shares(price)
@@ -213,7 +269,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
 
         if dry_run:
             _logger.info(f"[shadow][DRY] 买入 {name}({code}) {shares}股 @ ¥{price:.2f} ≈ ¥{actual_cost:,.0f}")
-            results.append({"code": code, "name": name, "shares": shares, "status": "dry_run", "price": price})
+            results.append(_trade_result(code, name, shares, "dry_run", "模拟运行", "DRY_RUN", price=price))
             continue
 
         # 执行市价买入
@@ -226,11 +282,11 @@ def buy_new_picks(dry_run: bool = False) -> list:
             available -= actual_cost
             held_codes.add(code)
             _logger.info(f"[shadow] ✅ {name} 买入成功 {shares}股")
-            _log_trade("买入", code, name, shares, price, f"核心池评分{total_score:.1f}")
-            results.append({"code": code, "name": name, "shares": shares, "status": "成功", "price": price})
+            _log_trade("买入", code, name, shares, price, f"核心池评分{total_score:.1f}", "BUY_CORE_POOL")
+            results.append(_trade_result(code, name, shares, "成功", f"核心池评分{total_score:.1f}", "BUY_CORE_POOL", price=price))
         else:
             _logger.warning(f"[shadow] ❌ {name} 买入失败: {trade_code} {trade_msg}")
-            results.append({"code": code, "name": name, "shares": 0, "status": f"失败:{trade_msg}"})
+            results.append(_trade_result(code, name, 0, "失败", trade_msg, "BROKER_REJECTED"))
 
     return results
 
@@ -242,6 +298,12 @@ def buy_new_picks(dry_run: bool = False) -> list:
 def check_stop_signals(dry_run: bool = False) -> list:
     """
     检查模拟盘持仓是否触发止损/止盈信号，盘中执行卖出。
+
+    本波仅自动执行：
+      - 动态止损
+      - 绝对止损
+      - 第一批止盈
+    时间止损与回撤止盈仅作为提示，不自动下单。
 
     调用时机：
       - morning.py 盘前（8:25）→ 只计算价格，不下单（盘前无法交易）
@@ -266,6 +328,8 @@ def check_stop_signals(dry_run: bool = False) -> list:
     if not positions:
         _logger.info("[shadow] 模拟盘空仓，无需检查")
         return []
+
+    _logger.info(f"[shadow] {AUTOMATION_SCOPE_NOTE}")
 
     # 判断是否在交易时间（可以下单）
     now = datetime.now()
@@ -298,17 +362,20 @@ def check_stop_signals(dry_run: bool = False) -> list:
 
         action = None
         reason = None
+        reason_code = None
         sell_price = None
 
         # 绝对止损
         if pnl_pct <= -absolute_stop_pct:
             action = "清仓"
             reason = f"绝对止损 现价¥{price:.2f} < ¥{absolute_stop_price:.2f} ({pnl_pct*100:+.1f}%)"
+            reason_code = "RISK_ABSOLUTE_STOP"
             sell_price = absolute_stop_price
         # 动态止损
         elif pnl_pct <= -stop_loss_pct:
             action = "清仓"
             reason = f"动态止损 现价¥{price:.2f} < ¥{stop_loss_price:.2f} ({pnl_pct*100:+.1f}%)"
+            reason_code = "RISK_DYNAMIC_STOP"
             sell_price = stop_loss_price
         # 第一批止盈
         elif pnl_pct >= t1_pct:
@@ -316,6 +383,7 @@ def check_stop_signals(dry_run: bool = False) -> list:
             if sell_shares >= 100:
                 action = f"卖出{sell_shares}股"
                 reason = f"止盈第一批 现价¥{price:.2f} > ¥{t1_price:.2f} ({pnl_pct*100:+.1f}%)"
+                reason_code = "RISK_TAKE_PROFIT_T1"
                 sell_price = t1_price
 
         if not action:
@@ -324,20 +392,34 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 f"盈亏{pnl_pct*100:+.1f}% | 止损¥{stop_loss_price} 止盈¥{t1_price} → 持有"
             )
             results.append({
-                "code": code, "name": name, "action": "持有",
+                "code": code,
+                "name": name,
+                "action": "持有",
                 "reason": f"盈亏{pnl_pct*100:+.1f}% 止损¥{stop_loss_price} 止盈¥{t1_price}",
-                "stop_loss": stop_loss_price, "take_profit": t1_price,
+                "reason_code": "RISK_HOLD",
+                "stop_loss": stop_loss_price,
+                "take_profit": t1_price,
+                "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+                "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
             continue
 
-        _logger.info(f"[shadow] {name}({code}) → {action} ({reason})")
+        _logger.info(f"[shadow] {name}({code}) → {action} [{reason_code}] ({reason})")
 
         if dry_run or not can_trade:
             tag = "dry_run" if dry_run else "非交易时间"
             _logger.info(f"[shadow] [{tag}] 不下单，记录信号待下次盘中执行")
             results.append({
-                "code": code, "name": name, "action": action, "reason": reason,
-                "status": tag, "stop_loss": stop_loss_price, "take_profit": t1_price,
+                "code": code,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "reason_code": reason_code,
+                "status": tag,
+                "stop_loss": stop_loss_price,
+                "take_profit": t1_price,
+                "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+                "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
             continue
 
@@ -348,7 +430,16 @@ def check_stop_signals(dry_run: bool = False) -> list:
             sell_qty = int(action.replace("卖出", "").replace("股", ""))
 
         if sell_qty < 100:
-            results.append({"code": code, "name": name, "action": action, "reason": reason, "status": "不足100股"})
+            results.append({
+                "code": code,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "reason_code": reason_code,
+                "status": "不足100股",
+                "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+                "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
+            })
             continue
 
         # 止损用市价确保成交，止盈用限价锁定利润
@@ -360,12 +451,30 @@ def check_stop_signals(dry_run: bool = False) -> list:
         trade_code = str(trade_result.get("code", ""))
         if trade_code == "200":
             _logger.info(f"[shadow] ✅ {name} {action} 成功")
-            _log_trade("卖出", code, name, sell_qty, price, reason)
-            results.append({"code": code, "name": name, "action": action, "reason": reason, "status": "成功"})
+            _log_trade("卖出", code, name, sell_qty, price, reason, reason_code)
+            results.append({
+                "code": code,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "reason_code": reason_code,
+                "status": "成功",
+                "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+                "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
+            })
         else:
             msg = trade_result.get("message", "")
             _logger.warning(f"[shadow] ❌ {name} {action} 失败: {msg}")
-            results.append({"code": code, "name": name, "action": action, "reason": reason, "status": f"失败:{msg}"})
+            results.append({
+                "code": code,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "reason_code": reason_code,
+                "status": f"失败:{msg}",
+                "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+                "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
+            })
 
     return results
 
@@ -401,6 +510,9 @@ def get_status() -> dict:
         "balance": balance,
         "positions": pos_list,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "automation_scope": AUTOMATION_SCOPE_NOTE,
+        "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
+        "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
     }
 
 
@@ -420,6 +532,10 @@ def generate_report() -> str:
 
     lines = [
         f"# 模拟盘报告 — {status['timestamp']}",
+        "",
+        "## 规则范围",
+        "",
+        f"> {status.get('automation_scope', AUTOMATION_SCOPE_NOTE)}",
         "",
         "## 账户概览",
         "",
@@ -482,14 +598,19 @@ def main():
         results = buy_new_picks(dry_run=args.dry_run)
         print(f"\n影子交易买入: {len(results)} 只")
         for r in results:
-            print(f"  {r['name']}({r['code']}): {r['status']}"
+            reason_code = r.get("reason_code", "")
+            reason = r.get("reason", "")
+            detail = f" [{reason_code}] {reason}".strip() if (reason_code or reason) else ""
+            print(f"  {r['name']}({r['code']}): {r['status']}{detail}"
                   + (f" {r['shares']}股" if r.get('shares') else ""))
 
     elif args.action == "check":
         results = check_stop_signals(dry_run=args.dry_run)
         print(f"\n止损止盈检查: {len(results)} 只")
         for r in results:
-            print(f"  {r['name']}({r['code']}): {r['action']} — {r['reason']}")
+            reason_code = r.get("reason_code", "")
+            prefix = f"[{reason_code}] " if reason_code else ""
+            print(f"  {r['name']}({r['code']}): {r['action']} — {prefix}{r['reason']}")
 
     elif args.action == "status":
         status = get_status()
@@ -497,6 +618,7 @@ def main():
         print(f"\n模拟盘状态 ({status['timestamp']})")
         print(f"  总资产: ¥{bal['total_assets']:,.0f}  可用: ¥{bal['available']:,.0f}")
         print(f"  持仓市值: ¥{bal['position_value']:,.0f}  总收益: ¥{bal['total_profit']:,.0f}")
+        print(f"  自动规则: {status.get('automation_scope', AUTOMATION_SCOPE_NOTE)}")
         if status["positions"]:
             print(f"\n  持仓 ({len(status['positions'])} 只):")
             for p in status["positions"]:

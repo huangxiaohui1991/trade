@@ -29,8 +29,8 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
-import pandas as pd
 from scripts.engine.data_engine import DataEngine
+from scripts.state import load_activity_summary, load_market_snapshot, load_pool_snapshot, load_portfolio_snapshot
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_morning_summary
 from scripts.utils.config_loader import get_strategy
@@ -41,129 +41,36 @@ _logger = get_logger("pipeline.morning")
 
 
 # ---------------------------------------------------------------------------
-# 大盘指数列表（用于趋势判断）
-# ---------------------------------------------------------------------------
-_INDEX_CODES = {
-    "上证指数": "000001",
-    "深证成指": "399001",
-    "创业板指": "399006",
-    "科创50": "000688",
-}
-
-
-def _get_market_data(engine: DataEngine) -> dict:
-    """
-    获取大盘数据，计算 MA20/MA60 状态
-
-    Returns:
-        {
-            "market": {名称: {price, chg_pct, ma20_pct, ma60_pct, ma60_days, signal}},
-            "market_signal": str  # GREEN/YELLOW/RED/CLEAR
-        }
-    """
-    result = {"market": {}, "market_signal": ""}
-    strategy = get_strategy()
-    market_timer_cfg = strategy.get("market_timer", {})
-    clear_days = market_timer_cfg.get("clear_days_ma60", 15)
-
-    for name, code in _INDEX_CODES.items():
-        tech = engine.get_technical(code, 60)
-        if "error" in tech:
-            _logger.warning(f"[market] {name} 数据获取失败: {tech['error']}")
-            continue
-
-        price = tech.get("current_price", 0)
-        ma20 = tech.get("ma", {}).get("MA20", 0)
-        ma60 = tech.get("ma", {}).get("MA60", 0)
-        chg_pct = tech.get("change_pct", 0)
-
-        ma20_pct = ((price / ma20) - 1) * 100 if ma20 else 0
-        ma60_pct = ((price / ma60) - 1) * 100 if ma60 else 0
-        above_ma20 = price >= ma20 if ma20 else False
-
-        # MA60 下方天数（简化：用连续跌破判断）
-        ma60_days = 0
-        hist = tech.get("hist", pd.DataFrame())
-        if not hist.empty and ma60:
-            below_days = 0
-            for _, row in hist.iloc[::-1].iterrows():
-                close_price = row.get("收盘", row.get("close", 0))
-                if close_price < ma60:
-                    below_days += 1
-                else:
-                    break
-            ma60_days = below_days
-
-        result["market"][name] = {
-            "price": price,
-            "chg_pct": chg_pct,
-            "ma20": ma20,
-            "ma60": ma60,
-            "ma20_pct": ma20_pct,
-            "ma60_pct": ma60_pct,
-            "ma60_days": ma60_days,
-            "above_ma20": above_ma20,
-            "signal": "GREEN" if above_ma20 else "RED",
-        }
-
-    # 综合信号
-    clear_count = sum(1 for v in result["market"].values() if v.get("ma60_days", 0) >= clear_days)
-    green_count = sum(1 for v in result["market"].values() if v.get("above_ma20"))
-    total = len(result["market"])
-    if total == 0:
-        result["market_signal"] = "CLEAR"
-    elif clear_count >= total * 0.6:
-        result["market_signal"] = "CLEAR"
-    elif green_count >= total * 0.6:
-        result["market_signal"] = "GREEN"
-    elif green_count >= total * 0.3:
-        result["market_signal"] = "YELLOW"
-    else:
-        result["market_signal"] = "RED"
-
-    return result
-
-
-def _get_portfolio_positions(vault: ObsidianVault) -> list:
-    """从 portfolio.md 读取有效持仓"""
+def _get_portfolio_positions() -> list:
+    """从结构化账本读取有效持仓。"""
     positions = []
     try:
-        portfolio = vault.read_portfolio()
-        holdings = portfolio.get("holdings", [])
-        for h in holdings:
-            code = str(h.get("代码", "")).strip()
-            name = str(h.get("股票", "")).strip()
-            shares = h.get("持有股数", 0)
-            price = h.get("最新价", h.get("平均成本", 0))
-            note = h.get("备注", "")
-            if code and code not in ["", "—"] and name not in ["", "—", "空仓"]:
-                try:
-                    shares = int(float(shares)) if shares else 0
-                    price = float(price) if price else 0
-                except (ValueError, TypeError):
-                    continue
-                if shares > 0:
-                    positions.append({
-                        "name": name,
-                        "code": code,
-                        "shares": shares,
-                        "price": price,
-                        "note": note,
-                    })
+        snapshot = load_portfolio_snapshot(scope="cn_a_system")
+        for row in snapshot.get("positions", []):
+            shares = int(row.get("shares", 0) or 0)
+            if shares <= 0:
+                continue
+            positions.append({
+                "name": str(row.get("name", "")).strip(),
+                "code": str(row.get("code", "")).strip(),
+                "shares": shares,
+                "price": float(row.get("current_price", row.get("avg_cost", 0)) or 0),
+                "note": str(row.get("note", "")).strip(),
+            })
     except Exception as e:
         _logger.warning(f"[portfolio] 读取失败: {e}")
     return positions
 
 
-def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
-    """检查核心池异动（跌破 MA20 / 主力流出）"""
+def _get_core_pool_status(engine: DataEngine) -> list:
+    """检查结构化核心池异动（跌破 MA20 / 主力流出）"""
     core_items = []
     from scripts.engine.scorer import score as score_stock
     try:
-        core_pool = vault.read_core_pool()
+        core_pool = load_pool_snapshot().get("core_pool", [])
         for item in core_pool:
-            code = str(item.get("代码", "")).strip()
-            name = str(item.get("股票", "")).strip()
+            code = str(item.get("code", item.get("代码", ""))).strip()
+            name = str(item.get("name", item.get("股票", ""))).strip()
             if not code or code in ["", "—"]:
                 continue
             try:
@@ -180,7 +87,7 @@ def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
             price = tech.get("current_price", 0)
             ma20 = tech.get("ma", {}).get("MA20", 0)
             above_ma20 = price >= ma20 if ma20 else False
-            raw_score = str(item.get("四维总分", item.get("总分", 0))).replace("**", "").strip()
+            raw_score = str(item.get("total_score", item.get("四维总分", item.get("总分", 0)))).replace("**", "").strip()
             try:
                 score = float(raw_score) if raw_score else 0.0
             except (TypeError, ValueError):
@@ -280,13 +187,11 @@ def _get_morning_news(core_items: list, positions: list) -> list:
     return news_items
 
 
-def _get_weekly_buy_count(vault: ObsidianVault) -> int:
-    """从本周日志统计买入次数"""
+def _get_weekly_buy_count() -> int:
+    """从结构化交易事件统计本周主动买入次数。"""
     try:
-        from scripts.utils.parser import parse_journal_dir
-        journal_dir = os.path.join(vault.vault_path, vault.journal_dir)
-        stats = parse_journal_dir(journal_dir, days=7)
-        return stats.get("total_trades", 0)
+        summary = load_activity_summary("week", scope="cn_a_system")
+        return int(summary.get("weekly_buy_count", summary.get("buy_count", 0)) or 0)
     except Exception as e:
         _logger.warning(f"[weekly_buy_count] 统计失败: {e}")
         return 0
@@ -295,6 +200,8 @@ def _get_weekly_buy_count(vault: ObsidianVault) -> int:
 def _build_discord_data(market_data: dict, positions: list, core_items: list,
                         weekly_bought: int, weekday: str) -> dict:
     """构造 Discord 推送所需的 data 字典"""
+    market_indices = market_data.get("indices") or market_data.get("market") or {}
+
     # 格式化 positions for Discord
     discord_positions = []
     for pos in positions:
@@ -323,13 +230,15 @@ def _build_discord_data(market_data: dict, positions: list, core_items: list,
 
     # 格式化 market for Discord
     discord_market = {}
-    for name, info in market_data.get("market", {}).items():
+    for name, info in market_indices.items():
+        if not isinstance(info, dict) or info.get("error"):
+            continue
         discord_market[name] = {
-            "price": info.get("price", 0),
-            "chg_pct": info.get("chg_pct", 0),
+            "price": info.get("close", info.get("price", 0)),
+            "chg_pct": info.get("change_pct", info.get("chg_pct", 0)),
             "ma20_pct": info.get("ma20_pct", 0),
             "ma60_pct": info.get("ma60_pct", 0),
-            "ma60_days": info.get("ma60_days", 0),
+            "ma60_days": info.get("below_ma60_days", info.get("ma60_days", 0)),
             "signal": info.get("signal", ""),
         }
 
@@ -337,7 +246,7 @@ def _build_discord_data(market_data: dict, positions: list, core_items: list,
     return {
         "date": today,
         "weekday": weekday,
-        "market_signal": market_data.get("market_signal", ""),
+        "market_signal": market_data.get("signal", market_data.get("market_signal", "")),
         "market": discord_market,
         "positions": discord_positions,
         "core_pool": discord_core,
@@ -369,19 +278,26 @@ def run() -> dict:
         get_strategy()
 
         _logger.info(">> 大盘数据")
-        market_data = _get_market_data(engine)
-        for name, info in market_data.get("market", {}).items():
+        market_data = load_market_snapshot()
+        market_indices = market_data.get("indices") or market_data.get("market") or {}
+        for name, info in market_indices.items():
+            if not isinstance(info, dict):
+                _logger.warning(f"  {name}: 数据不可用")
+                continue
+            if info.get("error"):
+                _logger.warning(f"  {name}: {info.get('error', '数据不可用')}")
+                continue
             _logger.info(
-                f"  {name}: {info.get('price'):.2f} "
-                f"({info.get('chg_pct'):+.2f}%) "
+                f"  {name}: {info.get('close', info.get('price', 0)):.2f} "
+                f"({info.get('change_pct', info.get('chg_pct', 0)):+.2f}%) "
                 f"MA20:{info.get('ma20_pct'):+.2f}% "
                 f"MA60:{info.get('ma60_pct'):+.2f}% "
                 f"[{info.get('signal', '')}]"
             )
-        _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
+        _logger.info(f"  → 信号: {market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))}")
 
         _logger.info(">> 持仓状态")
-        positions = _get_portfolio_positions(vault)
+        positions = _get_portfolio_positions()
         if positions:
             for pos in positions:
                 _logger.info(f"  {pos['name']} {pos['shares']}股 @ ¥{pos['price']:.2f}")
@@ -389,7 +305,7 @@ def run() -> dict:
             _logger.info("  空仓")
 
         _logger.info(">> 核心池异动检查")
-        core_items = _get_core_pool_status(vault, engine)
+        core_items = _get_core_pool_status(engine)
         for item in core_items:
             _logger.info(f"  {item['name']}: {item.get('status', 'OK')}")
 
@@ -399,7 +315,7 @@ def run() -> dict:
         for news in news_items:
             _logger.info(f"  [{news['stock']}] {news['title']}")
 
-        weekly_bought = _get_weekly_buy_count(vault)
+        weekly_bought = _get_weekly_buy_count()
         _logger.info(f">> 本周买入: {weekly_bought}/2")
 
         discord_data = _build_discord_data(market_data, positions, core_items, weekly_bought, weekday)
@@ -427,7 +343,7 @@ def run() -> dict:
             "morning",
             "warning" if not ok else "success",
             {
-                "market_signal": market_data.get("market_signal", ""),
+                "market_signal": market_data.get("signal", market_data.get("market_signal", "")),
                 "positions_count": len(positions),
                 "core_pool_count": len(core_items),
                 "weekly_bought": weekly_bought,

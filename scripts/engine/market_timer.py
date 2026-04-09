@@ -48,11 +48,13 @@ _logger = get_logger("market_timer")
 # 大盘指数配置
 # ---------------------------------------------------------------------------
 _INDICES = {
-    "上证指数": "sh000001",
-    "深证成指": "sz399001",
-    "创业板指": "sz399006",
-    "科创50": "sh000688",
+    "上证指数": {"symbol": "sh000001", "market_code": "000001"},
+    "深证成指": {"symbol": "sz399001", "market_code": "399001"},
+    "创业板指": {"symbol": "sz399006", "market_code": "399006"},
+    "科创50": {"symbol": "sh000688", "market_code": "000688"},
 }
+
+_INDEX_NAME_BY_SYMBOL = {cfg["symbol"]: name for name, cfg in _INDICES.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,8 @@ class MarketTimer:
 
         self._signal: Literal["GREEN", "YELLOW", "RED", "CLEAR"] = "CLEAR"
         self._detail: dict = {}
+        self._snapshot: dict = {}
+        self._computed = False
 
     # ---------------------------------------------------------------------------
     # 公开接口
@@ -84,13 +88,18 @@ class MarketTimer:
 
     def get_signal(self) -> Literal["GREEN", "YELLOW", "RED", "CLEAR"]:
         """返回大盘信号"""
-        self._compute()
+        self._ensure_computed()
         return self._signal
 
     def get_detail(self) -> dict:
-        """返回详细数据（每次调用都会重新计算）"""
-        self._compute()
+        """返回详细数据（复用已计算的快照）"""
+        self._ensure_computed()
         return self._detail
+
+    def get_snapshot(self) -> dict:
+        """返回统一的大盘快照"""
+        self._ensure_computed()
+        return dict(self._snapshot)
 
     def get_position_multiplier(self) -> float:
         """
@@ -107,10 +116,16 @@ class MarketTimer:
     # 核心计算
     # ---------------------------------------------------------------------------
 
+    def _ensure_computed(self) -> None:
+        if self._computed:
+            return
+        self._compute()
+
     def _compute(self) -> None:
         """计算大盘信号"""
         index_data = {}
-        for name, symbol in _INDICES.items():
+        for name, cfg in _INDICES.items():
+            symbol = cfg["symbol"]
             try:
                 data = self._fetch_index_data(symbol)
                 index_data[name] = data
@@ -144,6 +159,8 @@ class MarketTimer:
 
         if total == 0:
             self._signal = "CLEAR"
+            self._snapshot = self._build_snapshot(index_data, self._signal)
+            self._computed = True
             return
 
         green_pct = green_count / total
@@ -158,20 +175,121 @@ class MarketTimer:
             self._signal = "YELLOW"
         else:
             self._signal = "RED"
+        self._snapshot = self._build_snapshot(index_data, self._signal)
+        self._computed = True
+
+    @staticmethod
+    def _index_view(name: str, data: dict) -> dict:
+        view = {
+            "name": name,
+            "symbol": data.get("symbol", ""),
+            "market_code": data.get("market_code", ""),
+            "as_of_date": data.get("as_of_date", ""),
+            "close": data.get("close", 0),
+            "ma20": data.get("ma20"),
+            "ma60": data.get("ma60"),
+            "ma20_pct": data.get("ma20_pct", 0),
+            "ma60_pct": data.get("ma60_pct", 0),
+            "above_ma20": data.get("above_ma20", False),
+            "above_ma60_days": data.get("above_ma60_days", 0),
+            "below_ma60_days": data.get("below_ma60_days", 0),
+            "green_streak": data.get("green_streak", 0),
+            "red_streak": data.get("red_streak", 0),
+            "change_pct": data.get("change_pct", 0),
+            "signal": data.get("signal", ""),
+            "source": data.get("source", ""),
+            "source_chain": list(data.get("source_chain", [])),
+            "stale": data.get("stale", False),
+        }
+        if data.get("error"):
+            view["error"] = data["error"]
+        return view
+
+    def _build_snapshot(self, index_data: dict, signal: str) -> dict:
+        indices = {}
+        sources = []
+        source_chain = []
+        as_of_dates = []
+
+        for name, data in index_data.items():
+            if "error" in data:
+                indices[name] = {"name": name, "error": data["error"]}
+                continue
+            view = self._index_view(name, data)
+            indices[name] = view
+            if view.get("source"):
+                sources.append(view["source"])
+            source_chain.extend(view.get("source_chain", []))
+            if view.get("as_of_date"):
+                as_of_dates.append(view["as_of_date"])
+
+        unique_sources = [item for item in dict.fromkeys(sources) if item]
+        top_source = unique_sources[0] if len(unique_sources) == 1 else ("mixed" if unique_sources else "unknown")
+        top_source_chain = [item for item in dict.fromkeys(source_chain) if item]
+        top_as_of_date = sorted(as_of_dates)[-1] if as_of_dates else datetime.now().strftime("%Y-%m-%d")
+
+        market = {}
+        for name, data in indices.items():
+            if "error" in data:
+                continue
+            market[name] = {
+                "price": data.get("close", 0),
+                "chg_pct": data.get("change_pct", 0),
+                "ma20_pct": data.get("ma20_pct", 0),
+                "ma60_pct": data.get("ma60_pct", 0),
+                "ma60_days": data.get("below_ma60_days", 0),
+                "signal": data.get("signal", ""),
+            }
+
+        return {
+            "as_of_date": top_as_of_date,
+            "signal": signal,
+            "market_signal": signal,
+            "source": top_source,
+            "source_chain": top_source_chain,
+            "indices": indices,
+            "market": market,
+        }
+
+    def _normalize_cached_payload(self, name: str, symbol: str, market_code: str, payload: dict) -> dict:
+        normalized = dict(payload)
+        normalized.setdefault("name", name)
+        normalized.setdefault("symbol", symbol)
+        normalized.setdefault("market_code", market_code)
+        normalized.setdefault("as_of_date", datetime.now().strftime("%Y-%m-%d"))
+        normalized["stale"] = True
+        normalized["source"] = normalized.get("source", "cache_market_timer")
+
+        source_chain = list(normalized.get("source_chain", []))
+        if "cache_market_timer" not in source_chain:
+            source_chain.append("cache_market_timer")
+        normalized["source_chain"] = [item for item in dict.fromkeys(source_chain) if item]
+
+        if not normalized.get("signal"):
+            close = normalized.get("close", 0)
+            ma20 = normalized.get("ma20")
+            below_ma60_days = normalized.get("below_ma60_days", 0)
+            if below_ma60_days >= self.clear_days:
+                normalized["signal"] = "CLEAR"
+            elif ma20:
+                normalized["signal"] = "GREEN" if close >= ma20 else "RED"
+            else:
+                normalized["signal"] = "RED"
+
+        return normalized
 
     def _fetch_index_data(self, symbol: str) -> dict:
         """
         获取单个指数的技术数据（MX优先 → akshare fallback）
         """
         cache_key = symbol.replace("/", "_")
+        index_name = _INDEX_NAME_BY_SYMBOL.get(symbol, symbol)
+        market_code = _INDICES.get(index_name, {}).get("market_code", "")
         # MX 优先：查指数历史数据
         try:
             from scripts.mx.mx_data import MXData
-            index_names = {"sh000001": "上证指数", "sz399001": "深证成指",
-                           "sz399006": "创业板指", "sh000688": "科创50"}
-            idx_name = index_names.get(symbol, symbol)
             mx = MXData()
-            result = mx.query(f"{idx_name} 近80个交易日收盘价")
+            result = mx.query(f"{index_name} 近80个交易日收盘价")
             data = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
             dto_list = data.get("dataTableDTOList", [])
 
@@ -208,6 +326,9 @@ class MarketTimer:
                 ma20 = float(arr.rolling(20).mean().iloc[-1]) if len(arr) >= 20 else None
                 ma60 = float(arr.rolling(60).mean().iloc[-1]) if len(arr) >= 60 else None
                 close = closes[-1]
+                ma20_pct = ((close / ma20) - 1) * 100 if ma20 else 0
+                ma60_pct = ((close / ma60) - 1) * 100 if ma60 else 0
+                change_pct = ((close / closes[-2]) - 1) * 100 if len(closes) > 1 and closes[-2] else 0
 
                 # 连续站上/跌破 MA20
                 green_streak = 0
@@ -235,17 +356,24 @@ class MarketTimer:
                         if above_ma60_days + below_ma60_days >= self.clear_days:
                             break
 
-                _logger.info(f"[market_timer] MX 成功 {idx_name}: close={close} ma20={ma20}")
+                _logger.info(f"[market_timer] MX 成功 {index_name}: close={close} ma20={ma20}")
                 payload = {
+                    "name": index_name,
+                    "symbol": symbol,
+                    "market_code": market_code,
+                    "as_of_date": datetime.now().strftime("%Y-%m-%d"),
                     "close": close,
                     "ma20": round(ma20, 2) if ma20 else None,
                     "ma60": round(ma60, 2) if ma60 else None,
+                    "ma20_pct": ma20_pct,
+                    "ma60_pct": ma60_pct,
                     "above_ma20": close >= ma20 if ma20 else False,
                     "above_ma60_days": above_ma60_days,
                     "below_ma60_days": below_ma60_days,
                     "green_streak": green_streak,
                     "red_streak": red_streak,
-                    "change_pct": 0,
+                    "signal": "CLEAR" if below_ma60_days >= self.clear_days else ("GREEN" if close >= ma20 else "RED"),
+                    "change_pct": change_pct,
                     "source": "mx_data",
                     "source_chain": ["mx_data"],
                     "stale": False,
@@ -261,19 +389,15 @@ class MarketTimer:
         except Exception as e:
             cached = load_json_cache("market_timer", cache_key, max_age_seconds=86400)
             if cached and isinstance(cached.get("data"), dict):
-                payload = cached["data"]
-                payload["stale"] = True
+                payload = self._normalize_cached_payload(index_name, symbol, market_code, cached["data"])
                 payload["cached_at"] = cached.get("cached_at")
-                payload["source_chain"] = list(payload.get("source_chain", [])) + ["cache_market_timer"]
                 return payload
             raise ValueError(f"无法获取 {symbol} 数据: {e}")
         if df is None or df.empty:
             cached = load_json_cache("market_timer", cache_key, max_age_seconds=86400)
             if cached and isinstance(cached.get("data"), dict):
-                payload = cached["data"]
-                payload["stale"] = True
+                payload = self._normalize_cached_payload(index_name, symbol, market_code, cached["data"])
                 payload["cached_at"] = cached.get("cached_at")
-                payload["source_chain"] = list(payload.get("source_chain", [])) + ["cache_market_timer"]
                 return payload
             raise ValueError(f"无法获取 {symbol} 数据")
 
@@ -285,6 +409,8 @@ class MarketTimer:
         close = float(latest["close"])
         ma20 = float(latest["MA20"]) if pd.notna(latest["MA20"]) else None
         ma60 = float(latest["MA60"]) if pd.notna(latest["MA60"]) else None
+        ma20_pct = ((close / ma20) - 1) * 100 if ma20 else 0
+        ma60_pct = ((close / ma60) - 1) * 100 if ma60 else 0
 
         # 连续站上/跌破 MA20 天数
         green_streak = 0
@@ -320,15 +446,22 @@ class MarketTimer:
         change_pct = float(df.iloc[-1].get("pct_change", 0) * 100) if "pct_change" in df.columns else 0
 
         payload = {
+            "name": index_name,
+            "symbol": symbol,
+            "market_code": market_code,
+            "as_of_date": str(latest.get("date", datetime.now().strftime("%Y-%m-%d"))),
             "close": close,
             "ma20": ma20,
             "ma60": ma60,
+            "ma20_pct": ma20_pct,
+            "ma60_pct": ma60_pct,
             "above_ma20": close >= ma20 if ma20 else False,
             "above_ma60_days": above_ma60_days,
             "below_ma60_days": below_ma60_days,
             "green_streak": green_streak,
             "red_streak": red_streak,
             "change_pct": change_pct,
+            "signal": "CLEAR" if below_ma60_days >= self.clear_days else ("GREEN" if close >= ma20 else "RED"),
             "source": "akshare",
             "source_chain": ["mx_data_failed", "akshare"],
             "stale": False,
@@ -368,13 +501,23 @@ def get_position_multiplier() -> float:
     return _timer_instance.get_position_multiplier()
 
 
+def load_market_snapshot() -> dict:
+    """统一市场快照读接口"""
+    global _timer_instance
+    if _timer_instance is None:
+        _timer_instance = MarketTimer()
+    return _timer_instance.get_snapshot()
+
+
 if __name__ == "__main__":
     print("大盘择时判断")
     print("=" * 40)
-    signal = get_signal()
-    detail = get_detail()
+    snapshot = load_market_snapshot()
+    signal = snapshot.get("signal", "CLEAR")
+    detail = snapshot.get("indices", {})
     print(f"信号: {signal}")
     print(f"仓位系数: {get_position_multiplier()}")
+    print(f"来源: {snapshot.get('source', '')} / {' > '.join(snapshot.get('source_chain', []))}")
     print()
     for name, data in detail.items():
         if isinstance(data, dict) and "error" not in data:

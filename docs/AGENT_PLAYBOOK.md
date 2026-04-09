@@ -11,6 +11,8 @@
 
 ## 推荐启动顺序
 
+说明：CLI 已兼容 `bin/trade --json doctor` 和 `bin/trade doctor --json`，下面示例统一使用 `command --json` 的推荐写法。
+
 ### 1. 先发现能力
 
 ```bash
@@ -28,11 +30,13 @@ bin/trade templates --json
 
 ```bash
 bin/trade doctor --json
+bin/trade state audit --json
 ```
 
 处理建议：
 - `error`：立即停止
 - `warning`：继续执行，但把 warning 原因写进摘要
+- `state audit=drift`：优先修正 pool 投影漂移，再继续执行
 
 ### 3. 最后跑工作流
 

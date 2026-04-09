@@ -29,6 +29,7 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.data_engine import DataEngine
+from scripts.state import load_market_snapshot, load_portfolio_snapshot
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_noon_check
 from scripts.utils.logger import get_logger
@@ -45,47 +46,45 @@ def run() -> dict:
 
     _logger.info(f"[NOON] 午休检查 {today_str} ({weekday})")
     try:
-        vault = ObsidianVault()
         engine = DataEngine()
 
         _logger.info(">> 大盘数据")
-        indices = {"上证指数": "000001", "创业板指": "399006"}
+        market_snapshot = load_market_snapshot()
+        indices = market_snapshot.get("indices") or market_snapshot.get("market") or {}
         market_info = {}
-        for name, code in indices.items():
-            rt = engine.get_realtime([code])
-            stock_data = rt.get("data", {}).get(code, {})
-            if stock_data:
-                price = stock_data.get("price", 0)
-                chg_pct = stock_data.get("change_pct", 0)
-                high = stock_data.get("high", 0)
-                low = stock_data.get("low", 0)
-                market_info[name] = {
-                    "price": price,
-                    "chg_pct": chg_pct,
-                    "high": high,
-                    "low": low,
-                }
-                _logger.info(f"  {name}: {price} ({chg_pct:+.2f}%) 区间:{low}～{high}")
+        for name, info in indices.items():
+            if not isinstance(info, dict):
+                _logger.warning(f"  {name}: 数据不可用")
+                continue
+            if info.get("error"):
+                _logger.warning(f"  {name}: {info.get('error', '数据不可用')}")
+                continue
+            price = info.get("close", info.get("price", 0))
+            chg_pct = info.get("change_pct", info.get("chg_pct", 0))
+            market_info[name] = {
+                "price": price,
+                "chg_pct": chg_pct,
+                "high": info.get("high", 0),
+                "low": info.get("low", 0),
+                "signal": info.get("signal", ""),
+            }
+            high = market_info[name]["high"]
+            low = market_info[name]["low"]
+            _logger.info(f"  {name}: {price} ({chg_pct:+.2f}%) 区间:{low}～{high}")
 
         _logger.info(">> 持仓状态")
-        portfolio = vault.read_portfolio()
-        holdings = portfolio.get("holdings", [])
-        active = [
-            h for h in holdings
-            if str(h.get("股票", "")).strip() not in ["", "—", "空仓"]
-            and int(float(h.get("持有股数", 0) or 0)) > 0
-        ]
+        active = load_portfolio_snapshot(scope="cn_a_system").get("positions", [])
 
         position_list = []
         tips = []
         if active:
-            codes = [str(h.get("代码", "")).strip() for h in active]
+            codes = [str(h.get("code", "")).strip() for h in active]
             rt = engine.get_realtime(codes)
             for h in active:
-                code = str(h.get("代码", "")).strip()
-                name = str(h.get("股票", "")).strip()
-                cost = float(h.get("平均成本", 0) or 0)
-                shares = int(float(h.get("持有股数", 0) or 0))
+                code = str(h.get("code", "")).strip()
+                name = str(h.get("name", "")).strip()
+                cost = float(h.get("avg_cost", 0) or 0)
+                shares = int(float(h.get("shares", 0) or 0))
                 stock_data = rt.get("data", {}).get(code, {})
                 price = stock_data.get("price", cost)
                 pnl_pct = ((price / cost) - 1) * 100 if cost > 0 else 0
@@ -143,6 +142,7 @@ def run() -> dict:
                 "tips_count": len(tips),
                 "discord_ok": ok,
                 "discord_error": err,
+                "market_signal": market_snapshot.get("signal", market_snapshot.get("market_signal", "")),
             },
             today_str,
         )

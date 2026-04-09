@@ -35,6 +35,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 from scripts.engine.data_engine import DataEngine
+from scripts.state import load_activity_summary, load_market_snapshot, load_pool_snapshot, load_portfolio_snapshot
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_evening_report
 from scripts.utils.config_loader import get_strategy
@@ -93,31 +94,33 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
         list of dict，每个元素包含 {name, code, old_price, new_price, pct_change, triggered}
     """
     changes = []
-    portfolio = vault.read_portfolio()
-    holdings = portfolio.get("holdings", [])
-
-    active = [
-        h for h in holdings
-        if str(h.get("代码", "")).strip() not in ["", "—"]
-        and str(h.get("股票", "")).strip() not in ["", "—", "空仓"]
-        and int(float(h.get("持有股数", 0) or 0)) > 0
-    ]
+    snapshot = load_portfolio_snapshot(scope="cn_a_system")
+    active = snapshot.get("positions", [])
+    projection_rows = {}
+    try:
+        projection_rows = {
+            str(row.get("代码", "")).strip(): row
+            for row in vault.read_portfolio().get("holdings", [])
+        }
+    except Exception:
+        projection_rows = {}
 
     if not active:
         _logger.info("无持仓，无需更新价格")
         return changes
 
-    codes = [str(h.get("代码", "")).strip() for h in active]
+    codes = [str(h.get("code", "")).strip() for h in active]
     rt = engine.get_realtime(codes)
 
     updated_content = vault.read(vault.portfolio_path)
 
     for h in active:
-        code = str(h.get("代码", "")).strip()
-        name = str(h.get("股票", "")).strip()
-        old_price = float(h.get("最新价", h.get("平均成本", 0)) or 0)
-        cost = float(h.get("平均成本", 0) or 0)
-        shares = int(float(h.get("持有股数", 0) or 0))
+        code = str(h.get("code", "")).strip()
+        name = str(h.get("name", "")).strip()
+        old_price = float(h.get("current_price", h.get("avg_cost", 0)) or 0)
+        cost = float(h.get("avg_cost", 0) or 0)
+        shares = int(float(h.get("shares", 0) or 0))
+        projection_row = projection_rows.get(code, {})
 
         # 获取最新价格
         stock_data = rt.get("data", {}).get(code, {})
@@ -158,8 +161,8 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
         # 格式: | 名称 | 代码 | 首次买入价 | 加仓次数 | 平均成本 | 持有股数 | 市值 | 止损价 | 绝对止损 | 止盈1 | 状态 |
         new_row = (
             f"| {name} | {code} | "
-            f"{h.get('首次买入价', h.get('平均成本', '—'))} | "
-            f"{h.get('加仓次数', 0)} | "
+            f"{projection_row.get('首次买入价', projection_row.get('平均成本', cost))} | "
+            f"{projection_row.get('加仓次数', 0)} | "
             f"{cost} | {shares} | "
             f"¥{new_value:,.0f} | "
             f"{stops['stop_loss']} | {stops['absolute_stop']} | "
@@ -168,9 +171,9 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
         )
 
         # 匹配该股票的持仓行
-        pattern = rf'\| {re.escape(name)} \|[^\n]+\|'
-        if re.search(pattern, updated_content):
-            updated_content = re.sub(pattern, new_row, updated_content)
+        pattern = rf'^\| {re.escape(name)} \| {re.escape(code)} \|[^\n]+\|$'
+        if re.search(pattern, updated_content, flags=re.MULTILINE):
+            updated_content = re.sub(pattern, new_row, updated_content, flags=re.MULTILINE)
             _logger.info(
                 f"  {name}: ¥{old_price:.2f} → ¥{new_price:.2f} ({pct_change:+.2f}%) "
                 f"{'⚠️ ' + ','.join(triggered) if triggered else '✅'}"
@@ -193,13 +196,13 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
                              market_data: dict, position_changes: list) -> str:
     """生成明日计划 markdown 内容"""
     strategy = get_strategy()
-    risk_cfg = strategy.get("risk", {})
     market_timer_cfg = strategy.get("market_timer", {})
 
-    sh_info = market_data.get("market", {}).get("上证指数", {})
-    cy_info = market_data.get("market", {}).get("创业板指", {})
+    market_indices = market_data.get("indices") or market_data.get("market") or {}
+    sh_info = market_indices.get("上证指数", {})
+    cy_info = market_indices.get("创业板指", {})
 
-    signal = market_data.get("market_signal", "CLEAR")
+    signal = market_data.get("signal", market_data.get("market_signal", "CLEAR"))
     green_days = market_timer_cfg.get("green_days", 3)
     red_days = market_timer_cfg.get("red_days", 5)
 
@@ -207,8 +210,8 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
 
     # 大盘状态
     lines.append("### 大盘状态")
-    sh_above = sh_info.get("ma20_pct", 0) >= 0
-    cy_above = cy_info.get("ma20_pct", 0) >= 0
+    sh_above = sh_info.get("above_ma20", False)
+    cy_above = cy_info.get("above_ma20", False)
     def _f(v, fmt=".2f"):
         """安全格式化数字，失败返回 '—'"""
         try:
@@ -216,14 +219,14 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
         except (TypeError, ValueError):
             return "—"
 
-    sh_ma60_days = sh_info.get("ma60_days", 0)
-    sh_price = sh_info.get("price", "—")
+    sh_ma60_days = sh_info.get("below_ma60_days", sh_info.get("ma60_days", 0))
+    sh_price = sh_info.get("close", sh_info.get("price", "—"))
     lines.append(
         f"- 上证：{_f(sh_price)} "
         f"{'✅' if sh_above else '❌'}（vs MA20 {_f(sh_info.get('ma20_pct', 0), '+.2f')}% / "
         f"MA60 {_f(sh_info.get('ma60_pct', 0), '+.2f')}%）| MA60下方{sh_ma60_days}日"
     )
-    cy_price = cy_info.get("price", "—")
+    cy_price = cy_info.get("close", cy_info.get("price", "—"))
     lines.append(
         f"- 创业板：{_f(cy_price)} "
         f"{'✅' if cy_above else '❌'}（vs MA20 {_f(cy_info.get('ma20_pct', 0), '+.2f')}% / "
@@ -372,11 +375,21 @@ def run() -> dict:
         strategy_cfg = get_strategy()
 
         _logger.info(">> 大盘数据")
-        from scripts.pipeline.morning import _get_market_data
-        market_data = _get_market_data(engine)
-        for name, info in market_data.get("market", {}).items():
-            _logger.info(f"  {name}: {info.get('price'):.2f} ({info.get('chg_pct'):+.2f}%) [{info.get('signal', '')}]")
-        _logger.info(f"  → 信号: {market_data.get('market_signal', 'UNKNOWN')}")
+        market_data = load_market_snapshot()
+        market_indices = market_data.get("indices") or market_data.get("market") or {}
+        for name, info in market_indices.items():
+            if not isinstance(info, dict):
+                _logger.warning(f"  {name}: 数据不可用")
+                continue
+            if info.get("error"):
+                _logger.warning(f"  {name}: {info.get('error', '数据不可用')}")
+                continue
+            _logger.info(
+                f"  {name}: {info.get('close', info.get('price', 0)):.2f} "
+                f"({info.get('change_pct', info.get('chg_pct', 0)):+.2f}%) "
+                f"[{info.get('signal', '')}]"
+            )
+        _logger.info(f"  → 信号: {market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))}")
 
         _logger.info(">> 更新持仓价格...")
         position_changes = _update_portfolio_prices(vault, engine)
@@ -407,31 +420,25 @@ def run() -> dict:
             for t in change.get("triggered", []):
                 alerts.append(f"{change['name']}: {t}@{change.get('new_price', '?')}")
 
-        portfolio = vault.read_portfolio()
-        holdings = portfolio.get("holdings", [])
-        weekly_bought = sum(
-            int(float(h.get("加仓次数", 0) or 0)) + 1
-            for h in holdings
-            if str(h.get("股票", "")).strip() not in ["", "—", "空仓"]
-            and int(float(h.get("持有股数", 0) or 0)) > 0
-        )
+        activity = load_activity_summary("week", scope="cn_a_system")
+        weekly_bought = int(activity.get("weekly_buy_count", activity.get("buy_count", 0)) or 0)
         weekly_limit = strategy_cfg.get("risk", {}).get("position", {}).get("weekly_max", 2)
 
-        core_pool = vault.read_core_pool()
+        core_pool = load_pool_snapshot().get("core_pool", [])
         discord_core = []
         for item in core_pool:
-            name = str(item.get("股票", ""))
-            raw_score = str(item.get("四维总分", item.get("总分", 0))).replace("**", "").strip()
+            name = str(item.get("name", item.get("股票", "")))
+            raw_score = str(item.get("total_score", item.get("四维总分", item.get("总分", 0)))).replace("**", "").strip()
             try:
                 score = float(raw_score) if raw_score else 0.0
             except (TypeError, ValueError):
                 score = 0.0
-            note = str(item.get("备注", ""))
+            note = str(item.get("note", item.get("备注", "")))
             if name and name not in ["", "—"]:
                 discord_core.append({"name": name, "score": score, "note": note})
 
         tomorrow_plan = []
-        signal = market_data.get("market_signal", "")
+        signal = market_data.get("signal", market_data.get("market_signal", ""))
         if signal == "GREEN":
             tomorrow_plan.append("🟢 GREEN信号，可正常买入")
         elif signal == "YELLOW":
@@ -445,11 +452,12 @@ def run() -> dict:
             "weekday": weekday,
             "market": {
                 name: {
-                    "price": info.get("price", 0),
-                    "chg_pct": info.get("chg_pct", 0),
+                    "price": info.get("close", info.get("price", 0)),
+                    "chg_pct": info.get("change_pct", info.get("chg_pct", 0)),
                     "signal": info.get("signal", ""),
                 }
-                for name, info in market_data.get("market", {}).items()
+                for name, info in market_indices.items()
+                if isinstance(info, dict) and not info.get("error")
             },
             "positions": discord_positions,
             "total_value": total_value,
@@ -480,7 +488,7 @@ def run() -> dict:
             "evening",
             "warning" if not ok else "success",
             {
-                "market_signal": market_data.get("market_signal", ""),
+                "market_signal": market_data.get("signal", market_data.get("market_signal", "")),
                 "position_change_count": len(position_changes),
                 "tomorrow_date": tomorrow_str,
                 "discord_ok": ok,

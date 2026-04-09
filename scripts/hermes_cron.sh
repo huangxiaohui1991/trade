@@ -61,7 +61,7 @@ echo "=== [Hermes Cron] $(date '+%Y-%m-%d %H:%M:%S') MODE=$MODE ==="
 cd "$SCRIPT_DIR"
 
 echo ">> 运行 doctor 检查"
-DOCTOR_JSON=$("$PYTHON" -m scripts.cli.trade --json doctor)
+DOCTOR_JSON=$("$PYTHON" -m scripts.cli.trade doctor --json)
 echo "$DOCTOR_JSON"
 
 DOCTOR_STATUS=$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status","error"))' "$DOCTOR_JSON")
@@ -74,23 +74,23 @@ fi
 case "$MODE" in
     morning)
         echo ">> 盘前流程（8:25）"
-        "$PYTHON" -m scripts.cli.trade --json orchestrate morning_brief 2>&1
+        "$PYTHON" -m scripts.cli.trade orchestrate morning_brief --json 2>&1
         ;;
     noon)
         echo ">> 午休检查（11:55）"
-        "$PYTHON" -m scripts.cli.trade --json orchestrate noon_check 2>&1
+        "$PYTHON" -m scripts.cli.trade orchestrate noon_check --json 2>&1
         ;;
     evening)
         echo ">> 收盘流程（15:35）"
-        "$PYTHON" -m scripts.cli.trade --json orchestrate close_review 2>&1
+        "$PYTHON" -m scripts.cli.trade orchestrate close_review --json 2>&1
         ;;
     scoring)
         echo ">> 核心池评分（15:40）"
-        "$PYTHON" -m scripts.cli.trade --json run scoring 2>&1
+        "$PYTHON" -m scripts.cli.trade run scoring --json 2>&1
         ;;
     weekly)
         echo ">> 周报（周日20:00）"
-        "$PYTHON" -m scripts.cli.trade --json orchestrate weekly_review 2>&1
+        "$PYTHON" -m scripts.cli.trade orchestrate weekly_review --json 2>&1
         ;;
     sentiment)
         echo ">> 舆情监控（TrendRadar）"

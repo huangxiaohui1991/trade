@@ -15,9 +15,10 @@ engine/trading_record.py — 交易记录与 P&L 追踪
 import os
 import sys
 import csv
+import importlib
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,17 @@ _HOLDINGS: dict = {}
 
 TRADE_RECORD_DIR = Path(_PROJECT_ROOT) / "data" / "交易记录"
 TRADE_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_ACTIVITY_SCOPE = "cn_a_system"
+_ACTIVITY_STATE_MODULES = (
+    "scripts.state",
+    "scripts.state.service",
+    "scripts.utils.runtime_state",
+    "scripts.engine.trade_state",
+    "scripts.engine.activity_state",
+    "scripts.engine.state",
+    "scripts.engine.ledger_state",
+    "scripts.pipeline.state",
+)
 
 
 def _get_record_path(dt: Optional[date] = None) -> Path:
@@ -52,6 +64,259 @@ def _ensure_header(path: Path):
 
 def _holdings_key(code: str) -> str:
     return code.strip()
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value in [None, ""]:
+            return default
+        if isinstance(value, str):
+            value = value.replace("¥", "").replace(",", "").replace("%", "").strip()
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value in [None, ""]:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_trade_event(event: dict, scope: str = DEFAULT_ACTIVITY_SCOPE) -> dict:
+    """把不同来源的交易事件统一成周报可消费的结构。"""
+    if not isinstance(event, dict):
+        event = {}
+
+    raw_action = str(
+        event.get("action")
+        or event.get("side")
+        or event.get("operation")
+        or event.get("操作")
+        or ""
+    ).strip()
+    action_map = {
+        "买入": "BUY",
+        "卖出": "SELL",
+        "buy": "BUY",
+        "sell": "SELL",
+        "BUY": "BUY",
+        "SELL": "SELL",
+    }
+    action = action_map.get(raw_action, raw_action.upper() if raw_action else "UNKNOWN")
+
+    trade_date = str(
+        event.get("trade_date")
+        or event.get("date")
+        or event.get("日期")
+        or ""
+    ).strip()
+    if len(trade_date) > 10:
+        trade_date = trade_date[:10]
+
+    timestamp = str(
+        event.get("timestamp")
+        or event.get("trade_time")
+        or event.get("记录时间")
+        or event.get("datetime")
+        or ""
+    ).strip()
+
+    return {
+        "scope": str(event.get("scope") or scope or DEFAULT_ACTIVITY_SCOPE),
+        "trade_date": trade_date,
+        "timestamp": timestamp,
+        "action": action,
+        "code": str(
+            event.get("code")
+            or event.get("stock_code")
+            or event.get("股票代码")
+            or event.get("secuCode")
+            or ""
+        ).strip(),
+        "name": str(
+            event.get("name")
+            or event.get("stock_name")
+            or event.get("股票")
+            or event.get("名称")
+            or event.get("stockName")
+            or ""
+        ).strip(),
+        "shares": _safe_int(
+            event.get("shares")
+            or event.get("qty")
+            or event.get("volume")
+            or event.get("数量")
+            or event.get("currentQty")
+            or 0
+        ),
+        "price": round(_safe_float(
+            event.get("price")
+            or event.get("trade_price")
+            or event.get("成交价")
+            or event.get("价格")
+            or 0
+        ), 3),
+        "amount": round(_safe_float(
+            event.get("amount")
+            or event.get("成交额")
+            or event.get("金额")
+            or 0
+        ), 2),
+        "realized_pnl": round(_safe_float(
+            event.get("realized_pnl")
+            or event.get("pnl")
+            or event.get("盈亏")
+            or 0
+        ), 2),
+        "reason": str(
+            event.get("reason")
+            or event.get("卖出原因")
+            or event.get("备注")
+            or ""
+        ).strip(),
+        "reason_code": str(
+            event.get("reason_code")
+            or event.get("reasonCode")
+            or ""
+        ).strip(),
+        "source": str(event.get("source") or "structured_state"),
+    }
+
+
+def _event_sort_key(event: dict):
+    trade_date = str(event.get("trade_date", "")).strip()
+    timestamp = str(event.get("timestamp", "")).strip()
+    return (trade_date, timestamp)
+
+
+def _load_external_activity_summary(window: int, scope: str) -> Optional[dict]:
+    """优先尝试接入新的统一状态接口。"""
+    for module_name in _ACTIVITY_STATE_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        loader = getattr(module, "load_activity_summary", None)
+        if callable(loader):
+            try:
+                return loader(window, scope=scope)
+            except Exception:
+                continue
+    return None
+
+
+def _load_activity_summary_from_records(records: list, window: int,
+                                       scope: str) -> dict:
+    """从本地 CSV 交易记录回退生成活动摘要。"""
+    cutoff = date.today() - timedelta(days=max(window - 1, 0))
+    trade_events = []
+    for row in records:
+        trade_date = str(row.get("日期", "")).strip()
+        if not trade_date:
+            continue
+        try:
+            row_date = datetime.strptime(trade_date[:10], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if row_date < cutoff:
+            continue
+
+        action = str(row.get("操作", "")).strip().upper()
+        pnl = _safe_float(row.get("盈亏", 0), 0.0)
+        trade_events.append(_normalize_trade_event({
+            "scope": scope,
+            "trade_date": trade_date[:10],
+            "timestamp": row.get("记录时间", ""),
+            "action": action,
+            "code": row.get("股票代码", ""),
+            "name": row.get("名称", ""),
+            "shares": row.get("数量", 0),
+            "price": row.get("价格", 0),
+            "amount": row.get("金额", 0),
+            "realized_pnl": pnl if action == "SELL" else 0.0,
+            "reason": row.get("卖出原因", ""),
+            "source": "csv_fallback",
+        }, scope=scope))
+
+    buy_count = sum(1 for event in trade_events if event["action"] == "BUY")
+    sell_count = sum(1 for event in trade_events if event["action"] == "SELL")
+    realized_pnl = round(
+        sum(event["realized_pnl"] for event in trade_events if event["action"] == "SELL"),
+        2,
+    )
+    trade_events.sort(key=_event_sort_key)
+
+    return {
+        "scope": scope,
+        "window": window,
+        "weekly_buy_count": buy_count,
+        "weekly_sell_count": sell_count,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "trade_count": len(trade_events),
+        "realized_pnl": realized_pnl,
+        "trade_events": trade_events,
+        "source": "csv_fallback",
+    }
+
+
+def load_activity_summary(window: int, scope: str = DEFAULT_ACTIVITY_SCOPE) -> dict:
+    """
+    读取结构化交易活动摘要。
+
+    优先使用新的统一状态接口；如果尚未接通，则回退到本地 CSV 记录。
+    """
+    external = _load_external_activity_summary(window, scope)
+    if external:
+        raw_trade_events = external.get("trade_events", []) or []
+        trade_events = [
+            _normalize_trade_event(event, scope=scope)
+            for event in raw_trade_events
+        ]
+
+        buy_count = _safe_int(
+            external.get("weekly_buy_count")
+            or external.get("buy_count")
+            or sum(1 for event in trade_events if event["action"] == "BUY")
+        )
+        sell_count = _safe_int(
+            external.get("weekly_sell_count")
+            or external.get("sell_count")
+            or sum(1 for event in trade_events if event["action"] == "SELL")
+        )
+        realized_pnl = round(
+            _safe_float(external.get("realized_pnl", 0.0)),
+            2,
+        )
+        if realized_pnl == 0.0 and trade_events:
+            realized_pnl = round(
+                sum(
+                    event["realized_pnl"]
+                    for event in trade_events
+                    if event["action"] == "SELL"
+                ),
+                2,
+            )
+        trade_events.sort(key=_event_sort_key)
+
+        return {
+            "scope": scope,
+            "window": window,
+            "weekly_buy_count": buy_count,
+            "weekly_sell_count": sell_count,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "trade_count": _safe_int(external.get("trade_count", len(trade_events))),
+            "realized_pnl": realized_pnl,
+            "trade_events": trade_events,
+            "source": str(external.get("source") or "external_state"),
+        }
+
+    return _load_activity_summary_from_records(load_all_records(), window, scope)
 
 
 def record_buy(code: str, name: str, price: float, shares: int,
@@ -269,18 +534,26 @@ def calc_stats(records: Optional[list] = None) -> dict:
 
 def get_weekly_buy_count(records: Optional[list] = None) -> int:
     """本周买入次数（用于风控：每周最多2笔）"""
-    if records is None:
-        records = load_all_records()
-
-    today = date.today()
-    week_start = today.isocalendar()[1]
-    year = today.year
-
-    buys = [r for r in records
-            if r.get("操作") == "BUY"
-            and r.get("日期", "")[:4] == str(year)
-            and datetime.strptime(r["日期"], "%Y-%m-%d").isocalendar()[1] == week_start]
-    return len(buys)
+    if records is not None:
+        today = date.today()
+        week_start = today.isocalendar()[1]
+        year = today.year
+        total = 0
+        for r in records:
+            if r.get("操作") != "BUY":
+                continue
+            trade_date = str(r.get("日期", "")).strip()
+            if len(trade_date) < 10:
+                continue
+            try:
+                trade_dt = datetime.strptime(trade_date[:10], "%Y-%m-%d")
+            except Exception:
+                continue
+            if trade_dt.year == year and trade_dt.isocalendar()[1] == week_start:
+                total += 1
+        return total
+    summary = load_activity_summary(7, scope=DEFAULT_ACTIVITY_SCOPE)
+    return _safe_int(summary.get("weekly_buy_count", summary.get("buy_count", 0)))
 
 
 def get_open_positions() -> dict:
