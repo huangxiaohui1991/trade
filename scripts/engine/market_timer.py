@@ -160,21 +160,95 @@ class MarketTimer:
 
     def _fetch_index_data(self, symbol: str) -> dict:
         """
-        获取单个指数的技术数据
-
-        Returns:
-            {
-                "close": float,
-                "ma20": float,
-                "ma60": float,
-                "above_ma20": bool,
-                "above_ma60_days": int,  # 连续站上MA60天数
-                "below_ma60_days": int,   # 连续跌破MA60天数
-                "green_streak": int,      # 连续站上MA20天数
-                "red_streak": int,        # 连续跌破MA20天数
-                "change_pct": float,
-            }
+        获取单个指数的技术数据（MX优先 → akshare fallback）
         """
+        # MX 优先：查指数历史数据
+        try:
+            from scripts.mx.mx_data import MXData
+            index_names = {"sh000001": "上证指数", "sz399001": "深证成指",
+                           "sz399006": "创业板指", "sh000688": "科创50"}
+            idx_name = index_names.get(symbol, symbol)
+            mx = MXData()
+            result = mx.query(f"{idx_name} 近80个交易日收盘价")
+            data = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
+            dto_list = data.get("dataTableDTOList", [])
+
+            for dto in dto_list:
+                table = dto.get("table", {})
+                heads = table.get("headName", [])
+                if not isinstance(heads, list) or len(heads) < 20:
+                    continue
+
+                data_keys = [k for k in table.keys() if k != "headName"]
+                if not data_keys:
+                    continue
+
+                # 提取收盘价序列
+                closes = []
+                for idx, date_str in enumerate(heads):
+                    for k in data_keys:
+                        vals = table[k]
+                        if idx < len(vals):
+                            v_str = str(vals[idx]).replace("元", "").replace(",", "").strip()
+                            try:
+                                closes.append(float(v_str))
+                            except (ValueError, TypeError):
+                                closes.append(0)
+                            break
+
+                if len(closes) < 20:
+                    continue
+
+                # MX 返回倒序，翻转为正序
+                closes = closes[::-1]
+                import numpy as np
+                arr = pd.Series(closes)
+                ma20 = float(arr.rolling(20).mean().iloc[-1]) if len(arr) >= 20 else None
+                ma60 = float(arr.rolling(60).mean().iloc[-1]) if len(arr) >= 60 else None
+                close = closes[-1]
+
+                # 连续站上/跌破 MA20
+                green_streak = 0
+                red_streak = 0
+                ma20_series = arr.rolling(20).mean()
+                for i in range(len(arr) - 1, max(19, len(arr) - self.red_days - 1) - 1, -1):
+                    if pd.notna(ma20_series.iloc[i]):
+                        if arr.iloc[i] >= ma20_series.iloc[i]:
+                            green_streak += 1
+                        else:
+                            red_streak += 1
+                        if green_streak + red_streak >= self.red_days:
+                            break
+
+                # MA60 下方天数
+                below_ma60_days = 0
+                above_ma60_days = 0
+                ma60_series = arr.rolling(60).mean()
+                for i in range(len(arr) - 1, max(59, len(arr) - self.clear_days - 1) - 1, -1):
+                    if pd.notna(ma60_series.iloc[i]):
+                        if arr.iloc[i] >= ma60_series.iloc[i]:
+                            above_ma60_days += 1
+                        else:
+                            below_ma60_days += 1
+                        if above_ma60_days + below_ma60_days >= self.clear_days:
+                            break
+
+                _logger.info(f"[market_timer] MX 成功 {idx_name}: close={close} ma20={ma20}")
+                return {
+                    "close": close,
+                    "ma20": round(ma20, 2) if ma20 else None,
+                    "ma60": round(ma60, 2) if ma60 else None,
+                    "above_ma20": close >= ma20 if ma20 else False,
+                    "above_ma60_days": above_ma60_days,
+                    "below_ma60_days": below_ma60_days,
+                    "green_streak": green_streak,
+                    "red_streak": red_streak,
+                    "change_pct": 0,
+                }
+        except Exception as e:
+            _logger.info(f"[market_timer] MX 失败 {symbol}: {e}")
+
+        # akshare fallback
         df = ak.stock_zh_index_daily(symbol=symbol)
         if df is None or df.empty:
             raise ValueError(f"无法获取 {symbol} 数据")

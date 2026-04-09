@@ -1,7 +1,7 @@
 # A股交易系统 · Hermes 原生架构方案
 
 > 分支：`feature/agent-native`
-> 版本：v2.0（精简版 — 单 Agent）
+> 版本：v2.1（妙想 API 集成版）
 > 日期：2026-04-09
 
 ---
@@ -10,8 +10,8 @@
 
 **只用 Hermes**，不引入第二个 Agent。
 
-- cron 调度、Discord 推送、TrendRadar 舆情全在同一套流程里
-- OpenClaw 的金融 skills（mx-finance-data、mx-stocks-screener）通过 subprocess 调用
+- cron 调度、Discord 推送、舆情评分全在同一套流程里
+- 东方财富妙想 API（mx-skills）作为优先数据源，akshare/新浪作为 fallback
 - Obsidian 是唯一事实来源，所有数据读写都通过它
 
 ---
@@ -30,16 +30,16 @@
 │   cron 调度（盘前/收盘/舆情/周报）            │
 │   Discord 推送（格式化报告）                  │
 │   自然语言处理（选股/评分/查询/复盘）          │
-│   subprocess 调用金融 skills（mx-*）          │
+│   妙想 API 调用（mx-data/search/xuangu）     │
 │   Obsidian 读写（持仓/日志/评分/配置）         │
 └──────────────────────────┬──────────────────┘
                            │
           ┌────────────────┼────────────────┐
           ▼                ▼                ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Obsidian    │  │  TrendRadar  │  │  AKShare /   │
-│  Vault       │  │  舆情监控     │  │  mx-skills   │
-│  （数据中枢）  │  │  （已在跑）   │  │  （数据源）   │
+│  Obsidian    │  │  妙想 API    │  │  AKShare /   │
+│  Vault       │  │  (优先数据源) │  │  新浪        │
+│  （数据中枢）  │  │  mx-skills   │  │  (fallback)  │
 └──────────────┘  └──────────────┘  └──────────────┘
                            │
                            ▼
@@ -93,21 +93,28 @@ a-stock-trading/
 │
 ├── scripts/                   # Python 引擎
 │   ├── engine/
-│   │   ├── data_engine.py     # 数据获取（多源 fallback）
-│   │   ├── technical.py        # 技术指标
-│   │   ├── financial.py        # 基本面数据
-│   │   ├── flow.py            # 资金流向
+│   │   ├── data_engine.py     # 数据获取（MX优先 → akshare fallback）
+│   │   ├── technical.py        # 技术指标（akshare，MX fallback）
+│   │   ├── financial.py        # 基本面数据（MX优先 → akshare → 新浪）
+│   │   ├── flow.py            # 资金流向（MX优先 → akshare → 新浪）
 │   │   ├── market_timer.py     # 大盘择时
-│   │   ├── scorer.py           # 四维评分
+│   │   ├── scorer.py           # 四维评分（舆情用 MX 搜索）
 │   │   ├── risk_model.py       # 风控校验
 │   │   └── composite.py        # 综合决策
+│   ├── mx/                    # 妙想 API 集成模块
+│   │   ├── client.py           # 公共基类（API Key / 请求 / 错误处理）
+│   │   ├── mx_data.py          # 金融数据查询（行情/财务/关系）
+│   │   ├── mx_search.py        # 资讯搜索（研报/新闻/公告）
+│   │   ├── mx_xuangu.py        # 智能选股（自然语言条件筛选）
+│   │   ├── mx_zixuan.py        # 自选股管理（增删查）
+│   │   └── mx_moni.py          # 模拟交易（买卖/持仓/资金/撤单）
 │   ├── pipeline/
 │   │   ├── morning.py          # 盘前流程
 │   │   ├── evening.py          # 收盘流程
 │   │   ├── noon.py             # 午休检查
 │   │   ├── weekly_review.py    # 周报
 │   │   ├── core_pool_scoring.py # 核心池评分
-│   │   └── stock_screener.py   # 选股流水线
+│   │   └── stock_screener.py   # 选股流水线（MX智能选股优先）
 │   ├── cli/                   # 命令行工具
 │   └── utils/
 │       ├── obsidian.py         # Obsidian 读写
@@ -115,6 +122,7 @@ a-stock-trading/
 │       ├── config_loader.py    # 配置读取
 │       └── logger.py
 │
+├── .env                        # 环境变量（MX_APIKEY 等，已 gitignore）
 ├── config/
 │   ├── strategy.yaml           # 评分/风控/仓位参数
 │   ├── stocks.yaml             # 核心池/观察池/黑名单
@@ -221,13 +229,15 @@ blacklist:
 |------|------------|
 | "今天盘前" | 立即跑盘前流程，推 Discord |
 | "收盘" | 立即跑收盘流程 |
-| "选股" | 调 mx-stocks-screener 跑选股流水线，结果写 Obsidian |
+| "选股" | 调妙想智能选股 API 跑选股流水线，结果写 Obsidian |
 | "评分 XXX" | 查实时价格 + 四维评分，推 Discord |
 | "持仓" | 读 portfolio.md，报告当前状态 |
 | "回测 XXX" | 用 backtest.py 跑，输出结果 |
 | "加仓计算" | 读 calculator，输出建议 |
 | "复盘" | 生成周报 |
-| "帮我研究 XXX" | 深度搜索 + mx-finance-data，出报告 |
+| "帮我研究 XXX" | 妙想资讯搜索 + 金融数据查询，出报告 |
+| "XXX 最新研报" | 调妙想资讯搜索，返回研报/新闻/公告 |
+| "查数据 XXX" | 调妙想金融数据查询，返回行情/财务数据 |
 
 ---
 
@@ -246,10 +256,10 @@ blacklist:
 ### 收盘（15:35 自动）
 
 ```
-1. 更新持仓最新价格（写 portfolio.md）
+1. 更新持仓最新价格（MX优先 → akshare fallback，写 portfolio.md）
 2. 重算止损/止盈价（写 portfolio.md）
 3. 检查是否触发止损/止盈
-4. 跑 core_pool_scoring.py（批量评分 → 写 Obsidian）
+4. 跑 core_pool_scoring.py（MX数据+搜索 → 四维评分 → 写 Obsidian）
 5. 生成明日计划（写明天的日志 MD）
 6. 格式化收盘摘要 → Discord
 ```
@@ -258,7 +268,11 @@ blacklist:
 
 ```
 1. 读 config/stocks.yaml 的核心池列表
-2. 批量拉取：实时价格 + 技术指标 + 基本面 + 资金流向 + TrendRadar 舆情
+2. 批量拉取：
+   - 技术指标（akshare 日线历史 → 均线/成交量/动量）
+   - 基本面（MX优先 → akshare → 新浪）
+   - 资金流向（MX优先 → akshare → 新浪成交量估算）
+   - 舆情（MX资讯搜索 → 研报/评级统计）
 3. 四维评分
 4. 输出到 vault/04-选股/评分报告/核心池_评分_YYYYMMDD.md
 5. 更新 vault/04-选股/核心池.md 的评分列
@@ -269,12 +283,13 @@ blacklist:
 ## 八、数据流
 
 ```
-                    AKShare / mx-skills
-                           │
-                           ▼
+          妙想 API（优先）     AKShare / 新浪（fallback）
+               │                        │
+               └────────┬───────────────┘
+                        ▼
 ┌──────────────────────────────────────────┐
 │           data_engine.py                  │
-│   多源 fallback · 失败日志 · 新鲜度检查    │
+│   MX优先 → akshare → 新浪 · 失败日志     │
 └─────────────────────┬────────────────────┘
                       │
      ┌────────────────┼────────────────┐
@@ -282,6 +297,7 @@ blacklist:
 ┌─────────┐    ┌──────────┐    ┌────────────┐
 │ scorer  │    │risk_model│    │market_timer│
 │ 四维评分 │    │ 风控校验  │    │ 大盘择时   │
+│(MX舆情) │    │          │    │            │
 └────┬────┘    └────┬─────┘    └─────┬──────┘
      └──────────────┼────────────────┘
                     ▼
@@ -305,6 +321,18 @@ blacklist:
             │ 格式化报告推送    │
             └──────────────────┘
 ```
+
+### 数据源优先级
+
+| 模块 | 优先数据源 | Fallback 1 | Fallback 2 |
+|------|-----------|-----------|-----------|
+| 基本面（financial.py） | 妙想 mx_data | 东财 akshare | 新浪财经 |
+| 资金流向（flow.py） | 妙想 mx_data | 东财 akshare | 成交量估算 |
+| 舆情评分（scorer.py） | 妙想 mx_search | — | 默认 1.5 分 |
+| 智能选股（stock_screener.py） | 妙想 mx_xuangu | akshare 全市场轻筛 | — |
+| 实时行情（data_engine.py） | 东财 akshare | 妙想 mx_data | 历史日线 |
+| 技术指标（technical.py） | 东财 akshare | 新浪日线 | — |
+| 大盘择时（market_timer.py） | 东财 akshare | — | — |
 
 ---
 
@@ -413,12 +441,14 @@ blacklist:
 
 ### Phase 4：优化闭环（持续）
 
+- [x] 妙想 API 集成（mx-data/search/xuangu/zixuan/moni）
+- [x] 数据源优先级：MX → akshare → 新浪
+- [x] 舆情评分接入 MX 资讯搜索（替代 TrendRadar 默认值）
 - [ ] 回测参数校准实盘参数
 - [ ] 评分权重回测验证
-- [ ] 舆情因子接入 TrendRadar
 - [ ] Discord 消息监听机制（Hermes 接收用户回复）
 - [ ] 超时未确认提醒（T+1 再提醒 / T+2 异常标记）
-- [ ] 技术债务清理（tomorrow_plan.py 等空文件）
+- [ ] MX API 调用成功率监控 + 缓存机制
 
 ---
 

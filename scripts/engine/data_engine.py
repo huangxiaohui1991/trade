@@ -3,15 +3,15 @@
 engine/data_engine.py — 数据获取引擎（精简版 + Facade）
 
 职责：
-  - get_realtime: 实时行情（多股批量，东财实时接口）
+  - get_realtime: 实时行情（多股批量，MX优先 → 东财实时接口）
   - get_market_index: 大盘指数状态
   - normalize_code / to_sina_symbol / get_stock_name: 工具函数
 
 其他模块（已拆分）：
   - technical.py: get_technical（均线/成交量/动量）
-  - financial.py: get_financial（ROE/营收/现金流）
-  - flow.py: get_fund_flow（主力/北向资金）
-  - scorer.py: batch_score（四维评分）
+  - financial.py: get_financial（ROE/营收/现金流）— MX 优先
+  - flow.py: get_fund_flow（主力/北向资金）— MX 优先
+  - scorer.py: batch_score（四维评分）— 舆情用 MX 搜索
   - risk_model.py: calc_stop_loss / check_risk（风控）
 
 设计原则：
@@ -121,7 +121,50 @@ def get_realtime(codes: list) -> dict:
     except Exception as e:
         _logger.warning(f"[get_realtime] 东财实时接口失败: {e}")
         result["stale"] = True
-        # fallback: 历史日线
+
+        # fallback 1: 妙想 mx_data API
+        try:
+            from scripts.mx.mx_data import MXData
+            mx = MXData()
+            for code in codes:
+                code = normalize_code(code)
+                if code in result["data"]:
+                    continue
+                try:
+                    name = get_stock_name(code)
+                    mx_result = mx.query(f"{name} 最新价 涨跌幅")
+                    tables, _, _, err = MXData.parse_result(mx_result)
+                    if not err and tables:
+                        for row in tables[0].get("rows", []):
+                            price_val = None
+                            chg_val = 0
+                            for k, v in row.items():
+                                v_str = str(v).strip().replace(",", "").replace("%", "")
+                                try:
+                                    num = float(v_str) if v_str and v_str not in ("", "-", "—") else None
+                                except (ValueError, TypeError):
+                                    num = None
+                                if num is None:
+                                    continue
+                                if "最新" in k or "收盘" in k or "价" in k:
+                                    price_val = num
+                                elif "涨跌幅" in k:
+                                    chg_val = num
+                            if price_val:
+                                result["data"][code] = {
+                                    "code": code,
+                                    "name": name,
+                                    "price": price_val,
+                                    "change_pct": chg_val,
+                                    "source": "mx_data",
+                                }
+                                break
+                except Exception:
+                    pass
+        except Exception as e2:
+            _logger.warning(f"[get_realtime] MX fallback 失败: {e2}")
+
+        # fallback 2: 历史日线
         for code in codes:
             code = normalize_code(code)
             try:

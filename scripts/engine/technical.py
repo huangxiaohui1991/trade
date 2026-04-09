@@ -6,9 +6,10 @@ engine/technical.py — 技术指标模块
   - get_technical: 技术面数据（均线/成交量/当前价vs均线）
   - normalize_code / to_sina_symbol / get_stock_name: 工具函数（供全 engine 层共享）
 
-数据源：
-  - 东方财富（em）日线历史 → 优先
-  - 新浪（sina）日线历史 → fallback
+数据源（按优先级）：
+  - get_stock_name: MX优先 → 东财 fallback
+  - _get_hist_data: 东财(akshare) → 新浪 fallback
+  - 注：历史日线需要完整 DataFrame 计算均线，MX 不适合批量拉日线
 """
 
 import os
@@ -64,11 +65,27 @@ def to_sina_symbol(code: str) -> str:
 
 
 def get_stock_name(code: str) -> str:
-    """获取股票名称（带缓存，多接口 fallback）"""
+    """获取股票名称（带缓存，MX优先 → 东财 fallback）"""
     code = normalize_code(code)
     if code in _name_cache:
         return _name_cache[code]
 
+    # MX 优先：从妙想查询股票名称
+    try:
+        from scripts.mx.mx_data import MXData
+        mx = MXData()
+        result = mx.query(f"{code}最新价")
+        dto_list = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {}).get("dataTableDTOList", [])
+        if dto_list:
+            tag = dto_list[0].get("entityTagDTO", {})
+            name = tag.get("fullName", "")
+            if name:
+                _name_cache[code] = name
+                return name
+    except Exception:
+        pass
+
+    # 东财 fallback
     try:
         df = ak.stock_individual_info_em(symbol=code)
         name_row = df[df["item"] == "股票简称"]
@@ -89,15 +106,90 @@ def _now_ts() -> str:
 
 def _get_hist_data(code: str, days: int = 120) -> pd.DataFrame:
     """
-    获取历史日线数据（多接口 fallback）
-    优先东方财富，失败则用新浪
+    获取历史日线数据（MX优先 → 东财 → 新浪）
     """
     code = normalize_code(code)
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
 
+    # Source 0: 妙想 mx_data API（优先）
+    try:
+        from scripts.mx.mx_data import MXData
+        name = _name_cache.get(code, code)
+        mx = MXData()
+        query = f"{name if name != code else code}近{days + 60}个交易日每天的收盘价和成交量"
+        result = mx.query(query)
+        data = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
+        dto_list = data.get("dataTableDTOList", [])
+
+        # 找到有历史数据的表（headName 长度 > 10）
+        for dto in dto_list:
+            table = dto.get("table", {})
+            name_map = dto.get("nameMap", {})
+            heads = table.get("headName", [])
+            if not isinstance(heads, list) or len(heads) < 10:
+                continue
+
+            data_keys = [k for k in table.keys() if k != "headName"]
+            if not data_keys:
+                continue
+
+            # 识别收盘价列和成交量列
+            close_key = None
+            vol_key = None
+            for k in data_keys:
+                mapped = str(name_map.get(k, name_map.get(str(k), "")))
+                if "收盘" in mapped or "最新" in mapped:
+                    close_key = k
+                elif "成交量" in mapped:
+                    vol_key = k
+
+            if not close_key:
+                continue
+
+            close_vals = table.get(close_key, [])
+            vol_vals = table.get(vol_key, []) if vol_key else []
+
+            rows = []
+            for idx, date_str in enumerate(heads):
+                date_clean = str(date_str).split("(")[0].strip()
+                close_str = str(close_vals[idx]).replace("元", "").replace(",", "").strip() if idx < len(close_vals) else "0"
+                vol_str = str(vol_vals[idx]).replace("股", "").replace(",", "").strip() if idx < len(vol_vals) else "0"
+                # 处理 "万" "亿" 单位
+                try:
+                    close_v = float(close_str)
+                except (ValueError, TypeError):
+                    close_v = 0
+                try:
+                    vol_v = float(vol_str)
+                    if "亿" in str(vol_vals[idx] if idx < len(vol_vals) else ""):
+                        vol_v *= 1e8
+                    elif "万" in str(vol_vals[idx] if idx < len(vol_vals) else ""):
+                        vol_v *= 1e4
+                except (ValueError, TypeError):
+                    vol_v = 0
+
+                if close_v > 0:
+                    rows.append({"日期": date_clean, "收盘": close_v, "成交量": vol_v})
+
+            if len(rows) < 10:
+                continue
+
+            df = pd.DataFrame(rows)
+            # MX 返回倒序，翻转为正序
+            df = df.iloc[::-1].reset_index(drop=True)
+            df["涨跌幅"] = df["收盘"].pct_change() * 100
+            df["开盘"] = df["收盘"]
+            df["最高"] = df["收盘"]
+            df["最低"] = df["收盘"]
+            _logger.info(f"[_get_hist_data] MX 成功 code={code} rows={len(df)}")
+            return df
+
+    except Exception as e:
+        _logger.info(f"[_get_hist_data] MX 失败 code={code}: {e}")
+
     # Source 1: 东方财富（带重试）
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             df = ak.stock_zh_a_hist(
                 symbol=code, period="daily",
@@ -108,9 +200,9 @@ def _get_hist_data(code: str, days: int = 120) -> pd.DataFrame:
                 return df
             break
         except Exception as e:
-            if attempt < 2:
-                time.sleep(2)
-                _logger.info(f"[_get_hist_data] 东财重试 ({attempt+2}/3) code={code}")
+            if attempt < 1:
+                time.sleep(1)
+                _logger.info(f"[_get_hist_data] 东财重试 ({attempt+2}/2) code={code}")
             else:
                 _logger.warning(f"[_get_hist_data] 东财失败 code={code}: {e}")
 

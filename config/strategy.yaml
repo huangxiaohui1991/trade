@@ -16,6 +16,7 @@ scoring:
     - limit_up_today
     - consecutive_outflow
     - red_market
+    - earnings_bomb
 
 # 风控参数
 risk:
@@ -38,9 +39,9 @@ market_timer:
   clear_days_ma60: 15  # MA60下方15日 -> CLEAR
 
 screening:
-  # mx-stocks-screener 自然语言查询词（优先调用东方财富妙想接口）
+  # 妙想智能选股自然语言查询词（优先调用东方财富妙想接口）
   # 为空则跳过 mx skill，直接用 akshare 原生候选池
-  mx_query: "站上MA20，市盈率TTM低于40，成交额超1亿，股价5-200元，剔除ST"
+  mx_query: "站上20日均线，ROE大于8%，成交额超2亿，股价5-200元，市盈率TTM低于40，剔除ST"
   mx_select_type: "A股"
 
 capital: 450286

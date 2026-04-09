@@ -4,7 +4,7 @@ pipeline/stock_screener.py — 选股流水线
 
 职责：
   1. 读取 config/stocks.yaml 的核心池/观察池/黑名单
-  2. 优先调用 mx-stocks-screener skill（OpenClaw）进行自然语言筛选
+  2. 优先调用妙想智能选股 API（mx_xuangu）进行自然语言筛选
   3. mx skill 不可用或失败时，fallback 到 akshare 原生接口
   4. 对候选池进行四维评分，写入 Obsidian 筛选记录
 
@@ -14,9 +14,7 @@ pipeline/stock_screener.py — 选股流水线
   python -m scripts.pipeline.stock_screener --pool watch
 """
 
-import csv
 import os
-import subprocess
 import sys
 import warnings
 from datetime import datetime
@@ -38,91 +36,65 @@ from scripts.utils.logger import get_logger
 
 _logger = get_logger("pipeline.stock_screener")
 
-# mx-stocks-screener skill 脚本路径
-_MX_SCREENER_SCRIPT = os.path.expanduser(
-    "~/.openclaw/workspace/skills/mx-stocks-screener/scripts/get_data.py"
-)
-_MX_OUTPUT_DIR = os.path.expanduser("~/miaoxiang/mx_stocks_screener")
-
-
 # ---------------------------------------------------------------------------
-# mx-screener 调用（优先）
+# mx-xuangu 调用（优先，通过妙想智能选股 API）
 # ---------------------------------------------------------------------------
 
 def _call_mx_screener(query: str, select_type: str = "A股") -> list:
     """
-    调用 mx-stocks-screener skill（东方财富妙想接口）进行自然语言筛选。
+    调用妙想智能选股 API 进行自然语言筛选。
 
     优先使用，失败时返回空列表（触发 fallback）。
 
     Returns:
-        list of {"code": str, "name": str}，空列表表示调用失败
+        list of {"code": str, "name": str, "mx_data": dict}
+        mx_data 包含妙想返回的完整行数据（最新价/MA20/ROE/涨跌幅等），
+        供 scorer 直接使用，避免再逐个调 akshare。
     """
-    # 1. 检查 EM_API_KEY
-    api_key = os.environ.get("EM_API_KEY") or ""
-    if not api_key:
-        _logger.warning("[mx-screener] EM_API_KEY 未设置，跳过 mx skill")
-        return []
-
-    # 2. 检查脚本是否存在
-    if not os.path.exists(_MX_SCREENER_SCRIPT):
-        _logger.warning(f"[mx-screener] skill 脚本不存在: {_MX_SCREENER_SCRIPT}")
-        return []
-
-    # 3. 确保输出目录存在
-    os.makedirs(_MX_OUTPUT_DIR, exist_ok=True)
-
-    # 4. 调用
     try:
-        _logger.info(f"[mx-screener] 调用: query='{query}' type={select_type}")
-        env = os.environ.copy()
-        env["EM_API_KEY"] = api_key
-        result = subprocess.run(
-            [
-                sys.executable,
-                _MX_SCREENER_SCRIPT,
-                "--query", query,
-                "--select-type", select_type,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-        )
-
-        if result.returncode != 0:
-            _logger.warning(f"[mx-screener] 调用失败 returncode={result.returncode}: {result.stderr[:200]}")
-            return []
-
-        # 5. 解析 CSV 输出路径
-        csv_path = None
-        for line in result.stdout.splitlines():
-            if line.startswith("CSV:"):
-                csv_path = line.split(":", 1)[1].strip()
-                break
-
-        if not csv_path or not os.path.exists(csv_path):
-            _logger.warning(f"[mx-screener] 未找到 CSV 文件: {csv_path}")
-            return []
-
-        # 6. 解析 CSV，提取 code 和 name
-        results = []
-        with open(csv_path, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                code = row.get("代码", "").strip()
-                name = row.get("名称", "").strip()
-                if code and name:
-                    results.append({"code": code, "name": name})
-
-        _logger.info(f"[mx-screener] 成功，返回 {len(results)} 条结果")
-        return results
-
-    except subprocess.TimeoutExpired:
-        _logger.warning("[mx-screener] 调用超时（60s）")
+        from scripts.mx.mx_xuangu import MXXuangu
+    except ImportError as e:
+        _logger.warning(f"[mx-xuangu] 导入失败: {e}")
         return []
+
+    try:
+        mx = MXXuangu()
+    except ValueError as e:
+        _logger.warning(f"[mx-xuangu] MX_APIKEY 未配置: {e}")
+        return []
+
+    try:
+        _logger.info(f"[mx-xuangu] 调用: query='{query}'")
+        result = mx.search(query)
+        rows, data_source, err = mx.extract_data(result)
+
+        if err:
+            _logger.warning(f"[mx-xuangu] 解析失败: {err}")
+            return []
+
+        if not rows:
+            _logger.warning("[mx-xuangu] 返回结果为空")
+            return []
+
+        candidates = []
+        for row in rows:
+            code = (
+                row.get("代码", "") or row.get("SECURITY_CODE", "") or
+                row.get("股票代码", "") or ""
+            ).strip()
+            name = (
+                row.get("简称", "") or row.get("SECURITY_SHORT_NAME", "") or
+                row.get("股票简称", "") or row.get("名称", "") or ""
+            ).strip()
+            if code and name:
+                code = code.split(".")[0]
+                candidates.append({"code": code, "name": name, "mx_data": row})
+
+        _logger.info(f"[mx-xuangu] 成功，返回 {len(candidates)} 条结果")
+        return candidates
+
     except Exception as e:
-        _logger.warning(f"[mx-screener] 调用异常: {e}")
+        _logger.warning(f"[mx-xuangu] 调用异常: {e}")
         return []
 
 
@@ -138,7 +110,7 @@ def _get_blacklist(stocks_cfg: dict) -> set:
 
 
 def _dedupe_candidates(candidates: list) -> list:
-    """按代码去重并保留原始顺序。"""
+    """按代码去重并保留原始顺序，保留 mx_data 等附加字段。"""
     deduped = []
     seen = set()
     for item in candidates:
@@ -147,7 +119,10 @@ def _dedupe_candidates(candidates: list) -> list:
         if not code or code in seen:
             continue
         seen.add(code)
-        deduped.append({"code": code, "name": name})
+        entry = {"code": code, "name": name}
+        if "mx_data" in item:
+            entry["mx_data"] = item["mx_data"]
+        deduped.append(entry)
     return deduped
 
 
@@ -272,6 +247,67 @@ def _write_market_scan_watchlist(results: list) -> str:
     return str(path)
 
 
+def _sync_to_zixuan(actionable: list) -> None:
+    """
+    将可操作的股票同步到东方财富自选股列表。
+    新入池的添加，不在池子里的删除，保持自选和池子一致。
+    """
+    if not actionable:
+        return
+    try:
+        from scripts.mx.mx_zixuan import MXZixuan
+        mx = MXZixuan()
+
+        # 1. 查当前自选股列表
+        current = mx.query()
+        current_data = current.get("data", {}).get("allResults", {}).get("result", {}).get("dataList", [])
+        current_codes = {str(s.get("SECURITY_CODE", "")).strip() for s in current_data}
+        current_names = {str(s.get("SECURITY_CODE", "")).strip(): str(s.get("SECURITY_SHORT_NAME", "")).strip()
+                         for s in current_data}
+
+        # 2. 目标池子（本次可操作的股票）
+        target_codes = set()
+        target_map = {}
+        for r in actionable:
+            code = str(r.get("code", "")).strip()
+            name = r.get("name", "")
+            if code:
+                target_codes.add(code)
+                target_map[code] = name
+
+        # 3. 需要添加的（在目标池但不在自选）
+        to_add = target_codes - current_codes
+        # 4. 需要删除的（在自选但不在目标池）
+        to_remove = current_codes - target_codes
+
+        added = 0
+        for code in to_add:
+            name = target_map.get(code, code)
+            try:
+                result = mx.manage(f"把{name}添加到我的自选股列表")
+                if result.get("status") == 0:
+                    added += 1
+            except Exception:
+                pass
+
+        removed = 0
+        for code in to_remove:
+            name = current_names.get(code, code)
+            try:
+                result = mx.manage(f"把{name}从我的自选股列表删除")
+                if result.get("status") == 0:
+                    removed += 1
+            except Exception:
+                pass
+
+        _logger.info(
+            f">> 自选股同步: 添加{added}只 删除{removed}只 "
+            f"(目标{len(target_codes)}只 自选原有{len(current_codes)}只)"
+        )
+    except Exception as e:
+        _logger.warning(f">> 自选股同步失败: {e}")
+
+
 def _resolve_market_candidates(default_query: str, select_type: str,
                                strategy_cfg: dict, blacklist: set) -> tuple[list, str]:
     """全市场模式：优先 mx-screener，失败则使用 akshare 轻筛。"""
@@ -280,7 +316,7 @@ def _resolve_market_candidates(default_query: str, select_type: str,
         if mx_results:
             candidates = [c for c in _dedupe_candidates(mx_results) if c.get("code") not in blacklist]
             _logger.info(f">> mx-screener 全市场初筛返回 {len(candidates)} 只")
-            return candidates, "mx-stocks-screener skill（全市场）"
+            return candidates, "妙想智能选股（全市场）"
 
         _logger.warning(">> mx-screener 调用失败，fallback 到 akshare 全市场轻筛")
 
@@ -303,7 +339,7 @@ def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
             candidates = [c for c in base_candidates if c.get("code") in mx_codes]
             _logger.info(f">> mx-screener 初筛: {len(mx_results)} 只通过，候选池命中 {len(candidates)} 只")
             if candidates:
-                return candidates, pool_name, "mx-stocks-screener skill"
+                return candidates, pool_name, "妙想智能选股"
             _logger.warning(">> mx 筛选结果为空，fallback")
         else:
             _logger.warning(">> mx-screener 调用失败，fallback 到 akshare")
@@ -359,8 +395,8 @@ def _write_screening_result(results: list, pool_name: str, source: str) -> str:
         lines.append("| — | — | — | — | — | — | — | — | 暂无筛选结果 |")
 
     lines.extend(["", "---", "", "## 筛选条件", ""])
-    if source == "mx-stocks-screener skill":
-        lines.append("- 由 mx-stocks-screener skill 东方财富妙想接口自然语言筛选")
+    if source == "妙想智能选股":
+        lines.append("- 由妙想智能选股 API 东方财富自然语言筛选")
     elif "全市场" in source:
         lines.append("- 全市场候选池初筛（价格 / 成交额 / 市盈率 / ST 过滤）")
         lines.append(f"- 数据来源：{source}")
@@ -446,6 +482,11 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
 
     if universe == "market":
         _write_market_scan_watchlist(scored)
+
+    # ------------------------------------------------------------------
+    # 同步到东方财富自选股
+    # ------------------------------------------------------------------
+    _sync_to_zixuan(actionable)
 
     return scored
 

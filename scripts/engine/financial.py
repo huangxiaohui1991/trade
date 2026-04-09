@@ -6,8 +6,9 @@ engine/financial.py — 基本面数据模块
   - get_financial: ROE / 营收增长 / 现金流
 
 数据源（按优先级）：
-  - 东方财富（优先，重试 3 次）
-  - 新浪财经（fallback）
+  1. 妙想 mx_data API（优先）
+  2. 东方财富 akshare（fallback，重试 3 次）
+  3. 新浪财经（最终 fallback）
 """
 
 import os
@@ -86,6 +87,60 @@ def _sina_financial(code: str) -> dict:
 
 # ── 主接口 ─────────────────────────────────────────────────────────────────
 
+def _try_mx_financial(code: str, name: str) -> dict:
+    """
+    通过妙想 mx_data API 获取基本面数据（优先数据源）。
+    成功返回标准 dict，失败返回 None。
+    """
+    try:
+        from scripts.mx.mx_data import MXData
+        mx = MXData()
+
+        # 查询 ROE + 营收 + 现金流
+        query = f"{name} 最近一年ROE 营收增长率 经营现金流"
+        result = mx.query(query)
+        tables, _, _, err = MXData.parse_result(result)
+
+        if err or not tables:
+            _logger.info(f"[mx_financial] {name} 查询无结果: {err}")
+            return None
+
+        # 解析返回的表格数据
+        parsed = {"source": "mx_data"}
+        for table in tables:
+            for row in table.get("rows", []):
+                for key, val in row.items():
+                    key_lower = key.lower() if isinstance(key, str) else ""
+                    val_str = str(val).strip().replace("%", "").replace(",", "")
+
+                    try:
+                        num = float(val_str) if val_str and val_str not in ("", "-", "—") else None
+                    except (ValueError, TypeError):
+                        num = None
+
+                    if num is None:
+                        continue
+
+                    if "roe" in key_lower or "净资产收益率" in key:
+                        parsed.setdefault("roe", round(num, 2))
+                    elif "营收" in key and ("增长" in key or "同比" in key):
+                        parsed.setdefault("revenue_growth", round(num, 2))
+                    elif "营业" in key and ("收入" in key or "总收入" in key):
+                        parsed.setdefault("_revenue", num)
+                    elif "经营" in key and "现金" in key:
+                        parsed.setdefault("operating_cash_flow", num)
+                        parsed.setdefault("cash_flow_positive", num > 0)
+
+        if "roe" in parsed or "revenue_growth" in parsed:
+            _logger.info(f"[mx_financial] {name} MX 成功: roe={parsed.get('roe')} rev={parsed.get('revenue_growth')}")
+            return parsed
+
+        return None
+    except Exception as e:
+        _logger.info(f"[mx_financial] {name} MX 异常: {e}")
+        return None
+
+
 def get_financial(code: str) -> dict:
     """
     获取基本面数据（东财优先带重试，失败则新浪 fallback）
@@ -121,8 +176,37 @@ def get_financial(code: str) -> dict:
 
     missing_fields = []  # 哪些字段东财没有拿到
 
+    # ── MX 优先：妙想 API 获取基本面 ────────────────────────────────────────
+    mx_data = _try_mx_financial(code, result.get("name", code))
+    if mx_data:
+        if "roe" in mx_data:
+            result["roe"] = mx_data["roe"]
+            result["roe_recent"] = [mx_data["roe"]]
+        if "revenue_growth" in mx_data:
+            result["revenue_growth"] = mx_data["revenue_growth"]
+        if "operating_cash_flow" in mx_data:
+            result["operating_cash_flow"] = mx_data["operating_cash_flow"]
+            result["cash_flow_positive"] = mx_data.get("cash_flow_positive", mx_data["operating_cash_flow"] > 0)
+        result["source"] = "mx_data"
+
+        # 检查是否所有字段都有了
+        has_roe = "roe" in result
+        has_rev = "revenue_growth" in result
+        has_cf = "operating_cash_flow" in result
+        if has_roe and has_rev and has_cf:
+            return result
+        # 部分字段缺失，继续用 akshare 补充
+        if not has_roe:
+            missing_fields.append("roe")
+        if not has_rev:
+            missing_fields.append("revenue")
+        if not has_cf:
+            missing_fields.append("cash_flow")
+        _logger.info(f"[get_financial] MX 部分缺失 {missing_fields}，akshare 补充")
+
     # ── ROE（东财）───────────────────────────────────────────────────────────
-    for attempt in range(3):
+    if "roe" not in result:
+      for attempt in range(3):
         try:
             df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2024")
             if df is not None and not df.empty:
@@ -141,7 +225,8 @@ def get_financial(code: str) -> dict:
                 missing_fields.append("roe")
 
     # ── 营收增长（东财，重试失败则记为缺失）─────────────────────────────────
-    for attempt in range(3):
+    if "revenue_growth" not in result:
+      for attempt in range(3):
         try:
             df_profit = ak.stock_profit_sheet_by_report_em(symbol=code)
             if df_profit is not None and not df_profit.empty:
@@ -169,7 +254,8 @@ def get_financial(code: str) -> dict:
         missing_fields.append("revenue")
 
     # ── 现金流（东财，重试失败则记为缺失）─────────────────────────────────
-    for attempt in range(3):
+    if "operating_cash_flow" not in result:
+      for attempt in range(3):
         try:
             df_cash = ak.stock_cash_flow_sheet_by_report_em(symbol=code)
             if df_cash is not None and not df_cash.empty:

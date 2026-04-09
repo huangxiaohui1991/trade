@@ -187,15 +187,57 @@ def _score_fund_flow(engine: DataEngine, code: str) -> dict:
 def _score_sentiment(code: str, name: str) -> dict:
     """
     舆情评分（满分 3 分）
-    TrendRadar 舆情抓取（目前返回中性分数，后续接入实际 API）
+    优先使用妙想资讯搜索获取研报/新闻。
     """
-    # TODO: 接入 TrendRadar API
-    # 目前返回中性分 + placeholder detail
-    return {
-        "score": 1.5,  # 中性
-        "detail": "TrendRadar 待接入（默认1.5分）",
-        "sentiment": "neutral",
-    }
+    try:
+        from scripts.mx.mx_search import MXSearch
+        mx = MXSearch()
+        result = mx.search(f"{name} 最新研报 机构评级")
+
+        data = result.get("data", {})
+        inner_data = data.get("data", {})
+        search_response = inner_data.get("llmSearchResponse", {})
+        items = search_response.get("data", [])
+
+        if not items:
+            return {"score": 1.5, "detail": "无相关资讯（MX）", "sentiment": "neutral"}
+
+        report_count = 0
+        positive_count = 0
+        negative_count = 0
+        for item in items:
+            info_type = item.get("informationType", "")
+            rating = str(item.get("rating", "")).lower()
+            if info_type == "REPORT":
+                report_count += 1
+            if any(w in rating for w in ["买入", "增持", "推荐", "强烈推荐"]):
+                positive_count += 1
+            elif any(w in rating for w in ["减持", "卖出", "回避"]):
+                negative_count += 1
+
+        score = 1.5
+        if report_count >= 5:
+            score += 0.5
+        elif report_count >= 2:
+            score += 0.3
+        if positive_count >= 2:
+            score += 0.5
+        elif positive_count >= 1:
+            score += 0.3
+        if negative_count >= 2:
+            score -= 0.5
+
+        score = max(0, min(score, 3.0))
+        sentiment = "positive" if score >= 2.0 else ("negative" if score < 1.0 else "neutral")
+
+        return {
+            "score": round(score, 1),
+            "detail": f"研报{report_count}篇 买入{positive_count} 减持{negative_count}（MX搜索）",
+            "sentiment": sentiment,
+        }
+    except Exception as e:
+        _logger.info(f"[sentiment] MX搜索失败 {name}: {e}")
+        return {"score": 1.5, "detail": "MX搜索失败，默认1.5分", "sentiment": "neutral"}
 
 
 def _get_total_score(tech_score: float, fin_score: float,

@@ -3,13 +3,13 @@
 engine/flow.py — 资金流向模块
 
 职责：
-  - get_fund_flow: 主力资金流向（东财带重试 + stock_main_fund_flow fallback）
-  - _get_northbound: 北向资金（内部）
+  - get_fund_flow: 主力资金流向
 
-数据源：
-  - 东方财富个股资金流向（stock_individual_fund_flow）— 带 3 次重试
-  - 东财主力资金流向（stock_main_fund_flow）— 备用
-  - 历史成交量（腾讯）— 最终 fallback
+数据源（按优先级）：
+  1. 妙想 mx_data API（优先）
+  2. 东方财富个股资金流向（stock_individual_fund_flow）— 带 3 次重试
+  3. 东财主力资金流向（stock_main_fund_flow）— 备用
+  4. 历史成交量（腾讯）— 最终 fallback
 """
 
 import os
@@ -145,6 +145,49 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
         "source": None,
         "sources_tried": [],
     }
+
+    # ── Source 0: 妙想 mx_data API（优先）────────────────────────────────────
+    result["sources_tried"].append("mx_data")
+    try:
+        from scripts.mx.mx_data import MXData
+        from scripts.engine.technical import get_stock_name
+        name = get_stock_name(code)
+        mx = MXData()
+        mx_result = mx.query(f"{name} 主力资金流向 近5日")
+        tables, _, _, err = MXData.parse_result(mx_result)
+
+        if not err and tables:
+            # 解析主力净流入
+            main_net = 0
+            outflow_days = 0
+            for table in tables:
+                for row in table.get("rows", []):
+                    for key, val in row.items():
+                        val_str = str(val).strip().replace(",", "")
+                        try:
+                            num = float(val_str) if val_str and val_str not in ("", "-", "—") else None
+                        except (ValueError, TypeError):
+                            num = None
+                        if num is None:
+                            continue
+                        if "主力" in key and ("净" in key or "流入" in key):
+                            main_net += num
+                            if num < 0:
+                                outflow_days += 1
+
+            if main_net != 0 or outflow_days > 0:
+                result.update({
+                    "source": "mx_data",
+                    "main_net_inflow": main_net,
+                    "main_outflow": main_net < 0,
+                    "no_major_outflow": outflow_days < 3,
+                    "major_outflow_streak": outflow_days,
+                })
+                result["northbound"] = _get_northbound(days)
+                _logger.info(f"[get_fund_flow] MX 成功 code={code} net={main_net/1e6:.1f}M")
+                return result
+    except Exception as e:
+        _logger.info(f"[get_fund_flow] MX 失败 code={code}: {e}")
 
     # ── Source 1: 东财个股资金流向（带 3 次重试）────────────────────────────
     result["sources_tried"].append("eastmoney_individual")

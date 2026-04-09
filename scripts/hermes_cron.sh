@@ -36,6 +36,16 @@ export PYTHONPATH="${VAULT_PATH}:${HOME}/.venv/akshare/lib/python3.9/site-packag
 export PATH="${HOME}/.local/bin:$PATH"
 export AStockVault="$VAULT_PATH"
 
+# 加载项目 .env 文件（MX_APIKEY 等）
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        value=$(echo "$value" | xargs)
+        export "$key=$value"
+    done < "$REPO_ROOT/.env"
+fi
+
 # Discord 环境变量由 launchd 注入，此处不硬编码
 # export DISCORD_WEBHOOK_URL  ← 由 Hermes/launchd 运行时注入
 

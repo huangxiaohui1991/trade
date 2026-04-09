@@ -80,9 +80,29 @@ def _retry(call_fn, fallback=None, retries: int = 2, delay: float = 1.0):
 # ─────────────────────────────────────────
 
 def check_st_risk(code: str) -> BlacklistResult:
-    """检查是否 ST/*ST/退市风险"""
+    """检查是否 ST/*ST/退市风险（MX优先 → akshare fallback）"""
     result = BlacklistResult(code=code)
 
+    # MX 优先：查股票名称判断 ST
+    try:
+        from scripts.mx.mx_data import MXData
+        mx = MXData()
+        mx_result = mx.query(f"{code} 名称")
+        data = mx_result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
+        tags = data.get("entityTagDTOList", [])
+        if tags:
+            name = tags[0].get("fullName", "")
+            if name:
+                result.name = name
+                if "ST" in name.upper() or "退" in name:
+                    result.is_blacklist = True
+                    result.reasons.append(f"ST/退市风险: {name}")
+                    result.details["st_type"] = name
+                return result
+    except Exception:
+        pass
+
+    # akshare fallback
     def _do():
         df = ak.stock_zh_a_st_em()
         if df is None or df.empty:
