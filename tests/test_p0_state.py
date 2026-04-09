@@ -121,6 +121,47 @@ class P0StateTests(unittest.TestCase):
         self.assertEqual(snapshot["as_of_date"], "2026-04-09")
         self.assertEqual(snapshot["source"], "market_timer_test")
 
+    def test_shadow_position_context_resets_after_flat(self):
+        from scripts.pipeline.shadow_trade import _build_open_position_context
+
+        context = _build_open_position_context([
+            {"event_date": "2026-03-01", "side": "buy", "code": "300389", "shares": 1000, "price": 19.13},
+            {"event_date": "2026-03-05", "side": "sell", "code": "300389", "shares": 1000, "price": 19.50},
+            {"event_date": "2026-03-20", "side": "buy", "code": "300389", "shares": 500, "price": 18.80},
+        ])
+
+        self.assertEqual(context["300389"]["open_date"], "2026-03-20")
+        self.assertEqual(context["300389"]["first_buy_price"], 18.8)
+        self.assertEqual(context["300389"]["net_shares"], 500)
+
+    def test_shadow_advisory_signals_cover_time_stop_and_drawdown(self):
+        from datetime import date
+
+        from scripts.pipeline.shadow_trade import _build_advisory_signals
+
+        advisory = _build_advisory_signals(
+            position={"code": "300389", "name": "艾比森", "shares": 1000, "cost": 10.0, "price": 10.1},
+            trade_context={"open_date": "2026-03-01", "first_buy_price": 10.0, "net_shares": 1000},
+            history_points=[
+                {"date": "2026-03-03", "close": 10.2},
+                {"date": "2026-03-10", "close": 11.6},
+                {"date": "2026-03-20", "close": 12.0},
+                {"date": "2026-04-08", "close": 10.1},
+            ],
+            risk_cfg={
+                "time_stop_days": 15,
+                "take_profit": {"t1_pct": 0.15, "t1_drawdown": 0.05, "t2_drawdown": 0.08},
+            },
+            today=date(2026, 4, 9),
+        )
+
+        rule_codes = {signal["rule_code"] for signal in advisory["signals"]}
+        self.assertIn("RISK_TIME_STOP", rule_codes)
+        self.assertIn("RISK_DRAWDOWN_TAKE_PROFIT", rule_codes)
+        self.assertEqual(advisory["open_date"], "2026-03-01")
+        self.assertEqual(advisory["hold_days"], 39)
+        self.assertAlmostEqual(advisory["drawdown_pct"], 0.1583, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

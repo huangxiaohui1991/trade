@@ -480,8 +480,18 @@ def run() -> dict:
             from scripts.pipeline.shadow_trade import check_stop_signals
             shadow_results = check_stop_signals()
             triggered = [r for r in shadow_results if r.get("action") != "持有"]
+            advisories = [
+                r for r in shadow_results
+                if r.get("advisory_signals") and r.get("action") == "持有"
+            ]
             if triggered:
                 _logger.info(f">> 影子交易: {len(triggered)} 只触发信号")
+                for r in triggered:
+                    _logger.info(f"  {r['name']}({r['code']}): {r['action']} — {r['reason']}")
+            if advisories:
+                _logger.info(f">> 影子交易 advisory: {len(advisories)} 只")
+                for r in advisories:
+                    _logger.info(f"  {r['name']}({r['code']}): {r.get('advisory_summary', '')}")
         except Exception as e:
             _logger.warning(f">> 影子交易检查失败: {e}")
 

@@ -336,6 +336,8 @@ def run() -> dict:
                     _logger.info(f"  ⚠️ 模拟盘 {r['name']}: {r['action']} — {r['reason']}")
                 else:
                     _logger.info(f"  模拟盘 {r['name']}: {r.get('reason', '持有')}")
+                if r.get("advisory_summary") and r.get("action") != "持有":
+                    _logger.info(f"    advisory: {r['advisory_summary']}")
         except Exception as e:
             _logger.info(f">> 影子交易预览跳过: {e}")
 

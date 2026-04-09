@@ -94,7 +94,8 @@ def _safe_date_key(event: dict) -> str:
 
 def _build_weekly_report(vault: ObsidianVault, stats: dict,
                          core_pool_changes: list, trade_events: list,
-                         year: int, week_num: int) -> str:
+                         year: int, week_num: int,
+                         shadow_advisories: list | None = None) -> str:
     """生成周报 markdown 内容"""
     week_str = f"{year}-W{week_num:02d}"
 
@@ -188,6 +189,23 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
             )
     else:
         lines.append("| — | — | — | — | — | — | — | 本周无交易事件 |")
+
+    lines.extend(["", "---", "", "## Advisory 风控提示（影子盘）", ""])
+    lines.append("")
+    lines.append("> 时间止损 / 回撤止盈目前仅做提示，不自动执行。")
+    lines.append("")
+    if shadow_advisories:
+        lines.append("| 股票 | 代码 | 持有天数 | 回撤 | 提示 |")
+        lines.append("|------|------|----------|------|------|")
+        for item in shadow_advisories:
+            drawdown_pct = _safe_float(item.get("drawdown_pct", 0))
+            lines.append(
+                f"| {item.get('name', '—')} | {item.get('code', '—')} | "
+                f"{item.get('hold_days', '—')} | {drawdown_pct*100:.1f}% | "
+                f"{item.get('summary', '—')} |"
+            )
+    else:
+        lines.append("（当前无时间止损 / 回撤止盈提示）")
 
     lines.extend(["", "---", "", "## 规则执行检查", ""])
     lines.extend([
@@ -366,9 +384,19 @@ def run() -> dict:
                 "reason_code": event.get("reason_code", ""),
             })
 
+        shadow_advisories = []
+        try:
+            from scripts.pipeline.shadow_trade import get_status as get_shadow_status
+            shadow_status = get_shadow_status()
+            shadow_advisories = shadow_status.get("advisory_summary", {}).get("positions", [])
+            if shadow_advisories:
+                _logger.info(f"  影子盘 advisory 提示: {len(shadow_advisories)} 只")
+        except Exception as e:
+            _logger.warning(f"  影子盘 advisory 汇总失败: {e}")
+
         _logger.info(">> 生成周报文件...")
         report_content, summary_stats = _build_weekly_report(
-            vault, stats, core_pool_changes, trade_events, year, week_num
+            vault, stats, core_pool_changes, trade_events, year, week_num, shadow_advisories
         )
 
         review_dir = Path(vault.vault_path) / "03-复盘" / "周"
@@ -418,6 +446,7 @@ def run() -> dict:
                 "buy_count": buy_count,
                 "sell_count": sell_count,
                 "realized_pnl": realized_pnl,
+                "shadow_advisory_count": len(shadow_advisories),
             },
         )
 

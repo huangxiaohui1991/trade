@@ -20,7 +20,7 @@ pipeline/shadow_trade.py — 影子交易引擎
 import os
 import sys
 import math
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +29,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from scripts.mx.mx_moni import MXMoni
 from scripts.engine.scorer import score as score_stock
-from scripts.state import record_trade_event
+from scripts.state import load_activity_summary, record_trade_event
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 
@@ -130,6 +130,274 @@ def _trade_result(code: str, name: str, shares: int, status: str,
     }
     payload.update(extra)
     return payload
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value in [None, ""]:
+            return default
+        if isinstance(value, str):
+            value = value.replace("¥", "").replace("%", "").replace(",", "").strip()
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value in [None, ""]:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) >= 10:
+        text = text[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _sort_trade_event_key(event: dict) -> tuple:
+    event_date = _parse_date(
+        event.get("event_date")
+        or event.get("trade_date")
+        or event.get("date")
+    ) or date.min
+    created_at = str(event.get("created_at") or event.get("timestamp") or "").strip()
+    return (event_date.isoformat(), created_at)
+
+
+def _build_open_position_context(trade_events: list) -> dict:
+    """
+    从结构化交易事件推断当前未平仓仓位的开仓日期与首买价。
+
+    规则：
+      - 仓位未归零前，open_date 保持首笔开仓日
+      - 仓位清零后，下一次买入重新开始新的持仓周期
+    """
+    contexts = {}
+    for event in sorted(trade_events or [], key=_sort_trade_event_key):
+        code = str(event.get("code", "")).strip()
+        side = str(event.get("side", event.get("action", ""))).strip().lower()
+        shares = _safe_int(event.get("shares", 0))
+        price = _safe_float(event.get("price", 0))
+        event_date = _parse_date(
+            event.get("event_date")
+            or event.get("trade_date")
+            or event.get("date")
+        )
+
+        if not code or side not in {"buy", "sell"} or shares <= 0 or not event_date:
+            continue
+
+        ctx = contexts.setdefault(code, {
+            "open_date": "",
+            "first_buy_price": 0.0,
+            "net_shares": 0,
+            "last_event_date": "",
+        })
+
+        if side == "buy":
+            if ctx["net_shares"] <= 0:
+                ctx["open_date"] = event_date.isoformat()
+                ctx["first_buy_price"] = round(price, 3)
+            ctx["net_shares"] += shares
+        else:
+            ctx["net_shares"] = max(ctx["net_shares"] - shares, 0)
+            if ctx["net_shares"] == 0:
+                ctx["open_date"] = ""
+                ctx["first_buy_price"] = 0.0
+
+        ctx["last_event_date"] = event_date.isoformat()
+
+    return {
+        code: ctx
+        for code, ctx in contexts.items()
+        if _safe_int(ctx.get("net_shares", 0)) > 0
+    }
+
+
+def _load_history_points_since(code: str, open_date: date | None, today: date | None = None) -> list:
+    if not code or not open_date:
+        return []
+
+    today = today or datetime.now().date()
+    lookback_days = max((today - open_date).days + 10, 60)
+
+    try:
+        from scripts.engine.technical import _get_hist_data
+
+        hist = _get_hist_data(code, days=lookback_days)
+    except Exception as exc:
+        _logger.info(f"[shadow] {code} 历史行情拉取失败: {exc}")
+        return []
+
+    if hist is None or getattr(hist, "empty", True):
+        return []
+
+    date_col = "日期" if "日期" in hist.columns else "date" if "date" in hist.columns else None
+    close_col = "收盘" if "收盘" in hist.columns else "close" if "close" in hist.columns else None
+    if not date_col or not close_col:
+        return []
+
+    points = []
+    for _, row in hist.iterrows():
+        point_date = _parse_date(row.get(date_col))
+        close = _safe_float(row.get(close_col), 0.0)
+        if not point_date or point_date < open_date or close <= 0:
+            continue
+        points.append({
+            "date": point_date.isoformat(),
+            "close": round(close, 3),
+        })
+    return points
+
+
+def _build_advisory_signals(position: dict, trade_context: dict | None = None,
+                            history_points: list | None = None,
+                            risk_cfg: dict | None = None,
+                            today: date | None = None) -> dict:
+    risk_cfg = risk_cfg or get_strategy().get("risk", {})
+    today = today or datetime.now().date()
+
+    cost = _safe_float(position.get("cost", 0))
+    price = _safe_float(position.get("price", 0))
+    trade_context = trade_context or {}
+    open_date = _parse_date(trade_context.get("open_date"))
+    first_buy_price = _safe_float(trade_context.get("first_buy_price", cost), cost)
+    hold_days = (today - open_date).days if open_date else None
+    pnl_pct = ((price / cost) - 1) if cost > 0 and price > 0 else 0.0
+
+    take_profit_cfg = risk_cfg.get("take_profit", {})
+    t1_pct = _safe_float(take_profit_cfg.get("t1_pct", 0.15), 0.15)
+    t1_drawdown = _safe_float(take_profit_cfg.get("t1_drawdown", 0.05), 0.05)
+    t2_drawdown = _safe_float(take_profit_cfg.get("t2_drawdown", 0.08), 0.08)
+    time_stop_days = _safe_int(risk_cfg.get("time_stop_days", 15), 15)
+
+    signals = []
+    if open_date and hold_days is not None and hold_days >= time_stop_days > 0 and pnl_pct < 0.02:
+        signals.append({
+            "rule_code": "RISK_TIME_STOP",
+            "rule_name": ADVISORY_RISK_RULES["RISK_TIME_STOP"],
+            "severity": "warning",
+            "message": (
+                f"已持有{hold_days}日，当前涨幅{pnl_pct*100:+.1f}%低于+2.0%，"
+                "触发时间止损提示"
+            ),
+        })
+
+    peak_close = 0.0
+    peak_date = ""
+    drawdown_pct = 0.0
+    peak_gain_pct = 0.0
+    target_base = first_buy_price if first_buy_price > 0 else cost
+    history_points = history_points or []
+    if history_points:
+        peak_point = max(history_points, key=lambda item: _safe_float(item.get("close", 0), 0.0))
+        peak_close = round(_safe_float(peak_point.get("close", 0), 0.0), 3)
+        peak_date = str(peak_point.get("date", "")).strip()
+        if peak_close > 0 and price > 0:
+            drawdown_pct = max((peak_close - price) / peak_close, 0.0)
+        if target_base > 0 and peak_close > 0:
+            peak_gain_pct = (peak_close / target_base) - 1
+
+    t1_price = round(target_base * (1 + t1_pct), 2) if target_base > 0 else 0.0
+    if peak_close >= t1_price > 0 and drawdown_pct >= t1_drawdown:
+        threshold = t2_drawdown if drawdown_pct >= t2_drawdown else t1_drawdown
+        stage = "清仓级别" if threshold == t2_drawdown else "减仓级别"
+        signals.append({
+            "rule_code": "RISK_DRAWDOWN_TAKE_PROFIT",
+            "rule_name": ADVISORY_RISK_RULES["RISK_DRAWDOWN_TAKE_PROFIT"],
+            "severity": "high" if threshold == t2_drawdown else "warning",
+            "message": (
+                f"自最高收盘¥{peak_close:.2f}({peak_date or '未知日期'})回撤"
+                f"{drawdown_pct*100:.1f}%，达到{threshold*100:.0f}%{stage}提示"
+            ),
+            "peak_close": peak_close,
+            "peak_date": peak_date,
+            "drawdown_pct": round(drawdown_pct, 4),
+        })
+
+    return {
+        "open_date": open_date.isoformat() if open_date else "",
+        "hold_days": hold_days,
+        "first_buy_price": round(first_buy_price, 3) if first_buy_price else 0.0,
+        "peak_close": peak_close,
+        "peak_date": peak_date,
+        "peak_gain_pct": round(peak_gain_pct, 4),
+        "drawdown_pct": round(drawdown_pct, 4),
+        "signals": signals,
+        "summary": "；".join(signal["message"] for signal in signals),
+        "triggered": bool(signals),
+    }
+
+
+def _build_shadow_position_view(raw_position: dict, risk_cfg: dict,
+                                trade_context_map: dict | None = None,
+                                history_cache: dict | None = None,
+                                today: date | None = None) -> dict:
+    code = str(raw_position.get("stockCode", raw_position.get("secuCode", raw_position.get("code", "")))).strip()
+    name = str(raw_position.get("stockName", raw_position.get("secuName", raw_position.get("name", "")))).strip()
+    shares = _safe_int(raw_position.get("totalQty", raw_position.get("currentQty", raw_position.get("shares", 0))))
+    cost = _safe_float(raw_position.get("costPrice", raw_position.get("avgCost", raw_position.get("cost", 0))))
+    price = _safe_float(raw_position.get("lastPrice", raw_position.get("currentPrice", raw_position.get("price", 0))))
+    market_value = _safe_float(raw_position.get("marketValue", shares * price))
+    pnl = _safe_float(raw_position.get("profit", raw_position.get("floatProfit", (price - cost) * shares)))
+    pnl_pct = (price / cost - 1) * 100 if cost > 0 else 0.0
+
+    trade_context = (trade_context_map or {}).get(code, {})
+    open_date = _parse_date(trade_context.get("open_date"))
+    cache_key = (code, open_date.isoformat() if open_date else "")
+    history_cache = history_cache if history_cache is not None else {}
+    if cache_key not in history_cache:
+        history_cache[cache_key] = _load_history_points_since(code, open_date, today=today)
+    advisory = _build_advisory_signals(
+        {"code": code, "name": name, "shares": shares, "cost": cost, "price": price},
+        trade_context=trade_context,
+        history_points=history_cache.get(cache_key, []),
+        risk_cfg=risk_cfg,
+        today=today,
+    )
+
+    return {
+        "code": code,
+        "name": name,
+        "shares": shares,
+        "cost": cost,
+        "price": price,
+        "market_value": market_value,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "open_date": advisory.get("open_date", ""),
+        "hold_days": advisory.get("hold_days"),
+        "first_buy_price": advisory.get("first_buy_price", 0.0),
+        "peak_close": advisory.get("peak_close", 0.0),
+        "peak_date": advisory.get("peak_date", ""),
+        "drawdown_pct": advisory.get("drawdown_pct", 0.0),
+        "advisory_signals": advisory.get("signals", []),
+        "advisory_summary": advisory.get("summary", ""),
+        "advisory_triggered": advisory.get("triggered", False),
+    }
+
+
+def _load_paper_position_context(window: int = 180) -> dict:
+    try:
+        summary = load_activity_summary(window, scope="paper_mx")
+    except Exception as exc:
+        _logger.info(f"[shadow] 结构化模拟盘事件读取失败: {exc}")
+        return {}
+    return _build_open_position_context(summary.get("trade_events", []))
 
 
 def _get_positions(mx: MXMoni) -> list:
@@ -321,8 +589,9 @@ def check_stop_signals(dry_run: bool = False) -> list:
     stop_loss_pct = risk_cfg.get("stop_loss", 0.04)
     absolute_stop_pct = risk_cfg.get("absolute_stop", 0.07)
     t1_pct = risk_cfg.get("take_profit", {}).get("t1_pct", 0.15)
-    t1_drawdown = risk_cfg.get("take_profit", {}).get("t1_drawdown", 0.05)
-    t2_drawdown = risk_cfg.get("take_profit", {}).get("t2_drawdown", 0.08)
+    paper_position_context = _load_paper_position_context(window=180)
+    history_cache = {}
+    today = datetime.now().date()
 
     positions = _get_positions(mx)
     if not positions:
@@ -343,12 +612,21 @@ def check_stop_signals(dry_run: bool = False) -> list:
 
     results = []
     for pos in positions:
-        code = str(pos.get("stockCode", pos.get("secuCode", ""))).strip()
-        name = str(pos.get("stockName", pos.get("secuName", ""))).strip()
-        shares = int(pos.get("totalQty", pos.get("currentQty", 0)))
-        cost = float(pos.get("costPrice", pos.get("avgCost", 0)))
-        price = float(pos.get("lastPrice", pos.get("currentPrice", 0)))
+        position_view = _build_shadow_position_view(
+            pos,
+            risk_cfg,
+            trade_context_map=paper_position_context,
+            history_cache=history_cache,
+            today=today,
+        )
+        code = position_view["code"]
+        name = position_view["name"]
+        shares = int(position_view["shares"])
+        cost = float(position_view["cost"])
+        price = float(position_view["price"])
         avail_shares = int(pos.get("enableQty", pos.get("availQty", shares)))
+        advisory_signals = position_view.get("advisory_signals", [])
+        advisory_summary = position_view.get("advisory_summary", "")
 
         if shares <= 0 or cost <= 0:
             continue
@@ -387,6 +665,9 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 sell_price = t1_price
 
         if not action:
+            reason = f"盈亏{pnl_pct*100:+.1f}% 止损¥{stop_loss_price} 止盈¥{t1_price}"
+            if advisory_summary:
+                reason = f"{reason} | 提示: {advisory_summary}"
             _logger.info(
                 f"[shadow] {name}({code}) 现价¥{price:.2f} 成本¥{cost:.2f} "
                 f"盈亏{pnl_pct*100:+.1f}% | 止损¥{stop_loss_price} 止盈¥{t1_price} → 持有"
@@ -395,16 +676,22 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 "code": code,
                 "name": name,
                 "action": "持有",
-                "reason": f"盈亏{pnl_pct*100:+.1f}% 止损¥{stop_loss_price} 止盈¥{t1_price}",
+                "reason": reason,
                 "reason_code": "RISK_HOLD",
                 "stop_loss": stop_loss_price,
                 "take_profit": t1_price,
+                "open_date": position_view.get("open_date", ""),
+                "hold_days": position_view.get("hold_days"),
+                "advisory_signals": advisory_signals,
+                "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
                 "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
             continue
 
         _logger.info(f"[shadow] {name}({code}) → {action} [{reason_code}] ({reason})")
+        if advisory_summary:
+            _logger.info(f"[shadow] {name}({code}) advisory: {advisory_summary}")
 
         if dry_run or not can_trade:
             tag = "dry_run" if dry_run else "非交易时间"
@@ -418,6 +705,10 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 "status": tag,
                 "stop_loss": stop_loss_price,
                 "take_profit": t1_price,
+                "open_date": position_view.get("open_date", ""),
+                "hold_days": position_view.get("hold_days"),
+                "advisory_signals": advisory_signals,
+                "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
                 "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
@@ -437,6 +728,8 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 "reason": reason,
                 "reason_code": reason_code,
                 "status": "不足100股",
+                "advisory_signals": advisory_signals,
+                "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
                 "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
@@ -459,6 +752,8 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 "reason": reason,
                 "reason_code": reason_code,
                 "status": "成功",
+                "advisory_signals": advisory_signals,
+                "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
                 "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
@@ -472,6 +767,8 @@ def check_stop_signals(dry_run: bool = False) -> list:
                 "reason": reason,
                 "reason_code": reason_code,
                 "status": f"失败:{msg}",
+                "advisory_signals": advisory_signals,
+                "advisory_summary": advisory_summary,
                 "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
                 "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
             })
@@ -488,22 +785,42 @@ def get_status() -> dict:
     mx = _get_moni()
     balance = _get_balance(mx)
     positions = _get_positions(mx)
+    risk_cfg = get_strategy().get("risk", {})
+    paper_position_context = _load_paper_position_context(window=180)
+    history_cache = {}
+    today = datetime.now().date()
 
     pos_list = []
     for pos in positions:
-        code = str(pos.get("stockCode", pos.get("secuCode", ""))).strip()
-        name = str(pos.get("stockName", pos.get("secuName", ""))).strip()
-        shares = int(pos.get("totalQty", pos.get("currentQty", 0)))
-        cost = float(pos.get("costPrice", pos.get("avgCost", 0)))
-        price = float(pos.get("lastPrice", pos.get("currentPrice", 0)))
-        market_value = float(pos.get("marketValue", shares * price))
-        pnl = float(pos.get("profit", pos.get("floatProfit", (price - cost) * shares)))
-        pnl_pct = (price / cost - 1) * 100 if cost > 0 else 0
+        pos_list.append(
+            _build_shadow_position_view(
+                pos,
+                risk_cfg,
+                trade_context_map=paper_position_context,
+                history_cache=history_cache,
+                today=today,
+            )
+        )
 
-        pos_list.append({
-            "code": code, "name": name, "shares": shares,
-            "cost": cost, "price": price, "market_value": market_value,
-            "pnl": pnl, "pnl_pct": pnl_pct,
+    advisory_positions = []
+    triggered_rules = set()
+    triggered_signal_count = 0
+    for position in pos_list:
+        signals = position.get("advisory_signals", [])
+        if not signals:
+            continue
+        triggered_signal_count += len(signals)
+        triggered_rules.update(signal.get("rule_code", "") for signal in signals if signal.get("rule_code"))
+        advisory_positions.append({
+            "code": position.get("code", ""),
+            "name": position.get("name", ""),
+            "open_date": position.get("open_date", ""),
+            "hold_days": position.get("hold_days"),
+            "peak_close": position.get("peak_close", 0.0),
+            "peak_date": position.get("peak_date", ""),
+            "drawdown_pct": position.get("drawdown_pct", 0.0),
+            "signals": signals,
+            "summary": position.get("advisory_summary", ""),
         })
 
     return {
@@ -513,6 +830,12 @@ def get_status() -> dict:
         "automation_scope": AUTOMATION_SCOPE_NOTE,
         "automated_rules": list(AUTOMATED_RISK_RULES.keys()),
         "advisory_rules": list(ADVISORY_RISK_RULES.keys()),
+        "advisory_summary": {
+            "triggered_signal_count": triggered_signal_count,
+            "triggered_position_count": len(advisory_positions),
+            "triggered_rules": sorted(triggered_rules),
+            "positions": advisory_positions,
+        },
     }
 
 
@@ -525,6 +848,7 @@ def generate_report() -> str:
     status = get_status()
     bal = status["balance"]
     positions = status["positions"]
+    advisory_summary = status.get("advisory_summary", {})
 
     init = bal.get("init_money", 200000)
     total = bal.get("total_assets", 0)
@@ -564,6 +888,32 @@ def generate_report() -> str:
         lines.append("")
     else:
         lines.append("## 当前持仓：空仓")
+        lines.append("")
+
+    lines.extend([
+        "## Advisory 风控提示",
+        "",
+        f"> {AUTOMATION_SCOPE_NOTE}",
+        "",
+    ])
+    if advisory_summary.get("positions"):
+        lines.append("| 股票 | 代码 | 持有天数 | 高点 | 回撤 | 提示 |")
+        lines.append("|------|------|----------|------|------|------|")
+        for item in advisory_summary.get("positions", []):
+            peak_close = _safe_float(item.get("peak_close", 0), 0.0)
+            peak_date = str(item.get("peak_date", "")).strip()
+            peak_text = f"¥{peak_close:.2f}" if peak_close > 0 else "—"
+            if peak_text != "—" and peak_date:
+                peak_text = f"{peak_text}({peak_date})"
+            drawdown_pct = _safe_float(item.get("drawdown_pct", 0), 0.0)
+            lines.append(
+                f"| {item.get('name', '—')} | {item.get('code', '—')} | "
+                f"{item.get('hold_days', '—')} | {peak_text} | "
+                f"{drawdown_pct*100:.1f}% | {item.get('summary', '—')} |"
+            )
+        lines.append("")
+    else:
+        lines.append("当前无时间止损 / 回撤止盈提示。")
         lines.append("")
 
     lines.append(f"> 本报告由影子交易引擎自动生成，用于验证交易系统逻辑")
@@ -625,6 +975,9 @@ def main():
                 print(f"    {p['name']}({p['code']}) {p['shares']}股 "
                       f"成本¥{p['cost']:.2f} 现价¥{p['price']:.2f} "
                       f"盈亏{p['pnl_pct']:+.1f}%")
+                if p.get("advisory_signals"):
+                    for signal in p["advisory_signals"]:
+                        print(f"      advisory [{signal['rule_code']}]: {signal['message']}")
         else:
             print("  持仓: 空仓")
 
