@@ -216,6 +216,70 @@ def _get_core_pool_status(vault: ObsidianVault, engine: DataEngine) -> list:
     return core_items
 
 
+def _get_morning_news(core_items: list, positions: list) -> list:
+    """
+    盘前资讯：用 MX 搜索核心池和持仓相关的最新新闻/公告/研报。
+    每只股票取最重要的 1-2 条，控制总量。
+    """
+    news_items = []
+    try:
+        from scripts.mx.mx_search import MXSearch
+        mx = MXSearch()
+
+        # 收集需要搜索的股票（核心池 + 持仓，去重）
+        stocks_to_search = {}
+        for item in core_items:
+            name = item.get("name", "")
+            code = item.get("code", "")
+            if name and code:
+                stocks_to_search[code] = name
+        for pos in positions:
+            name = pos.get("name", "")
+            code = pos.get("code", "")
+            if name and code:
+                stocks_to_search[code] = name
+
+        for code, name in stocks_to_search.items():
+            try:
+                result = mx.search(f"{name} 最新公告 新闻")
+                data = result.get("data", {})
+                inner = data.get("data", {})
+                search_resp = inner.get("llmSearchResponse", {})
+                items = search_resp.get("data", [])
+
+                if not items:
+                    continue
+
+                # 取前 2 条最相关的
+                for item in items[:2]:
+                    title = item.get("title", "").strip()
+                    date = str(item.get("date", "")).split()[0] if item.get("date") else ""
+                    info_type = item.get("informationType", "")
+                    type_map = {"REPORT": "研报", "NEWS": "新闻", "ANNOUNCEMENT": "公告"}
+                    type_cn = type_map.get(info_type, info_type)
+                    rating = item.get("rating", "")
+
+                    if title:
+                        entry = {
+                            "stock": name,
+                            "code": code,
+                            "title": title,
+                            "date": date,
+                            "type": type_cn,
+                        }
+                        if rating:
+                            entry["rating"] = rating
+                        news_items.append(entry)
+
+            except Exception as e:
+                _logger.info(f"[morning_news] {name} 搜索失败: {e}")
+
+    except Exception as e:
+        _logger.warning(f"[morning_news] MX 搜索不可用: {e}")
+
+    return news_items
+
+
 def _get_weekly_buy_count(vault: ObsidianVault) -> int:
     """从本周日志统计买入次数"""
     try:
@@ -329,10 +393,17 @@ def run() -> dict:
         for item in core_items:
             _logger.info(f"  {item['name']}: {item.get('status', 'OK')}")
 
+        # 4. 核心池+持仓相关新闻（MX 资讯搜索）
+        _logger.info(">> 盘前资讯")
+        news_items = _get_morning_news(core_items, positions)
+        for news in news_items:
+            _logger.info(f"  [{news['stock']}] {news['title']}")
+
         weekly_bought = _get_weekly_buy_count(vault)
         _logger.info(f">> 本周买入: {weekly_bought}/2")
 
         discord_data = _build_discord_data(market_data, positions, core_items, weekly_bought, weekday)
+        discord_data["news"] = news_items
         ok, err = send_morning_summary(discord_data)
         if ok:
             _logger.info(">> Discord 推送成功")

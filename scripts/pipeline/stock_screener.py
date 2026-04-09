@@ -32,6 +32,7 @@ import akshare as ak
 
 from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.utils.obsidian import ObsidianVault
+from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
@@ -224,6 +225,33 @@ def _fallback_market_candidates(strategy_cfg: dict, blacklist: set) -> list:
     return trimmed
 
 
+def _load_cached_candidates(cache_key: str, max_age_seconds: int) -> tuple[list, dict]:
+    """读取最近一次成功候选缓存。"""
+    payload = load_json_cache("screening_candidates", cache_key, max_age_seconds=max_age_seconds)
+    if not payload:
+        return [], {}
+
+    cached_candidates = _dedupe_candidates(payload.get("data", []))
+    if not cached_candidates:
+        return [], {}
+
+    meta = payload.get("meta", {})
+    meta["cached_at"] = payload.get("cached_at", "")
+    _logger.info(
+        f"[cache] 命中 {cache_key}: {len(cached_candidates)} 只 "
+        f"(cached_at={payload.get('cached_at', 'unknown')})"
+    )
+    return cached_candidates, meta
+
+
+def _save_candidate_cache(cache_key: str, candidates: list, source: str, extra_meta=None) -> str:
+    """缓存候选列表，供外部接口失败时兜底。"""
+    meta = {"source": source, "count": len(candidates)}
+    if extra_meta:
+        meta.update(extra_meta)
+    return save_json_cache("screening_candidates", cache_key, _dedupe_candidates(candidates), meta=meta)
+
+
 def _write_market_scan_watchlist(results: list) -> str:
     """将市场扫描中可操作的股票写入观察池候选文件。"""
     vault = ObsidianVault()
@@ -311,19 +339,59 @@ def _sync_to_zixuan(actionable: list) -> None:
 
 
 def _resolve_market_candidates(default_query: str, select_type: str,
-                               strategy_cfg: dict, blacklist: set) -> tuple[list, str]:
-    """全市场模式：优先 mx-screener，失败则使用 akshare 轻筛。"""
+                               strategy_cfg: dict, blacklist: set,
+                               tracked_candidates: list) -> tuple[list, str, dict]:
+    """全市场模式：优先 mx-screener，再试 akshare，再回退缓存和 tracked。"""
+    screening_cfg = strategy_cfg.get("screening", {})
+    cache_ttl_hours = int(screening_cfg.get("candidate_cache_ttl_hours", 24))
+    cache_ttl_seconds = max(cache_ttl_hours, 1) * 3600
+    fallback_meta = {
+        "source_chain": [],
+        "used_cache": False,
+        "cache_path": "",
+        "cache_hit_source": "",
+    }
+
     if default_query:
         mx_results = _call_mx_screener(default_query, select_type)
         if mx_results:
             candidates = [c for c in _dedupe_candidates(mx_results) if c.get("code") not in blacklist]
             _logger.info(f">> mx-screener 全市场初筛返回 {len(candidates)} 只")
-            return candidates, "妙想智能选股（全市场）"
+            cache_path = _save_candidate_cache(
+                "market_latest",
+                candidates,
+                "妙想智能选股（全市场）",
+                {"query": default_query, "select_type": select_type},
+            )
+            fallback_meta["source_chain"].append("mx_market")
+            fallback_meta["cache_path"] = cache_path
+            return candidates, "妙想智能选股（全市场）", fallback_meta
 
         _logger.warning(">> mx-screener 调用失败，fallback 到 akshare 全市场轻筛")
+        fallback_meta["source_chain"].append("mx_market_failed")
 
     candidates = _fallback_market_candidates(strategy_cfg, blacklist)
-    return candidates, "akshare 全市场轻筛"
+    if candidates:
+        cache_path = _save_candidate_cache("market_latest", candidates, "akshare 全市场轻筛")
+        fallback_meta["source_chain"].append("akshare_market")
+        fallback_meta["cache_path"] = cache_path
+        return candidates, "akshare 全市场轻筛", fallback_meta
+
+    fallback_meta["source_chain"].append("akshare_market_failed")
+    cached_candidates, cache_meta = _load_cached_candidates("market_latest", cache_ttl_seconds)
+    if cached_candidates:
+        fallback_meta["source_chain"].append("cache_market")
+        fallback_meta["used_cache"] = True
+        fallback_meta["cache_hit_source"] = str(cache_meta.get("source", ""))
+        fallback_meta["cache_cached_at"] = str(cache_meta.get("cached_at", ""))
+        return cached_candidates, f"本地缓存回退（{cache_meta.get('source', 'market_latest')})", fallback_meta
+
+    if tracked_candidates:
+        fallback_meta["source_chain"].append("tracked_fallback")
+        _logger.warning(">> 全市场候选为空，回退到已跟踪股票池")
+        return tracked_candidates, "已跟踪股票池回退", fallback_meta
+
+    return [], "无可用候选来源", fallback_meta
 
 
 def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
@@ -437,14 +505,25 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         default_query = screening_cfg.get("mx_query", "")
         select_type = screening_cfg.get("mx_select_type", "A股")
 
+        tracked_fallback = _fallback_tracked_candidates(stocks_cfg, blacklist)
+        resolution_meta = {"source_chain": []}
+
         if universe == "market":
-            candidates, source = _resolve_market_candidates(default_query, select_type, strategy_cfg, blacklist)
+            candidates, source, resolution_meta = _resolve_market_candidates(
+                default_query, select_type, strategy_cfg, blacklist, tracked_fallback
+            )
             pool_name = "市场扫描"
             _logger.info(f">> 市场扫描候选: {len(candidates)} 只")
         else:
             candidates, pool_name, source = _resolve_tracked_candidates(
                 pool, stocks_cfg, blacklist, default_query, select_type
             )
+            resolution_meta = {
+                "source_chain": ["tracked_pool"],
+                "used_cache": False,
+                "cache_path": "",
+                "cache_hit_source": "",
+            }
 
         if not candidates:
             _logger.warning("无候选股票，退出")
@@ -456,6 +535,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                     "universe": universe,
                     "reason": "no_candidates",
                     "source": source,
+                    "source_chain": resolution_meta.get("source_chain", []),
                 },
                 today_str,
             )
@@ -503,6 +583,10 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 "report_path": report_path,
                 "market_watch_path": market_watch_path,
                 "used_fallback": "akshare" in source.lower() or "fallback" in source.lower(),
+                "used_cache": resolution_meta.get("used_cache", False),
+                "cache_path": resolution_meta.get("cache_path", ""),
+                "cache_hit_source": resolution_meta.get("cache_hit_source", ""),
+                "source_chain": resolution_meta.get("source_chain", []),
             },
             today_str,
         )

@@ -43,5 +43,13 @@ screening:
   # 为空则跳过 mx skill，直接用 akshare 原生候选池
   mx_query: "站上20日均线，ROE大于8%，成交额超2亿，股价5-200元，市盈率TTM低于40，剔除ST"
   mx_select_type: "A股"
+  market_scan_limit: 30
+  candidate_cache_ttl_hours: 24
+  fallback_filters:
+    min_price: 5
+    max_price: 200
+    min_amount: 100000000
+    max_pe_ttm: 40
+    exclude_st: true
 
 capital: 450286
