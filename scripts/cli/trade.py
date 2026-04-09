@@ -560,7 +560,9 @@ def _artifact_paths_from_run(run_result: dict) -> list:
     return deduped
 
 
-def status_today() -> dict:
+def status_today(sync_state: bool = True) -> dict:
+    if sync_state:
+        _preflight_state_sync("all")
     today = load_daily_state()
     strategy = get_strategy()
     today_decision = build_today_decision(strategy=strategy)
@@ -672,7 +674,7 @@ def orchestrate_workflow(name: str, args) -> dict:
         payload["duration_seconds"] = round((finished - started).total_seconds(), 3)
         return sanitize_for_json(payload)
 
-    status_before = status_today()
+    status_before = status_today(sync_state=False)
     payload["status_before"] = {
         "today_decision": status_before.get("today_decision", {}),
         "pool_management": status_before.get("pool_management", {}),
@@ -716,7 +718,7 @@ def orchestrate_workflow(name: str, args) -> dict:
         if step_result.get("status") == "warning" and payload["status"] == "success":
             payload["status"] = "warning"
 
-    status_after = status_today()
+    status_after = status_today(sync_state=False)
     payload["status_after"] = {
         "today_decision": status_after.get("today_decision", {}),
         "pool_management": status_after.get("pool_management", {}),
