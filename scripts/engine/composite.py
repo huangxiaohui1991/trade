@@ -41,6 +41,7 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.market_timer import MarketTimer, get_signal as get_market_signal
+from scripts.engine.risk_model import check_risk
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
@@ -324,6 +325,69 @@ def decide(stock_code: str, score: float, current_price: float,
     """便捷函数：对单只股票做决策"""
     decider = CompositeDecider()
     return decider.decide(stock_code, score, current_price, market_signal)
+
+
+def build_today_decision(strategy: Optional[dict] = None) -> dict:
+    """
+    统一产出今日决策结论，供 CLI / openclaw / pipeline 摘要使用。
+    """
+    strategy = strategy or get_strategy()
+    decider = CompositeDecider(capital=strategy.get("capital"))
+    market_signal = decider.market_timer.get_signal()
+    market_multiplier = decider.market_timer.get_position_multiplier()
+    current_exposure = decider._get_current_exposure()
+
+    weekly_buys = 0
+    holding_count = 0
+    try:
+        vault = ObsidianVault()
+        portfolio = vault.read_portfolio()
+        holdings = portfolio.get("holdings", [])
+        holding_count = sum(
+            1 for row in holdings
+            if str(row.get("股票", "")).strip() not in ["", "—", "空仓"]
+            and int(float(row.get("持有股数", 0) or 0)) > 0
+        )
+        weekly_buys = sum(
+            int(float(row.get("加仓次数", 0) or 0)) + 1
+            for row in holdings
+            if str(row.get("股票", "")).strip() not in ["", "—", "空仓"]
+            and int(float(row.get("持有股数", 0) or 0)) > 0
+        )
+    except Exception as e:
+        _logger.warning(f"[composite] build_today_decision 读取持仓失败: {e}")
+
+    risk = check_risk(
+        current_exposure=current_exposure,
+        this_week_buys=weekly_buys,
+        holding_count=holding_count,
+        proposed_amount=0,
+    )
+
+    reasons = []
+    if market_signal in ["CLEAR", "RED"]:
+        decision = "NO_TRADE"
+        reasons.append(f"market_signal={market_signal}")
+    elif not risk.get("can_buy", False):
+        decision = "NO_TRADE"
+        reasons.extend(risk.get("reasons", []))
+    elif market_signal == "YELLOW" or market_multiplier < 1.0:
+        decision = "REDUCED_BUY"
+        reasons.append("market_signal=YELLOW")
+    else:
+        decision = "BUY_ALLOWED"
+        reasons.append("market_signal=GREEN")
+
+    return {
+        "decision": decision,
+        "market_signal": market_signal,
+        "market_multiplier": market_multiplier,
+        "current_exposure": round(current_exposure, 3),
+        "weekly_buys": weekly_buys,
+        "holding_count": holding_count,
+        "risk": risk,
+        "reasons": reasons,
+    }
 
 
 if __name__ == "__main__":

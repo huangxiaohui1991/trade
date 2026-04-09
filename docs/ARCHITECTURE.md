@@ -1,7 +1,7 @@
 # A股交易系统 · Hermes 原生架构方案
 
 > 分支：`feature/agent-native`
-> 版本：v2.2（自动化闭环增强版）
+> 版本：v2.3（统一 CLI / 运行协议版）
 > 日期：2026-04-09
 
 ---
@@ -15,6 +15,7 @@
 - 对外部脆弱数据源补本地缓存，避免自动化空跑
 - Obsidian 是唯一事实来源，所有数据读写都通过它
 - 每日运行状态单独落盘，便于排障和回溯
+- 统一通过 CLI 对外暴露给 Hermes / OpenClaw
 
 ---
 
@@ -27,9 +28,9 @@
 └──────────────────────────┬──────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────┐
-│                   Hermes-Agent                       │
+│          Hermes-Agent / OpenClaw / trade CLI         │
 │                                                     │
-│   cron 调度（盘前/午休/收盘/评分/周报）              │
+│   doctor / run / status 统一入口                     │
 │   Discord 推送（格式化报告）                         │
 │   自然语言处理（选股/评分/查询/复盘）                 │
 │   妙想 API 调用（mx-data/search/xuangu/zixuan/moni）│
@@ -116,13 +117,15 @@ trade/
 │   │   ├── weekly_review.py    # 周报
 │   │   ├── core_pool_scoring.py # 核心池评分
 │   │   └── stock_screener.py   # 选股流水线（tracked / market 双模式）
-│   ├── cli/                   # 命令行工具
+│   ├── cli/
+│   │   └── trade.py           # 统一 CLI（doctor / run / status）
 │   └── utils/
 │       ├── cache.py            # 本地缓存
 │       ├── obsidian.py         # Obsidian 读写
 │       ├── discord_push.py     # Discord 推送
 │       ├── config_loader.py    # 配置读取
 │       ├── runtime_state.py    # 每日运行状态
+│       ├── run_context.py      # run_id / lock / result.json
 │       └── logger.py
 │
 ├── .env                        # 环境变量（MX_APIKEY 等，已 gitignore）
@@ -133,6 +136,8 @@ trade/
 │
 ├── data/
 │   ├── cache/                  # 外部数据缓存（不纳入 Git）
+│   ├── runs/                   # 单次运行结果（不纳入 Git）
+│   ├── locks/                  # 运行锁（不纳入 Git）
 │   ├── runtime/                # 每日状态文件（不纳入 Git）
 │   ├── prices/                 # 价格快照
 │   ├── backtest/               # 回测结果
@@ -235,6 +240,15 @@ blacklist:
 | 收盘报告 | 15:35（周一~五） | 更新持仓价格 + 止损止盈 + 生成明日计划 + 状态落盘 | → Discord + Obsidian |
 | 核心池评分 | 15:40（周一~五） | 批量评分核心池所有股 + 写回核心池 | → Obsidian |
 | 周报 | 周日 20:00 | 统计本周 P&L + 胜率 + 盈亏比 | → Obsidian + Discord |
+
+统一命令：
+
+```bash
+bin/trade doctor --json
+bin/trade status today --json
+bin/trade run morning --json
+bin/trade run screener --universe market --pool all --json
+```
 
 ---
 
@@ -442,6 +456,7 @@ market 模式：
 
 ### 已完成
 
+- [x] `scripts/cli/trade.py` 统一 CLI
 - [x] `config/strategy.yaml` + `config/stocks.yaml` 初始化并接入
 - [x] `scripts/engine/data_engine.py` 多源 fallback
 - [x] `scripts/utils/obsidian.py` 动态 vault 读写
@@ -452,6 +467,7 @@ market 模式：
 - [x] `pipeline/stock_screener.py` tracked / market 双模式
 - [x] `pipeline/weekly_review.py`
 - [x] `scripts/utils/runtime_state.py` 每日状态落盘
+- [x] `scripts/utils/run_context.py` 单次运行结果 + 运行锁
 - [x] `scripts/utils/cache.py` 候选缓存回退
 - [x] 妙想 API 集成（mx-data/search/xuangu/zixuan/moni）
 - [x] 数据源优先级：MX → akshare → 本地缓存 → 历史/新浪
@@ -474,6 +490,7 @@ market 模式：
 - `sentiment` 在 `hermes_cron.sh` 中仍是 placeholder，尚未独立上线
 - 全市场扫描已有缓存回退，但评分阶段仍依赖外部接口稳定性
 - 目前自动化定位仍是“辅助决策 + 影子交易验证”，不是直连实盘下单
+- `openclaw` 应消费 CLI JSON，不直接依赖内部 Python 模块
 
 ---
 

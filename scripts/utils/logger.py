@@ -114,6 +114,20 @@ def set_log_level(level: int) -> None:
     logging.getLogger("cron").setLevel(level)
 
 
+def set_console_logging(enabled: bool) -> None:
+    """
+    动态开启/关闭控制台日志，文件日志保持不变。
+    """
+    target_level = LOG_LEVEL if enabled else logging.CRITICAL + 1
+    manager = logging.Logger.manager
+    for logger_obj in manager.loggerDict.values():
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+        for handler in logger_obj.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler):
+                handler.setLevel(target_level)
+
+
 if __name__ == "__main__":
     # 测试代码
     logger = get_logger("test_module")

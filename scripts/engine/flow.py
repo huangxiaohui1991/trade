@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 import akshare as ak
+from scripts.utils.cache import load_json_cache, save_json_cache
 
 try:
     from scripts.utils.logger import get_logger
@@ -144,6 +145,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
         "stale": False,
         "source": None,
         "sources_tried": [],
+        "cached_at": None,
     }
 
     # ── Source 0: 妙想 mx_data API（优先）────────────────────────────────────
@@ -184,6 +186,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
                     "major_outflow_streak": outflow_days,
                 })
                 result["northbound"] = _get_northbound(days)
+                save_json_cache("flow", code, result, meta={"source": "mx_data"})
                 _logger.info(f"[get_fund_flow] MX 成功 code={code} net={main_net/1e6:.1f}M")
                 return result
     except Exception as e:
@@ -200,6 +203,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
                 result.update(parsed)
                 result["source"] = "eastmoney"
                 result["northbound"] = _get_northbound(days)
+                save_json_cache("flow", code, result, meta={"source": "eastmoney"})
                 return result
             break  # empty df，不重试
         except Exception as e:
@@ -235,6 +239,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
                 "note": f"新浪成交量估算，score={score}/{days}",
             })
             result["northbound"] = _get_northbound(days)
+            save_json_cache("flow", code, result, meta={"source": "sina_hist"})
             return result
         else:
             _logger.warning(f"[get_fund_flow] 新浪历史数据为空 code={code}")
@@ -243,6 +248,14 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
 
     result["error"] = "所有数据源均失败"
     result["stale"] = True
+    cached = load_json_cache("flow", code, max_age_seconds=86400)
+    if cached:
+        cached_data = cached.get("data", {})
+        if isinstance(cached_data, dict):
+            cached_data["stale"] = True
+            cached_data["cached_at"] = cached.get("cached_at")
+            cached_data["sources_tried"] = list(cached_data.get("sources_tried", [])) + ["cache_flow"]
+            return cached_data
     return result
 
 

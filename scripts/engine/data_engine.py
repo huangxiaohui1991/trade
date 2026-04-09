@@ -34,6 +34,7 @@ warnings.filterwarnings("ignore")
 
 import akshare as ak
 import pandas as pd
+from scripts.utils.cache import load_json_cache, save_json_cache
 
 try:
     from scripts.utils.logger import get_logger
@@ -83,7 +84,9 @@ def get_realtime(codes: list) -> dict:
         "timestamp": _now_ts(),
         "stale": False,
         "data": {},
-        "errors": {}
+        "errors": {},
+        "source_chain": [],
+        "cached_at": None,
     }
 
     if not codes:
@@ -92,6 +95,7 @@ def get_realtime(codes: list) -> dict:
     # 东财实时行情接口（批量）
     try:
         df = ak.stock_zh_a_spot_em()
+        result["source_chain"].append("eastmoney_realtime")
         for code in codes:
             code = normalize_code(code)
             row = df[df["代码"] == code]
@@ -118,9 +122,11 @@ def get_realtime(codes: list) -> dict:
                 }
             else:
                 result["errors"][code] = "代码不在实时行情列表中"
+        save_json_cache("realtime", "latest_snapshot", result["data"], meta={"source": "eastmoney_realtime"})
     except Exception as e:
         _logger.warning(f"[get_realtime] 东财实时接口失败: {e}")
         result["stale"] = True
+        result["source_chain"].append("eastmoney_realtime_failed")
 
         # fallback 1: 妙想 mx_data API
         try:
@@ -158,11 +164,13 @@ def get_realtime(codes: list) -> dict:
                                     "change_pct": chg_val,
                                     "source": "mx_data",
                                 }
+                                result["source_chain"].append("mx_data")
                                 break
                 except Exception:
                     pass
         except Exception as e2:
             _logger.warning(f"[get_realtime] MX fallback 失败: {e2}")
+            result["source_chain"].append("mx_data_failed")
 
         # fallback 2: 历史日线
         for code in codes:
@@ -184,11 +192,25 @@ def get_realtime(codes: list) -> dict:
                         "date": str(r["日期"]),
                         "source": "hist_fallback",
                     }
+                    if "hist_fallback" not in result["source_chain"]:
+                        result["source_chain"].append("hist_fallback")
                 else:
                     result["errors"][code] = "无法获取行情数据"
             except Exception as e2:
                 _logger.warning(f"[get_realtime] fallback失败 code={code}: {e2}")
                 result["errors"][code] = str(e2)
+
+        if not result["data"]:
+            cached = load_json_cache("realtime", "latest_snapshot", max_age_seconds=3600)
+            if cached:
+                snapshot = cached.get("data", {})
+                for code in codes:
+                    if code in snapshot:
+                        result["data"][code] = snapshot[code]
+                if result["data"]:
+                    result["cached_at"] = cached.get("cached_at")
+                    result["source_chain"].append("cache_realtime")
+                    result["stale"] = True
 
     return result
 

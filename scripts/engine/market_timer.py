@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore")
 import pandas as pd
 import akshare as ak
 
+from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 
@@ -162,6 +163,7 @@ class MarketTimer:
         """
         获取单个指数的技术数据（MX优先 → akshare fallback）
         """
+        cache_key = symbol.replace("/", "_")
         # MX 优先：查指数历史数据
         try:
             from scripts.mx.mx_data import MXData
@@ -234,7 +236,7 @@ class MarketTimer:
                             break
 
                 _logger.info(f"[market_timer] MX 成功 {idx_name}: close={close} ma20={ma20}")
-                return {
+                payload = {
                     "close": close,
                     "ma20": round(ma20, 2) if ma20 else None,
                     "ma60": round(ma60, 2) if ma60 else None,
@@ -244,13 +246,35 @@ class MarketTimer:
                     "green_streak": green_streak,
                     "red_streak": red_streak,
                     "change_pct": 0,
+                    "source": "mx_data",
+                    "source_chain": ["mx_data"],
+                    "stale": False,
                 }
+                save_json_cache("market_timer", cache_key, payload, meta={"source": "mx_data"})
+                return payload
         except Exception as e:
             _logger.info(f"[market_timer] MX 失败 {symbol}: {e}")
 
         # akshare fallback
-        df = ak.stock_zh_index_daily(symbol=symbol)
+        try:
+            df = ak.stock_zh_index_daily(symbol=symbol)
+        except Exception as e:
+            cached = load_json_cache("market_timer", cache_key, max_age_seconds=86400)
+            if cached and isinstance(cached.get("data"), dict):
+                payload = cached["data"]
+                payload["stale"] = True
+                payload["cached_at"] = cached.get("cached_at")
+                payload["source_chain"] = list(payload.get("source_chain", [])) + ["cache_market_timer"]
+                return payload
+            raise ValueError(f"无法获取 {symbol} 数据: {e}")
         if df is None or df.empty:
+            cached = load_json_cache("market_timer", cache_key, max_age_seconds=86400)
+            if cached and isinstance(cached.get("data"), dict):
+                payload = cached["data"]
+                payload["stale"] = True
+                payload["cached_at"] = cached.get("cached_at")
+                payload["source_chain"] = list(payload.get("source_chain", [])) + ["cache_market_timer"]
+                return payload
             raise ValueError(f"无法获取 {symbol} 数据")
 
         df = df.sort_values("date").tail(80).copy()
@@ -295,7 +319,7 @@ class MarketTimer:
         # 今日涨跌幅（用日线数据的最新 pct_change）
         change_pct = float(df.iloc[-1].get("pct_change", 0) * 100) if "pct_change" in df.columns else 0
 
-        return {
+        payload = {
             "close": close,
             "ma20": ma20,
             "ma60": ma60,
@@ -305,7 +329,12 @@ class MarketTimer:
             "green_streak": green_streak,
             "red_streak": red_streak,
             "change_pct": change_pct,
+            "source": "akshare",
+            "source_chain": ["mx_data_failed", "akshare"],
+            "stale": False,
         }
+        save_json_cache("market_timer", cache_key, payload, meta={"source": "akshare"})
+        return payload
 
 
 # ---------------------------------------------------------------------------

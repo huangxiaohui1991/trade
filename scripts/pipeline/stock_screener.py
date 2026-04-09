@@ -31,6 +31,7 @@ warnings.filterwarnings("ignore")
 import akshare as ak
 
 from scripts.engine.scorer import batch_score, get_recommendation
+from scripts.engine.composite import build_today_decision
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
@@ -274,6 +275,66 @@ def _write_market_scan_watchlist(results: list) -> str:
 
     path.write_text("\n".join(lines), encoding="utf-8")
     _logger.info(f"  市场扫描候选已写入: {path.name}")
+    return str(path)
+
+
+def _build_pool_suggestions(results: list, stocks_cfg: dict) -> dict:
+    """根据当前评分结果给出核心池/观察池调整建议。"""
+    core_codes = {str(item.get("code", "")).strip() for item in stocks_cfg.get("core_pool", [])}
+    watch_codes = {str(item.get("code", "")).strip() for item in stocks_cfg.get("watch_pool", [])}
+
+    suggestions = {
+        "promote_to_core": [],
+        "keep_watch": [],
+        "demote_from_core": [],
+        "remove_or_avoid": [],
+    }
+    for row in results:
+        code = str(row.get("code", "")).strip()
+        name = str(row.get("name", "")).strip()
+        score = float(row.get("total_score", 0) or 0)
+        veto = bool(row.get("veto_triggered", False))
+        entry = {
+            "code": code,
+            "name": name,
+            "score": round(score, 1),
+            "reason": "veto" if veto else get_recommendation(row),
+        }
+        if code in core_codes and (veto or score < 5):
+            suggestions["demote_from_core"].append(entry)
+        elif code in watch_codes and not veto and score >= 7:
+            suggestions["promote_to_core"].append(entry)
+        elif not veto and score >= 5:
+            suggestions["keep_watch"].append(entry)
+        else:
+            suggestions["remove_or_avoid"].append(entry)
+    return suggestions
+
+
+def _write_pool_suggestions(suggestions: dict) -> str:
+    vault = ObsidianVault()
+    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / f"池子调整建议_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+
+    sections = [
+        ("建议晋级核心池", suggestions.get("promote_to_core", [])),
+        ("建议保留观察", suggestions.get("keep_watch", [])),
+        ("建议降级移出核心池", suggestions.get("demote_from_core", [])),
+        ("建议规避", suggestions.get("remove_or_avoid", [])),
+    ]
+
+    lines = [f"# 池子调整建议 — {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+    for title, rows in sections:
+        lines.extend([f"## {title}", "", "| 股票 | 代码 | 分数 | 原因 |", "|------|------|------|------|"])
+        if rows:
+            for row in rows:
+                lines.append(f"| {row['name']} | {row['code']} | {row['score']:.1f} | {row['reason']} |")
+        else:
+            lines.append("| — | — | — | 暂无 |")
+        lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
     return str(path)
 
 
@@ -528,7 +589,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         if not candidates:
             _logger.warning("无候选股票，退出")
             update_pipeline_state(
-                "stock_screener",
+                "screener",
                 "skipped",
                 {
                     "pool": pool,
@@ -544,9 +605,12 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         _logger.info(f">> 四维评分（来源: {source}）...")
         scored = batch_score(candidates)
         actionable = [r for r in scored if not r.get("veto_triggered", False)]
+        today_decision = build_today_decision(strategy_cfg)
+        pool_suggestions = _build_pool_suggestions(scored, stocks_cfg)
 
         _logger.info(">> 写入筛选报告...")
         report_path = _write_screening_result(scored, pool_name, source)
+        suggestion_path = _write_pool_suggestions(pool_suggestions)
 
         _logger.info(
             f"[SCREENER] 完成: {len(scored)} 只评分, "
@@ -571,7 +635,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 _logger.warning(f">> 影子交易买入失败: {e}")
 
         update_pipeline_state(
-            "stock_screener",
+            "screener",
             "success",
             {
                 "pool": pool,
@@ -581,12 +645,18 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 "scored_count": len(scored),
                 "actionable_count": len(actionable),
                 "report_path": report_path,
+                "suggestion_path": suggestion_path,
                 "market_watch_path": market_watch_path,
                 "used_fallback": "akshare" in source.lower() or "fallback" in source.lower(),
                 "used_cache": resolution_meta.get("used_cache", False),
                 "cache_path": resolution_meta.get("cache_path", ""),
                 "cache_hit_source": resolution_meta.get("cache_hit_source", ""),
                 "source_chain": resolution_meta.get("source_chain", []),
+                "today_decision": today_decision,
+                "pool_suggestions": {
+                    key: len(value)
+                    for key, value in pool_suggestions.items()
+                },
             },
             today_str,
         )
@@ -594,7 +664,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         return scored
     except Exception as e:
         update_pipeline_state(
-            "stock_screener",
+            "screener",
             "error",
             {
                 "pool": pool,

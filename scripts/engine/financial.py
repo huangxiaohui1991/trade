@@ -26,6 +26,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 import akshare as ak
+from scripts.utils.cache import load_json_cache, save_json_cache
 
 try:
     from scripts.utils.logger import get_logger
@@ -167,6 +168,8 @@ def get_financial(code: str) -> dict:
         "timestamp": _now_ts(),
         "stale": False,
         "source": None,
+        "source_chain": [],
+        "cached_at": None,
     }
 
     try:
@@ -179,6 +182,7 @@ def get_financial(code: str) -> dict:
     # ── MX 优先：妙想 API 获取基本面 ────────────────────────────────────────
     mx_data = _try_mx_financial(code, result.get("name", code))
     if mx_data:
+        result["source_chain"].append("mx_data")
         if "roe" in mx_data:
             result["roe"] = mx_data["roe"]
             result["roe_recent"] = [mx_data["roe"]]
@@ -194,6 +198,7 @@ def get_financial(code: str) -> dict:
         has_rev = "revenue_growth" in result
         has_cf = "operating_cash_flow" in result
         if has_roe and has_rev and has_cf:
+            save_json_cache("financial", code, result, meta={"source": "mx_data"})
             return result
         # 部分字段缺失，继续用 akshare 补充
         if not has_roe:
@@ -215,6 +220,7 @@ def get_financial(code: str) -> dict:
                     roe_values = df[roe_col].dropna().head(4).tolist()
                     result["roe_recent"] = roe_values
                     result["roe"] = round(float(roe_values[0]), 2)
+                    result["source_chain"].append("eastmoney_roe")
                     break
         except Exception as e:
             if attempt < 2:
@@ -242,6 +248,7 @@ def get_financial(code: str) -> dict:
                             if i + 1 < len(revenues) and revenues[i+1] else "N/A"
                             for i in range(min(2, len(revenues) - 1))
                         ]
+                    result["source_chain"].append("eastmoney_revenue")
                     break
             break
         except Exception as e:
@@ -263,6 +270,7 @@ def get_financial(code: str) -> dict:
                 if cash_col:
                     result["operating_cash_flow"] = float(df_cash[cash_col].iloc[0])
                     result["cash_flow_positive"] = result["operating_cash_flow"] > 0
+                    result["source_chain"].append("eastmoney_cashflow")
                     break
             break
         except Exception as e:
@@ -299,10 +307,24 @@ def get_financial(code: str) -> dict:
                     profits = sina["profits"]
                     if revs and profits and revs[0] and profits[0] and revs[0] > 0:
                         result["roe_estimate"] = round(profits[0] / revs[0] * 100, 2)
+                result["source_chain"].append("sina_financial")
         except Exception as e:
             _logger.warning(f"[get_financial] 新浪 fallback 失败 code={code}: {e}")
 
     result["source"] = "eastmoney" + ("+sina" if missing_fields else "")
+    if any(k in result for k in ["roe", "revenue_growth", "operating_cash_flow"]):
+        save_json_cache("financial", code, result, meta={"source": result["source"]})
+    else:
+        cached = load_json_cache("financial", code, max_age_seconds=86400)
+        if cached:
+            cached_data = cached.get("data", {})
+            if isinstance(cached_data, dict):
+                cached_data["stale"] = True
+                cached_data["cached_at"] = cached.get("cached_at")
+                chain = list(cached_data.get("source_chain", []))
+                chain.append("cache_financial")
+                cached_data["source_chain"] = chain
+                return cached_data
     return result
 
 

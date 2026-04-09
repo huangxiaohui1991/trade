@@ -14,7 +14,7 @@
 #
 # 环境变量（由 launchd 或 Hermes 注入）：
 #   DISCORD_WEBHOOK_URL  - Discord webhook URL
-#   AStockVault         - vault 路径（默认 ~/Documents/a-stock-trading）
+#   AStockVault         - vault 路径（默认当前仓库根目录）
 #
 # 用法（Hermes 调度）：
 #   hermes_cron.sh morning
@@ -60,26 +60,37 @@ echo "=== [Hermes Cron] $(date '+%Y-%m-%d %H:%M:%S') MODE=$MODE ==="
 
 cd "$SCRIPT_DIR"
 
+echo ">> 运行 doctor 检查"
+DOCTOR_JSON=$("$PYTHON" -m scripts.cli.trade --json doctor)
+echo "$DOCTOR_JSON"
+
+DOCTOR_STATUS=$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status","error"))' "$DOCTOR_JSON")
+
+if [[ "$DOCTOR_STATUS" == "error" ]]; then
+    echo ">> doctor 失败，阻断执行"
+    exit 2
+fi
+
 case "$MODE" in
     morning)
         echo ">> 盘前流程（8:25）"
-        "$PYTHON" -m scripts.pipeline.morning 2>&1
+        "$PYTHON" -m scripts.cli.trade --json run morning 2>&1
         ;;
     noon)
         echo ">> 午休检查（11:55）"
-        "$PYTHON" -m scripts.pipeline.noon 2>&1
+        "$PYTHON" -m scripts.cli.trade --json run noon 2>&1
         ;;
     evening)
         echo ">> 收盘流程（15:35）"
-        "$PYTHON" -m scripts.pipeline.evening 2>&1
+        "$PYTHON" -m scripts.cli.trade --json run evening 2>&1
         ;;
     scoring)
         echo ">> 核心池评分（15:40）"
-        "$PYTHON" -m scripts.pipeline.core_pool_scoring 2>&1
+        "$PYTHON" -m scripts.cli.trade --json run scoring 2>&1
         ;;
     weekly)
         echo ">> 周报（周日20:00）"
-        "$PYTHON" -m scripts.pipeline.weekly_review 2>&1
+        "$PYTHON" -m scripts.cli.trade --json run weekly 2>&1
         ;;
     sentiment)
         echo ">> 舆情监控（TrendRadar）"
