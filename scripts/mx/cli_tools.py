@@ -152,7 +152,31 @@ def _make_trade_runner(client_cls: Optional[type], side: str) -> Callable[..., A
         client: Any = None,
     ) -> Any:
         instance = _ensure_client(client, client_cls)
-        return instance.trade(side, stock_code, quantity, price, use_market_price)
+        result = instance.trade(side, stock_code, quantity, price, use_market_price)
+
+        # 写入结构化 ledger + 模拟盘交易记录
+        try:
+            from scripts.pipeline.shadow_trade import _log_trade
+            action = "买入" if side == "buy" else "卖出"
+            trade_price = float(price or 0)
+            if trade_price <= 0 and use_market_price:
+                # 市价单，尝试从返回结果取价格
+                trade_price = float(result.get("price", result.get("成交价", 0)) or 0)
+            reason_code = f"CLI_MONI_{side.upper()}"
+            _log_trade(
+                action=action,
+                code=stock_code,
+                name=result.get("name", result.get("股票名称", stock_code)),
+                shares=int(quantity),
+                price=trade_price,
+                reason=f"CLI mx run moni.{side}",
+                reason_code=reason_code,
+                source="cli_mx_trade",
+            )
+        except Exception:
+            pass  # 日志写入失败不阻断交易
+
+        return result
 
     return runner
 

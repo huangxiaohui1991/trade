@@ -1366,6 +1366,10 @@ def main():
     backtest_history.add_argument("--limit", type=int, default=10, help="Number of historical backtest entries")
     backtest_compare = backtest_sub.add_parser("compare")
     backtest_compare.add_argument("--limit", type=int, default=20, help="Number of historical backtest entries to compare")
+    backtest_replay = backtest_sub.add_parser("strategy-replay")
+    backtest_replay.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_replay.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_replay.add_argument("--fixture", required=True, help="JSON fixture with daily_data for strategy replay")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
@@ -1444,6 +1448,16 @@ def main():
                         result = list_backtest_history(limit=args.limit)
                     elif args.action == "compare":
                         result = compare_backtest_history(limit=args.limit)
+                    elif args.action == "strategy-replay":
+                        from scripts.backtest.strategy_replay import run_strategy_replay
+                        fixture_data = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+                        result = run_strategy_replay(
+                            daily_data=fixture_data.get("daily_data", {}),
+                            start=args.start,
+                            end=args.end,
+                            total_capital=fixture_data.get("total_capital", 450286),
+                            params=fixture_data.get("params", {}),
+                        )
                     else:
                         result = run_walk_forward(
                             start=args.start,
@@ -1521,6 +1535,16 @@ def main():
                 result = list_backtest_history(limit=args.limit)
             elif args.action == "compare":
                 result = compare_backtest_history(limit=args.limit)
+            elif args.action == "strategy-replay":
+                from scripts.backtest.strategy_replay import run_strategy_replay
+                fixture_data = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+                result = run_strategy_replay(
+                    daily_data=fixture_data.get("daily_data", {}),
+                    start=args.start,
+                    end=args.end,
+                    total_capital=fixture_data.get("total_capital", 450286),
+                    params=fixture_data.get("params", {}),
+                )
             else:
                 result = run_walk_forward(
                     start=args.start,

@@ -276,6 +276,90 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
     return "\n".join(lines)
 
 
+def _backfill_today_trades(vault: ObsidianVault, today_str: str) -> int:
+    """
+    从结构化 ledger 读取今日交易事件，回填到今日交易日志的"收盘记录"表格。
+    返回回填的交易条数。
+    """
+    try:
+        from scripts.state.service import _connect, _ensure_bootstrapped, _normalize_code
+    except Exception:
+        return 0
+
+    journal_rel_path = vault.get_journal_path(today_str)
+    journal_full_path = Path(vault.vault_path) / journal_rel_path
+    if not journal_full_path.exists():
+        return 0
+
+    # 从 ledger 读取今日交易事件
+    try:
+        with _connect() as conn:
+            _ensure_bootstrapped(conn)
+            cursor = conn.execute(
+                "SELECT code, name, side, shares, price, amount, reason_code, reason_text, created_at "
+                "FROM trade_events WHERE event_date = ? ORDER BY created_at",
+                (today_str,),
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    # 构建交易表格行
+    trade_lines = []
+    for row in rows:
+        code, name, side, shares, price, amount, reason_code, reason_text, created_at = row
+        time_str = str(created_at or "")[:16].split("T")[-1].split(" ")[-1] if created_at else ""
+        if not time_str:
+            time_str = "—"
+        action = "买入" if "buy" in str(side).lower() else "卖出" if "sell" in str(side).lower() else str(side)
+        amount_val = float(amount or 0) or round(float(price or 0) * int(shares or 0), 2)
+        trade_type = str(reason_code or reason_text or "—")
+        trade_lines.append(
+            f"| {time_str} | {name or code} | {action} | ¥{float(price or 0):.2f} "
+            f"| {int(shares or 0)} | ¥{amount_val:,.0f} | {trade_type} |"
+        )
+
+    if not trade_lines:
+        return 0
+
+    # 读取当前日志内容
+    content = journal_full_path.read_text(encoding="utf-8")
+
+    # 查找空的交易表格并替换
+    empty_row = "|  |  |  |  |  |  | 首次买入/加仓/止盈/止损 |"
+    if empty_row in content:
+        content = content.replace(empty_row, "\n".join(trade_lines))
+        journal_full_path.write_text(content, encoding="utf-8")
+        _logger.info(f"  已回填 {len(trade_lines)} 条交易到 {today_str}.md")
+        return len(trade_lines)
+
+    # 如果表格已有内容但不是空模板，追加到表格末尾
+    table_header = "| 时间 | 股票 | 操作 | 价格 | 数量 | 金额 | 类型 |"
+    if table_header in content:
+        # 找到表格分隔行后的位置
+        header_idx = content.index(table_header)
+        # 找到分隔行
+        sep_line = "|------|------|------|------|------|------|------|"
+        if sep_line in content[header_idx:]:
+            sep_idx = content.index(sep_line, header_idx)
+            after_sep = sep_idx + len(sep_line)
+            # 在分隔行后插入（替换已有内容到下一个空行或 ## 标记）
+            rest = content[after_sep:]
+            # 找到下一个 section
+            next_section = rest.find("\n## ")
+            if next_section == -1:
+                next_section = len(rest)
+            content = content[:after_sep] + "\n" + "\n".join(trade_lines) + "\n" + rest[next_section:]
+            journal_full_path.write_text(content, encoding="utf-8")
+            _logger.info(f"  已回填 {len(trade_lines)} 条交易到 {today_str}.md")
+            return len(trade_lines)
+
+    return 0
+
+
 def _create_tomorrow_journal(vault: ObsidianVault, tomorrow_date: str, plan_content: str) -> None:
     """创建明日日志文件"""
     journal_rel_path = vault.get_journal_path(tomorrow_date)
@@ -394,6 +478,11 @@ def run() -> dict:
 
         _logger.info(">> 更新持仓价格...")
         position_changes = _update_portfolio_prices(vault, engine)
+
+        _logger.info(">> 回填今日交易到日志...")
+        backfill_count = _backfill_today_trades(vault, today_str)
+        if backfill_count:
+            _logger.info(f"  回填 {backfill_count} 条交易记录")
 
         _logger.info(">> 生成明日计划...")
         tomorrow = _next_trading_day()

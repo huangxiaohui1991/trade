@@ -20,6 +20,12 @@
 - [x] `state bootstrap / audit / sync / reconcile` 命令接入 CLI
 - [x] `paper_mx` drift 审计和 reconcile 流程落地
 - [x] `status today` 统一读结构化状态，不再直接解析 Markdown
+- [x] `paper_mx` 完全收口为标准 portfolio snapshot
+备注：`load_portfolio_snapshot("paper_mx")` 固定经 broker 刷新并回写 ledger，失败时保留缓存快照。
+- [x] `paper_mx` 的 balance / exposure 契约与主仓一致
+备注：paper snapshot summary 已统一输出 `holding_count / current_exposure / cash_value / total_capital`。
+- [x] `status today` / `doctor` / `state audit` 完全共享同一份 paper snapshot
+备注：`status today` 暴露 `paper_mx_portfolio`，`state audit/doctor` 共享 `paper_portfolio_snapshot` 检查。
 
 ### 信号 / 风控 / 执行
 
@@ -30,6 +36,13 @@
 - [x] 组合级风控第一版接入 `today_decision`
 - [x] 订单状态第一版：`orders` 表、状态快照、提醒、确认
 - [x] pool snapshot / action history / projection 双写打通
+- [x] pool 引擎事务化与 projection 对账强化
+备注：`screener` 已收敛为只走统一 `save_pool_snapshot` 投影；`audit_state` 增加 missing/extra/score/bucket drift 明细。
+- [x] 订单生命周期第二阶段：`partial_fill / cancel_replace / review_queue`
+- [x] broker 回报更细状态接入订单状态表
+备注：broker sync 已接入 `cancel_requested / cancel_replace_pending / review_required / partially_filled`，部分成交按增量写交易事件并保留 raw broker status。
+- [x] 组合风控扩展到板块集中度 / 相关性 / 事件风险
+备注：`check_portfolio_risk` 已输出板块集中度、相关性分组集中度、事件风险日 warning reason code 与 metrics。
 
 ### 回测 / 复盘 / 观测
 
@@ -45,67 +58,22 @@
 - [x] 告警中心第一版
 - [x] 结构化复盘归因第一版
 - [x] CLI contract tests / fixture / core e2e smoke 主干建立
-
-### MX 能力层
-
-- [x] `scripts.mx.cli_tools` 能力注册表 / dispatcher 落地
-- [x] `bin/trade mx list / groups / run / health` 接入
-- [x] `stock_screener` 改走 MX capability layer
-- [x] `shadow_trade` 改走 MX capability layer
-- [x] `status today` 暴露 `mx_health`
-
----
-
-## 进行中
-
-### 回测研究层
-
-- [x] 把组合级回放从“闭合交易回放”推进到“真实逐日组合模拟”
+- [x] 把组合级回放从"闭合交易回放"推进到"真实逐日组合模拟"
 备注：已落地日级事件主循环，逐日推进 cash / entry / exit / exposure；当前仍基于闭合交易样本，完整信号驱动策略引擎继续放在 P3。
-
 - [x] 同日多信号竞争资金的排序规则
 备注：已按 `entry_score desc -> realized_pnl desc -> desired_capital asc` 固定排序，并输出 accepted/rejected allocation 明细。
-
 - [x] walk-forward 多 fold 报表强化
 备注：已补 fold comparison / aggregate comparison，输出 selected parameters 以及 train vs eval 的 pnl / win_rate / sample_count 对照。
-
-### MX 流程接入
-
-- [x] `morning` 资讯搜索完全切到 MX capability layer
-备注：盘前资讯已统一经 `dispatch_mx_command("news", ...)` 走 capability layer，并补了可用/降级测试。
-
----
-
-## 待做
-
-### P1 收尾
-
-- [x] `paper_mx` 完全收口为标准 portfolio snapshot
-备注：`load_portfolio_snapshot("paper_mx")` 固定经 broker 刷新并回写 ledger，失败时保留缓存快照。
-- [x] `paper_mx` 的 balance / exposure 契约与主仓一致
-备注：paper snapshot summary 已统一输出 `holding_count / current_exposure / cash_value / total_capital`。
-- [x] `status today` / `doctor` / `state audit` 完全共享同一份 paper snapshot
-备注：`status today` 暴露 `paper_mx_portfolio`，`state audit/doctor` 共享 `paper_portfolio_snapshot` 检查。
-
-### P2 执行层增强
-
-- [x] pool 引擎事务化与 projection 对账强化
-备注：`screener` 已收敛为只走统一 `save_pool_snapshot` 投影；`audit_state` 增加 missing/extra/score/bucket drift 明细。
-- [x] 订单生命周期第二阶段：`partial_fill / cancel_replace / review_queue`
-- [x] broker 回报更细状态接入订单状态表
-备注：broker sync 已接入 `cancel_requested / cancel_replace_pending / review_required / partially_filled`，部分成交按增量写交易事件并保留 raw broker status。
-- [x] 组合风控扩展到板块集中度 / 相关性 / 事件风险
-备注：`check_portfolio_risk` 已输出板块集中度、相关性分组集中度、事件风险日 warning reason code 与 metrics。
-
-### P3 研究级能力
-
-- [ ] 真正的逐日策略回放引擎
-- [ ] 回测参数扩展到 veto / 评分更多维度
+- [x] 真正的逐日策略回放引擎
+备注：`scripts/backtest/strategy_replay.py` 实现信号驱动逐日模拟，每日评估大盘信号→候选评分→veto过滤→资金分配→持仓管理（止损/止盈/时间止损/大盘清仓），CLI 通过 `backtest strategy-replay` 接入。
+- [x] 回测参数扩展到 veto / 评分更多维度
+备注：`_parameter_grid` 已扩展 `watch_threshold / reject_threshold / time_stop_days / veto_presets`，`_apply_parameter_set` 支持 veto 规则过滤和 reject_threshold 过滤，三个入口（run/sweep/walk-forward）均已接入。
 - [x] 组合层连续亏损冷却纳入回测
 备注：portfolio replay 已按 `consecutive_loss_days_limit / cooldown_days` 拒绝冷却期新开仓，并输出 cooldown rejected 明细。
 - [x] 组合层资金占用与持仓上限纳入 walk-forward 评估
 备注：walk-forward 每个 fold now 输出 evaluation portfolio replay summary，并在 comparison rows 中展示峰值仓位/并发/冷却拒绝数。
-- [ ] 回测结果对比视图继续强化
+- [x] 回测结果对比视图继续强化
+备注：`backtest compare` now 输出风险状态分布、总/均值指标与 leaderboard 排名。
 
 ### 复盘归因深化
 
@@ -131,21 +99,18 @@
 - [x] 告警去重、节流、处理状态
 备注：告警 now 带 `alert_key / handling_status / throttled`，同 key 去重并统计 suppressed duplicate count，保存时保留历史 ack 状态。
 
----
+### MX 能力层
 
-## 下一阶段顺序
-
-1. [x] `morning` 完全切到 MX capability layer
-2. [x] 同日多信号竞争资金排序规则
-3. [x] 逐日组合模拟主循环
-4. [x] 订单生命周期第二阶段
-5. [x] 组合级风控深化
-6. [x] 复盘归因深化
+- [x] `scripts.mx.cli_tools` 能力注册表 / dispatcher 落地
+- [x] `bin/trade mx list / groups / run / health` 接入
+- [x] `stock_screener` 改走 MX capability layer
+- [x] `shadow_trade` 改走 MX capability layer
+- [x] `status today` 暴露 `mx_health`
+- [x] `morning` 资讯搜索完全切到 MX capability layer
+备注：盘前资讯已统一经 `dispatch_mx_command("news", ...)` 走 capability layer，并补了可用/降级测试。
 
 ---
 
 ## 完成定义
 
-- “完成”指代码已落地、测试已覆盖、CLI 或流程已有可验证输出
-- “进行中”指已有主干，但口径或深度还不足以算收口
-- “待做”指尚未进入稳定实现阶段
+- "完成"指代码已落地、测试已覆盖、CLI 或流程已有可验证输出

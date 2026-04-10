@@ -440,6 +440,7 @@ class BacktestRunnerTests(unittest.TestCase):
                     "sample_count": 3,
                     "total_realized_pnl": 1200.0,
                     "win_rate": 66.7,
+                    "risk_state": "ok",
                 },
                 {
                     "action": "walk_forward",
@@ -450,6 +451,7 @@ class BacktestRunnerTests(unittest.TestCase):
                     "sample_count": 5,
                     "total_realized_pnl": 800.0,
                     "win_rate": 75.0,
+                    "risk_state": "warning",
                 },
             ], ensure_ascii=False), encoding="utf-8")
             with mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", index_path):
@@ -461,9 +463,14 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(result["summary"]["action_counts"]["run"], 1)
         self.assertEqual(result["summary"]["action_counts"]["walk_forward"], 1)
         self.assertEqual(result["summary"]["excursion_source_counts"]["actual_market_history"], 1)
+        self.assertEqual(result["summary"]["risk_state_counts"]["warning"], 1)
+        self.assertEqual(result["summary"]["total_realized_pnl"], 2000.0)
+        self.assertEqual(result["summary"]["mean_win_rate"], 70.8)
         self.assertEqual(result["leaders"]["best_pnl"]["total_realized_pnl"], 1200.0)
         self.assertEqual(result["leaders"]["best_win_rate"]["win_rate"], 75.0)
         self.assertEqual(result["leaders"]["largest_sample"]["sample_count"], 5)
+        self.assertEqual(result["leaderboard"][0]["rank"], 1)
+        self.assertEqual(result["leaderboard"][0]["total_realized_pnl"], 1200.0)
 
     def test_cli_backtest_commands_parse_and_dispatch(self):
         import scripts.cli.trade as trade

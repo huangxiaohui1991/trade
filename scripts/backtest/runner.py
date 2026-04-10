@@ -113,6 +113,9 @@ def _baseline_parameters() -> dict[str, float]:
         "buy_threshold": _safe_float(scoring_cfg.get("thresholds", {}).get("buy", 7), 7.0),
         "stop_loss": _safe_float(risk_cfg.get("stop_loss", 0.04), 0.04),
         "take_profit": _safe_float(risk_cfg.get("take_profit", {}).get("t1_pct", 0.15), 0.15),
+        "watch_threshold": _safe_float(scoring_cfg.get("thresholds", {}).get("watch", 5), 5.0),
+        "reject_threshold": _safe_float(scoring_cfg.get("thresholds", {}).get("reject", 4), 4.0),
+        "time_stop_days": _safe_float(risk_cfg.get("time_stop_days", 15), 15.0),
     }
 
 
@@ -140,10 +143,15 @@ def _parameter_grid(
     fundamental_weights: str | list[float] | None = None,
     flow_weights: str | list[float] | None = None,
     sentiment_weights: str | list[float] | None = None,
+    watch_thresholds: str | list[float] | None = None,
+    reject_thresholds: str | list[float] | None = None,
+    time_stop_days_list: str | list[float] | None = None,
+    veto_presets: list[list[str]] | None = None,
 ) -> list[dict[str, float]]:
     baseline = _baseline_parameters()
     strategy = get_strategy()
     scoring_weights = strategy.get("scoring", {}).get("weights", {})
+    scoring_cfg = strategy.get("scoring", {})
     buy_grid = _coerce_grid(
         buy_thresholds,
         sorted({baseline["buy_threshold"] - 1.0, baseline["buy_threshold"], baseline["buy_threshold"] + 1.0}),
@@ -180,6 +188,22 @@ def _parameter_grid(
         sentiment_weights,
         [round(_safe_float(scoring_weights.get("sentiment", 3), 2), 2)],
     )
+    watch_grid = _coerce_grid(
+        watch_thresholds,
+        [round(baseline["watch_threshold"], 3)],
+    )
+    reject_grid = _coerce_grid(
+        reject_thresholds,
+        [round(baseline["reject_threshold"], 3)],
+    )
+    time_stop_grid = _coerce_grid(
+        time_stop_days_list,
+        [round(baseline["time_stop_days"], 1)],
+    )
+    # veto presets: 默认只用 strategy.yaml 中的 veto 列表
+    default_veto = scoring_cfg.get("veto", ["below_ma20", "limit_up_today", "consecutive_outflow", "red_market", "earnings_bomb"])
+    resolved_veto_presets = veto_presets if veto_presets else [default_veto]
+
     grid: list[dict[str, float]] = []
     for buy_threshold in buy_grid:
         for stop_loss in stop_grid:
@@ -188,15 +212,23 @@ def _parameter_grid(
                     for fundamental_weight in fundamental_grid:
                         for flow_weight in flow_grid:
                             for sentiment_weight in sentiment_grid:
-                                grid.append({
-                                    "buy_threshold": round(_safe_float(buy_threshold), 3),
-                                    "stop_loss": round(_safe_float(stop_loss), 3),
-                                    "take_profit": round(_safe_float(take_profit), 3),
-                                    "technical_weight": round(_safe_float(technical_weight), 3),
-                                    "fundamental_weight": round(_safe_float(fundamental_weight), 3),
-                                    "flow_weight": round(_safe_float(flow_weight), 3),
-                                    "sentiment_weight": round(_safe_float(sentiment_weight), 3),
-                                })
+                                for watch_threshold in watch_grid:
+                                    for reject_threshold in reject_grid:
+                                        for time_stop in time_stop_grid:
+                                            for veto_preset in resolved_veto_presets:
+                                                grid.append({
+                                                    "buy_threshold": round(_safe_float(buy_threshold), 3),
+                                                    "stop_loss": round(_safe_float(stop_loss), 3),
+                                                    "take_profit": round(_safe_float(take_profit), 3),
+                                                    "technical_weight": round(_safe_float(technical_weight), 3),
+                                                    "fundamental_weight": round(_safe_float(fundamental_weight), 3),
+                                                    "flow_weight": round(_safe_float(flow_weight), 3),
+                                                    "sentiment_weight": round(_safe_float(sentiment_weight), 3),
+                                                    "watch_threshold": round(_safe_float(watch_threshold), 3),
+                                                    "reject_threshold": round(_safe_float(reject_threshold), 3),
+                                                    "time_stop_days": round(_safe_float(time_stop), 1),
+                                                    "veto_rules": veto_preset,
+                                                })
     return grid
 
 
@@ -293,14 +325,23 @@ def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
     if "mean_win_rate" in score_summary:
         lines.append(f"- Mean Win Rate: {score_summary.get('mean_win_rate', 0)}")
     if "selected_parameters" in payload:
+        sel_params = payload.get("selected_parameters", {}) or {}
         lines.extend([
             "",
             "## Selected Parameters",
             "",
-            f"- Buy Threshold: {(payload.get('selected_parameters', {}) or {}).get('buy_threshold', '')}",
-            f"- Stop Loss: {(payload.get('selected_parameters', {}) or {}).get('stop_loss', '')}",
-            f"- Take Profit: {(payload.get('selected_parameters', {}) or {}).get('take_profit', '')}",
+            f"- Buy Threshold: {sel_params.get('buy_threshold', '')}",
+            f"- Stop Loss: {sel_params.get('stop_loss', '')}",
+            f"- Take Profit: {sel_params.get('take_profit', '')}",
         ])
+        if "watch_threshold" in sel_params:
+            lines.append(f"- Watch Threshold: {sel_params.get('watch_threshold', '')}")
+        if "reject_threshold" in sel_params:
+            lines.append(f"- Reject Threshold: {sel_params.get('reject_threshold', '')}")
+        if "time_stop_days" in sel_params:
+            lines.append(f"- Time Stop Days: {sel_params.get('time_stop_days', '')}")
+        if "veto_rules" in sel_params:
+            lines.append(f"- Veto Rules: {', '.join(sel_params.get('veto_rules', []))}")
     elif "selected_parameters" in score_summary:
         lines.extend([
             "",
@@ -495,17 +536,50 @@ def compare_backtest_history(*, limit: int = 20) -> dict[str, Any]:
     engine_counts: dict[str, int] = {}
     excursion_source_counts: dict[str, int] = {}
     scope_counts: dict[str, int] = {}
+    risk_state_counts: dict[str, int] = {}
     for item in items:
         status = str(item.get("status", "")).strip() or "unknown"
         action = str(item.get("action", "")).strip() or "unknown"
         engine = str(item.get("engine_mode", "")).strip() or "unknown"
         excursion_source = str(item.get("excursion_source", "")).strip() or "unknown"
         scope = str(item.get("scope", "")).strip() or "unknown"
+        risk_state = str(item.get("risk_state", "")).strip() or "unknown"
         status_counts[status] = status_counts.get(status, 0) + 1
         action_counts[action] = action_counts.get(action, 0) + 1
         engine_counts[engine] = engine_counts.get(engine, 0) + 1
         excursion_source_counts[excursion_source] = excursion_source_counts.get(excursion_source, 0) + 1
         scope_counts[scope] = scope_counts.get(scope, 0) + 1
+        risk_state_counts[risk_state] = risk_state_counts.get(risk_state, 0) + 1
+
+    ranked_items = sorted(
+        items,
+        key=lambda item: (
+            _safe_float(item.get("total_realized_pnl", 0), 0.0),
+            _safe_float(item.get("win_rate", 0), 0.0),
+            int(item.get("sample_count", 0) or 0),
+        ),
+        reverse=True,
+    )
+    leaderboard = []
+    for rank, item in enumerate(ranked_items, start=1):
+        leaderboard.append({
+            "rank": rank,
+            "action": item.get("action", ""),
+            "status": item.get("status", ""),
+            "engine_mode": item.get("engine_mode", ""),
+            "scope": item.get("scope", ""),
+            "sample_count": item.get("sample_count", 0),
+            "total_realized_pnl": item.get("total_realized_pnl", 0),
+            "win_rate": item.get("win_rate", 0),
+            "risk_state": item.get("risk_state", ""),
+            "excursion_source": item.get("excursion_source", ""),
+            "result_path": item.get("result_path", ""),
+        })
+
+    total_pnl = round(sum(_safe_float(item.get("total_realized_pnl", 0), 0.0) for item in items), 2)
+    mean_pnl = round(total_pnl / len(items), 2)
+    mean_win_rate = round(sum(_safe_float(item.get("win_rate", 0), 0.0) for item in items) / len(items), 1)
+    mean_sample_count = round(sum(int(item.get("sample_count", 0) or 0) for item in items) / len(items), 1)
 
     return {
         "command": "backtest",
@@ -519,12 +593,18 @@ def compare_backtest_history(*, limit: int = 20) -> dict[str, Any]:
             "engine_counts": engine_counts,
             "excursion_source_counts": excursion_source_counts,
             "scope_counts": scope_counts,
+            "risk_state_counts": risk_state_counts,
+            "total_realized_pnl": total_pnl,
+            "mean_realized_pnl": mean_pnl,
+            "mean_win_rate": mean_win_rate,
+            "mean_sample_count": mean_sample_count,
         },
         "leaders": {
             "best_pnl": _pick_best("total_realized_pnl"),
             "best_win_rate": _pick_best("win_rate"),
             "largest_sample": _pick_best("sample_count"),
         },
+        "leaderboard": leaderboard,
         "items": items,
     }
 
@@ -602,11 +682,24 @@ def _apply_parameter_set(
     baseline: dict[str, float],
 ) -> list[dict[str, Any]]:
     evaluated: list[dict[str, Any]] = []
+    veto_rules = set(params.get("veto_rules", []))
+    reject_threshold = _safe_float(params.get("reject_threshold", 0), 0)
     for trade in trades:
         entry_score = _recompute_weighted_score(trade, params)
         if entry_score is None:
             entry_score = _extract_entry_score(trade)
         if entry_score is not None and entry_score < params["buy_threshold"]:
+            continue
+
+        # veto 过滤：如果交易记录带有 veto_signals，检查是否命中当前 veto 规则集
+        if veto_rules:
+            trade_veto = trade.get("veto_signals") or trade.get("hard_veto_signals") or []
+            hard_hits = [v for v in trade_veto if v in veto_rules and v != "consecutive_outflow_warn"]
+            if hard_hits:
+                continue
+
+        # reject_threshold 过滤
+        if reject_threshold > 0 and entry_score is not None and entry_score <= reject_threshold:
             continue
 
         adjusted = dict(trade)
@@ -628,6 +721,13 @@ def _apply_parameter_set(
             multiplier = min(max(params["take_profit"] / base, 0.5), 1.8)
             realized_pnl = round(realized_pnl * multiplier, 2)
             adjustment_note = "take_profit_proxy"
+
+        # 时间止损代理：如果持仓天数超过 time_stop_days 且原始出场非止盈
+        time_stop_days = _safe_float(params.get("time_stop_days", 0), 0)
+        if time_stop_days > 0 and adjustment_note == "unchanged":
+            holding_days = int(trade.get("holding_days", 0) or 0)
+            if holding_days > time_stop_days and realized_pnl <= 0:
+                adjustment_note = "time_stop_proxy"
 
         adjusted["entry_score"] = entry_score
         adjusted["realized_pnl"] = realized_pnl
@@ -1170,6 +1270,10 @@ def run_backtest(
     fundamental_weights: str | list[float] | None = None,
     flow_weights: str | list[float] | None = None,
     sentiment_weights: str | list[float] | None = None,
+    watch_thresholds: str | list[float] | None = None,
+    reject_thresholds: str | list[float] | None = None,
+    time_stop_days_list: str | list[float] | None = None,
+    veto_presets: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -1183,6 +1287,10 @@ def run_backtest(
         fundamental_weights=fundamental_weights,
         flow_weights=flow_weights,
         sentiment_weights=sentiment_weights,
+        watch_thresholds=watch_thresholds,
+        reject_thresholds=reject_thresholds,
+        time_stop_days_list=time_stop_days_list,
+        veto_presets=veto_presets,
     )
     source_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(source_trades, params_grid, baseline)
@@ -1266,6 +1374,10 @@ def run_parameter_sweep(
     fundamental_weights: str | list[float] | None = None,
     flow_weights: str | list[float] | None = None,
     sentiment_weights: str | list[float] | None = None,
+    watch_thresholds: str | list[float] | None = None,
+    reject_thresholds: str | list[float] | None = None,
+    time_stop_days_list: str | list[float] | None = None,
+    veto_presets: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -1279,6 +1391,10 @@ def run_parameter_sweep(
         fundamental_weights=fundamental_weights,
         flow_weights=flow_weights,
         sentiment_weights=sentiment_weights,
+        watch_thresholds=watch_thresholds,
+        reject_thresholds=reject_thresholds,
+        time_stop_days_list=time_stop_days_list,
+        veto_presets=veto_presets,
     )
     trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(trades, params_grid, baseline)
@@ -1370,6 +1486,10 @@ def run_walk_forward(
     fundamental_weights: str | list[float] | None = None,
     flow_weights: str | list[float] | None = None,
     sentiment_weights: str | list[float] | None = None,
+    watch_thresholds: str | list[float] | None = None,
+    reject_thresholds: str | list[float] | None = None,
+    time_stop_days_list: str | list[float] | None = None,
+    veto_presets: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)
@@ -1387,6 +1507,10 @@ def run_walk_forward(
         fundamental_weights=fundamental_weights,
         flow_weights=flow_weights,
         sentiment_weights=sentiment_weights,
+        watch_thresholds=watch_thresholds,
+        reject_thresholds=reject_thresholds,
+        time_stop_days_list=time_stop_days_list,
+        veto_presets=veto_presets,
     )
     windows = _walk_forward_windows(start_date, end_date, folds)
     fold_reports = []

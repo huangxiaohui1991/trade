@@ -27,6 +27,12 @@ bin/trade run evening --json
 bin/trade run scoring --json
 bin/trade run weekly --json
 bin/trade run screener --universe market --pool all --json
+bin/trade backtest run --start 2026-03-01 --end 2026-04-09 --json
+bin/trade backtest sweep --start 2026-03-01 --end 2026-04-09 --json
+bin/trade backtest walk-forward --start 2026-03-01 --end 2026-04-09 --folds 3 --json
+bin/trade backtest strategy-replay --start 2026-04-01 --end 2026-04-10 --fixture data/replay_fixture.json --json
+bin/trade backtest history --json
+bin/trade backtest compare --json
 ```
 
 如果不使用 `bin/trade`，也可以直接：
@@ -256,3 +262,49 @@ bin/trade run screener --universe market --pool all --json
 - `sentiment` 定时任务仍未接入独立 skill
 - `run` 命令返回的 `result` 体量可能较大，`openclaw` 只应消费摘要字段
 - 市场数据链路虽然已有缓存和降级，但外部接口慢时耗时仍会偏高
+
+## 回测 CLI
+
+### `backtest run / sweep / walk-forward`
+
+参数 sweep 支持维度：
+- `--buy-thresholds`：买入阈值
+- `--stop-losses`：止损比例
+- `--take-profits`：止盈比例
+- `--technical-weights / --fundamental-weights / --flow-weights / --sentiment-weights`：评分权重
+- `--watch-thresholds`：观察阈值（新增）
+- `--reject-thresholds`：否决阈值（新增）
+- `--time-stop-days`：时间止损天数（新增）
+- veto presets 通过 fixture JSON 传入（新增）
+
+### `backtest strategy-replay`
+
+信号驱动的逐日策略回放引擎，需要通过 `--fixture` 传入包含 `daily_data` 的 JSON 文件：
+
+```bash
+bin/trade backtest strategy-replay --start 2026-04-01 --end 2026-04-10 --fixture data/replay_fixture.json --json
+```
+
+fixture JSON 结构：
+
+```json
+{
+  "total_capital": 450286,
+  "params": {
+    "buy_threshold": 7,
+    "stop_loss": 0.04,
+    "take_profit": 0.15,
+    "time_stop_days": 15,
+    "veto_rules": ["below_ma20", "limit_up_today"]
+  },
+  "daily_data": {
+    "2026-04-01": {
+      "market_signal": "GREEN",
+      "candidates": [
+        {"code": "000001", "name": "平安银行", "score": 8.0, "price": 10.0, "veto_signals": []}
+      ],
+      "prices": {"000001": 10.0}
+    }
+  }
+}
+```

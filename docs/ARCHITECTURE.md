@@ -1,8 +1,8 @@
 # A股交易系统 · Hermes 原生架构方案
 
 > 分支：`feature/agent-native`
-> 版本：v2.4（统一 CLI / 运行协议 + 池子状态版）
-> 日期：2026-04-09
+> 版本：v3.0（全任务收口 + 策略回放引擎版）
+> 日期：2026-04-10
 
 ---
 
@@ -118,7 +118,10 @@ trade/
 │   │   ├── core_pool_scoring.py # 核心池评分
 │   │   └── stock_screener.py   # 选股流水线（tracked / market 双模式）
 │   ├── cli/
-│   │   └── trade.py           # 统一 CLI（doctor / run / status）
+│   │   └── trade.py           # 统一 CLI（doctor / run / status / backtest）
+│   ├── backtest/
+│   │   ├── runner.py           # 回测 / sweep / walk-forward 引擎
+│   │   └── strategy_replay.py  # 信号驱动逐日策略回放引擎
 │   └── utils/
 │       ├── cache.py            # 本地缓存
 │       ├── obsidian.py         # Obsidian 读写
@@ -267,6 +270,12 @@ bin/trade orchestrate morning_brief --json
 bin/trade orchestrate close_review --json
 bin/trade run morning --json
 bin/trade run screener --universe market --pool all --json
+bin/trade backtest run --start 2026-03-01 --end 2026-04-09 --json
+bin/trade backtest sweep --start 2026-03-01 --end 2026-04-09 --json
+bin/trade backtest walk-forward --start 2026-03-01 --end 2026-04-09 --folds 3 --json
+bin/trade backtest strategy-replay --start 2026-04-01 --end 2026-04-10 --fixture data/replay_fixture.json --json
+bin/trade backtest history --json
+bin/trade backtest compare --json
 ```
 
 `status today` 除了 `today_decision` 之外，还会返回 `pool_management.summary`，方便 OpenClaw 直接消费。
@@ -493,16 +502,26 @@ market 模式：
 - [x] `scripts/utils/cache.py` 候选缓存回退
 - [x] 妙想 API 集成（mx-data/search/xuangu/zixuan/moni）
 - [x] 数据源优先级：MX → akshare → 本地缓存 → 历史/新浪
+- [x] 结构化 ledger（SQLite）统一状态服务
+- [x] 三账户 scope 建模（cn_a_system / hk_legacy / paper_mx）
+- [x] 统一信号总线（reason_code registry）
+- [x] 组合级风控（板块集中度 / 相关性 / 事件风险 / 连续亏损冷却）
+- [x] 订单生命周期（partial_fill / cancel_replace / review_queue）
+- [x] 回测框架（run / sweep / walk-forward / strategy-replay）
+- [x] 信号驱动逐日策略回放引擎（strategy_replay.py）
+- [x] 回测参数扩展（veto presets / watch_threshold / reject_threshold / time_stop_days）
+- [x] MFE / MAE 真实重建 + 代理估算
+- [x] 复盘归因（entry/exit factors / pnl_attribution / rule_deviation）
+- [x] 告警中心（财报/异动/池子失分/去重节流/处理状态）
+- [x] CLI contract tests / fixture / core e2e smoke
+- [x] MX 能力层统一 dispatcher
 
 ### 待继续优化
 
 - [ ] 舆情监控定时任务真正接入告警流
-- [ ] 财务/行情级别缓存扩展到 `financial.py` / `data_engine.py`
-- [ ] 回测参数校准实盘参数
-- [ ] 评分权重回测验证
 - [ ] Discord 消息监听机制（Hermes 接收用户回复）
 - [ ] 超时未确认提醒（T+1 再提醒 / T+2 异常标记）
-- [ ] 核心池 / 观察池自动晋级降级机制
+- [ ] 回测参数校准实盘参数
 
 ---
 
