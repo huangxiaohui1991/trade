@@ -27,7 +27,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from scripts.mx.mx_moni import MXMoni
+from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.engine.scorer import score as score_stock
 from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
 from scripts.utils.config_loader import get_stocks, get_strategy
@@ -62,8 +62,59 @@ ORDER_REASON_TO_CONDITION = {
 # 工具
 # ---------------------------------------------------------------------------
 
-def _get_moni() -> MXMoni:
-    return MXMoni()
+def _mx_health_snapshot(include_unavailable: bool = False) -> dict:
+    items = list_mx_command_metadata(include_unavailable=include_unavailable)
+    groups = mx_command_groups(include_unavailable=include_unavailable)
+    unavailable_items = [item for item in items if not item.get("available", False)]
+    available_items = [item for item in items if item.get("available", False)]
+    required_commands = [
+        "mx.data.query",
+        "mx.moni.positions",
+        "mx.moni.balance",
+        "mx.moni.orders",
+        "mx.moni.buy",
+        "mx.moni.sell",
+        "mx.moni.cancel",
+        "mx.moni.cancel_all",
+        "mx.zixuan.query",
+        "mx.zixuan.manage",
+    ]
+    item_lookup = {item.get("id", ""): item for item in items}
+    required = {
+        command_id: {
+            "available": bool(item_lookup.get(command_id, {}).get("available", False)),
+            "availability_note": item_lookup.get(command_id, {}).get("availability_note", ""),
+        }
+        for command_id in required_commands
+    }
+    status = "ok" if not unavailable_items else "warning"
+    return {
+        "status": status,
+        "available_count": len(available_items),
+        "unavailable_count": len(unavailable_items),
+        "command_count": len(items),
+        "group_count": len(groups),
+        "groups": {name: len(values) for name, values in groups.items()},
+        "required": required,
+        "unavailable_commands": [item.get("id", "") for item in unavailable_items],
+        "source": "scripts.mx.cli_tools",
+    }
+
+
+def _mx_dispatch(command: str, **kwargs) -> dict:
+    try:
+        result = dispatch_mx_command(command, **kwargs)
+        return result if isinstance(result, dict) else {"data": result}
+    except MXCommandError as exc:
+        _logger.warning(f"[mx] {command} 调用失败: {exc}")
+        raise
+
+
+def _query_mx(command: str, *, fallback: list | dict | None = None, **kwargs):
+    try:
+        return _mx_dispatch(command, **kwargs)
+    except MXCommandError:
+        return fallback if fallback is not None else {}
 
 
 def _log_trade(action: str, code: str, name: str, shares: int,
@@ -222,9 +273,12 @@ def _existing_order_maps(scope: str = "paper_mx") -> tuple[dict[str, dict], dict
     return by_external, by_broker
 
 
-def _sync_broker_orders(mx: MXMoni, scope: str = "paper_mx") -> dict:
+def _sync_broker_orders(_client: object = None, scope: str = "paper_mx") -> dict:
     try:
-        raw_orders = _get_orders(mx)
+        if _client is not None and hasattr(_client, "orders"):
+            raw_orders = _get_orders(_client)
+        else:
+            raw_orders = _get_orders()
     except Exception as exc:
         _logger.warning(f"[shadow] 拉取委托失败: {exc}")
         return {"status": "error", "error": str(exc), "fetched_count": 0, "synced_count": 0}
@@ -357,7 +411,7 @@ def _materialize_filled_order(order: dict) -> dict:
 
 
 def _submit_shadow_order(
-    mx: MXMoni,
+    _client: object = None,
     *,
     side: str,
     code: str,
@@ -397,10 +451,22 @@ def _submit_shadow_order(
         }
     )
 
-    if use_market_price:
-        trade_result = mx.trade(side, code, shares, use_market_price=True)
+    if _client is not None and hasattr(_client, "trade"):
+        if use_market_price:
+            trade_result = _client.trade(side, code, shares, use_market_price=True)
+        else:
+            trade_result = _client.trade(side, code, shares, price=price, use_market_price=False)
     else:
-        trade_result = mx.trade(side, code, shares, price=price, use_market_price=False)
+        if use_market_price:
+            trade_result = _query_mx(f"mx.moni.{side}", stock_code=code, quantity=shares, use_market_price=True)
+        else:
+            trade_result = _query_mx(
+                f"mx.moni.{side}",
+                stock_code=code,
+                quantity=shares,
+                price=price,
+                use_market_price=False,
+            )
 
     broker_order_id = _extract_broker_order_id(trade_result)
     trade_code = str(trade_result.get("code", ""))
@@ -935,16 +1001,22 @@ def reconcile_trade_state(apply: bool = False, window: int = 180) -> dict:
     return result
 
 
-def _get_positions(mx: MXMoni) -> list:
+def _get_positions(_client: object = None) -> list:
     """获取模拟盘当前持仓列表"""
-    result = mx.positions()
+    if _client is not None and hasattr(_client, "positions"):
+        result = _client.positions()
+    else:
+        result = _query_mx("mx.moni.positions", fallback={})
     data = result.get("data", {})
     return data.get("posList", [])
 
 
-def _get_balance(mx: MXMoni) -> dict:
+def _get_balance(_client: object = None) -> dict:
     """获取模拟盘资金信息"""
-    result = mx.balance()
+    if _client is not None and hasattr(_client, "balance"):
+        result = _client.balance()
+    else:
+        result = _query_mx("mx.moni.balance", fallback={})
     data = result.get("data", {})
     return {
         "total_assets": data.get("totalAssets", 0),
@@ -955,9 +1027,12 @@ def _get_balance(mx: MXMoni) -> dict:
     }
 
 
-def _get_orders(mx: MXMoni) -> list:
+def _get_orders(_client: object = None) -> list:
     """获取模拟盘委托/成交记录"""
-    result = mx.orders()
+    if _client is not None and hasattr(_client, "orders"):
+        result = _client.orders()
+    else:
+        result = _query_mx("mx.moni.orders", fallback={})
     data = result.get("data", {})
     return data.get("orderList", data.get("list", []))
 
@@ -983,7 +1058,6 @@ def buy_new_picks(dry_run: bool = False) -> list:
     Returns:
         list of {"code": str, "name": str, "shares": int, "status": str}
     """
-    mx = _get_moni()
     stocks_cfg = get_stocks()
     core_pool = stocks_cfg.get("core_pool", [])
 
@@ -992,7 +1066,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
         return []
 
     # 获取当前持仓代码
-    positions = _get_positions(mx)
+    positions = _get_positions()
     held_codes = set()
     for pos in positions:
         code = str(pos.get("stockCode", pos.get("secuCode", ""))).strip()
@@ -1000,7 +1074,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
             held_codes.add(code)
 
     # 获取可用资金
-    balance = _get_balance(mx)
+    balance = _get_balance()
     available = balance["available"]
     _logger.info(f"[shadow] 可用资金: ¥{available:,.0f}  持仓: {len(held_codes)} 只")
     strategy = get_strategy()
@@ -1046,9 +1120,7 @@ def buy_new_picks(dry_run: bool = False) -> list:
 
         # 用 MX 查最新价
         try:
-            from scripts.mx.mx_data import MXData
-            mx_data = MXData()
-            price_result = mx_data.query(f"{code}最新价")
+            price_result = _query_mx("mx.data.query", query=f"{code}最新价", fallback={})
             dto_list = price_result.get("data", {}).get("data", {}).get(
                 "searchDataResultDTO", {}).get("dataTableDTOList", [])
             price = 0
@@ -1078,7 +1150,6 @@ def buy_new_picks(dry_run: bool = False) -> list:
         # 执行市价买入
         _logger.info(f"[shadow] 买入 {name}({code}) {shares}股 @ ¥{price:.2f}")
         trade_result, order_state = _submit_shadow_order(
-            mx,
             side="buy",
             code=code,
             name=name,
@@ -1151,7 +1222,6 @@ def check_stop_signals(dry_run: bool = False) -> list:
     """
     from datetime import time as dt_time
 
-    mx = _get_moni()
     strategy = get_strategy()
     risk_cfg = strategy.get("risk", {})
     stop_loss_pct = risk_cfg.get("stop_loss", 0.04)
@@ -1161,7 +1231,7 @@ def check_stop_signals(dry_run: bool = False) -> list:
     history_cache = {}
     today = datetime.now().date()
 
-    positions = _get_positions(mx)
+    positions = _get_positions()
     if not positions:
         _logger.info("[shadow] 模拟盘空仓，无需检查")
         return []
@@ -1306,7 +1376,6 @@ def check_stop_signals(dry_run: bool = False) -> list:
         # 止损用市价确保成交，止盈用限价锁定利润
         use_market_price = "止损" in reason
         trade_result, order_state = _submit_shadow_order(
-            mx,
             side="sell",
             code=code,
             name=name,
@@ -1362,15 +1431,15 @@ def check_stop_signals(dry_run: bool = False) -> list:
 
 def get_status() -> dict:
     """获取模拟盘完整状态"""
-    mx = _get_moni()
-    balance = _get_balance(mx)
-    positions = _get_positions(mx)
-    order_sync = _sync_broker_orders(mx)
+    balance = _get_balance()
+    positions = _get_positions()
+    order_sync = _sync_broker_orders()
     order_snapshot = load_order_snapshot(scope="paper_mx")
     risk_cfg = get_strategy().get("risk", {})
     paper_position_context = _load_paper_position_context(window=180)
     history_cache = {}
     today = datetime.now().date()
+    mx_health = _mx_health_snapshot(include_unavailable=True)
 
     pos_list = []
     for pos in positions:
@@ -1418,6 +1487,7 @@ def get_status() -> dict:
             "triggered_rules": sorted(triggered_rules),
             "positions": advisory_positions,
         },
+        "mx_health": mx_health,
         "orders": order_snapshot.get("orders", []),
         "order_summary": order_snapshot.get("summary", {}),
         "order_sync": order_sync,
@@ -1434,6 +1504,7 @@ def generate_report() -> str:
     bal = status["balance"]
     positions = status["positions"]
     advisory_summary = status.get("advisory_summary", {})
+    mx_health = status.get("mx_health", {})
 
     init = bal.get("init_money", 200000)
     total = bal.get("total_assets", 0)
@@ -1455,6 +1526,14 @@ def generate_report() -> str:
         f"| 可用资金 | ¥{bal.get('available', 0):,.0f} |",
         f"| 持仓市值 | ¥{bal.get('position_value', 0):,.0f} |",
         f"| 总收益 | ¥{bal.get('total_profit', 0):,.0f} ({total_return:+.2f}%) |",
+        "",
+        "## MX 能力状态",
+        "",
+        f"| 项目 | 数值 |",
+        f"|------|------|",
+        f"| 状态 | {mx_health.get('status', 'unknown')} |",
+        f"| 可用命令 | {mx_health.get('available_count', 0)} |",
+        f"| 不可用命令 | {mx_health.get('unavailable_count', 0)} |",
         "",
     ]
 

@@ -720,6 +720,58 @@ class CLIJsonContractTests(unittest.TestCase):
             "status_today.json",
         )
 
+    def test_status_today_includes_mx_health(self):
+        import scripts.cli.trade as trade
+
+        patches = [
+            mock.patch.object(trade, "_preflight_state_sync", return_value={"status": "success", "target": "all", "steps": []}),
+            mock.patch.object(trade, "load_daily_state", return_value={"date": "2026-04-09", "updated_at": "2026-04-09T09:00:00", "pipelines": {}}),
+            mock.patch.object(trade, "get_strategy", return_value={}),
+            mock.patch.object(trade, "build_today_decision", return_value={"action": "CLEAR", "weekly_buys": 0}),
+            mock.patch.object(trade, "load_portfolio_snapshot", return_value={"summary": {"holding_count": 0, "current_exposure": 0.0}}),
+            mock.patch.object(trade, "load_pool_snapshot", return_value={"updated_at": "", "snapshot_date": "2026-04-09", "summary": {}, "entries": []}),
+            mock.patch.object(trade, "audit_state", return_value={"status": "ok", "snapshot_date": "2026-04-09", "checks": {}}),
+            mock.patch.object(trade, "load_market_snapshot", return_value={"signal": "CLEAR", "source": "market_timer", "source_chain": [], "as_of_date": "2026-04-09"}),
+            mock.patch.object(trade, "_mx_health_snapshot", return_value={
+                "status": "warning",
+                "available_count": 3,
+                "unavailable_count": 1,
+                "command_count": 4,
+                "group_count": 3,
+                "groups": {"data": 1, "search": 1, "moni": 2},
+                "required": {},
+                "unavailable_commands": ["mx.moni.buy"],
+                "source": "scripts.mx.cli_tools",
+            }),
+            mock.patch.object(trade, "_shadow_trade_snapshot", return_value={
+                "status": "ok",
+                "timestamp": "2026-04-09 10:00",
+                "positions_count": 0,
+                "automation_scope": "",
+                "advisory_summary": {"triggered_signal_count": 0, "triggered_rules": []},
+                "mx_health": {
+                    "status": "ok",
+                    "available_count": 4,
+                    "unavailable_count": 0,
+                    "command_count": 4,
+                    "group_count": 3,
+                },
+                "consistency": {"ok": True, "status": "ok", "event_only_codes": [], "broker_only_codes": []},
+            }),
+            mock.patch.object(trade, "load_order_snapshot", return_value={
+                "scope": "paper_mx",
+                "status": "all",
+                "db_path": "/tmp/trade_state.sqlite3",
+                "orders": [],
+                "summary": {"order_count": 0, "open_count": 0, "terminal_count": 0, "status_counts": {}, "scope_counts": {}, "class_counts": {}, "pending_count": 0, "exception_count": 0},
+            }),
+            mock.patch.object(trade, "build_signal_bus_summary", return_value={"state": "ok"}),
+        ]
+
+        payload = self._run_main(["trade", "--json", "status", "today"], patches)
+        self.assertEqual(payload["mx_health"]["status"], "warning")
+        self.assertEqual(payload["shadow_trade_state"]["mx_health"]["status"], "ok")
+
     def test_state_orders_json_contract(self):
         import scripts.cli.trade as trade
 

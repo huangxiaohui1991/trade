@@ -239,6 +239,46 @@ def _requests_ok(url: str, timeout: int = 8) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _mx_health_snapshot(include_unavailable: bool = False) -> dict:
+    items = list_mx_command_metadata(include_unavailable=include_unavailable)
+    groups = mx_command_groups(include_unavailable=include_unavailable)
+    unavailable_items = [item for item in items if not item.get("available", False)]
+    available_items = [item for item in items if item.get("available", False)]
+    required_commands = [
+        "mx.data.query",
+        "mx.search.news",
+        "mx.xuangu.search",
+        "mx.zixuan.query",
+        "mx.zixuan.manage",
+        "mx.moni.positions",
+        "mx.moni.balance",
+        "mx.moni.orders",
+        "mx.moni.buy",
+        "mx.moni.sell",
+        "mx.moni.cancel",
+        "mx.moni.cancel_all",
+    ]
+    item_lookup = {item.get("id", ""): item for item in items}
+    required = {
+        command_id: {
+            "available": bool(item_lookup.get(command_id, {}).get("available", False)),
+            "availability_note": item_lookup.get(command_id, {}).get("availability_note", ""),
+        }
+        for command_id in required_commands
+    }
+    return {
+        "status": "ok" if not unavailable_items else "warning",
+        "available_count": len(available_items),
+        "unavailable_count": len(unavailable_items),
+        "command_count": len(items),
+        "group_count": len(groups),
+        "groups": {name: len(values) for name, values in groups.items()},
+        "required": required,
+        "unavailable_commands": [item.get("id", "") for item in unavailable_items],
+        "source": "scripts.mx.cli_tools",
+    }
+
+
 def _shadow_trade_snapshot() -> dict:
     empty_advisory = {
         "triggered_signal_count": 0,
@@ -267,6 +307,7 @@ def _shadow_trade_snapshot() -> dict:
             "automation_scope": shadow_status.get("automation_scope", ""),
             "automated_rules": shadow_status.get("automated_rules", []),
             "advisory_rules": shadow_status.get("advisory_rules", []),
+            "mx_health": shadow_status.get("mx_health", _mx_health_snapshot(include_unavailable=True)),
             "positions_count": len(actual_positions),
             "positions": actual_positions,
             "advisory_summary": shadow_status.get("advisory_summary", empty_advisory),
@@ -281,6 +322,7 @@ def _shadow_trade_snapshot() -> dict:
             "automation_scope": "",
             "automated_rules": [],
             "advisory_rules": [],
+            "mx_health": _mx_health_snapshot(include_unavailable=True),
             "positions_count": 0,
             "positions": [],
             "advisory_summary": empty_advisory,
@@ -710,6 +752,17 @@ def mx_command(action: str, args) -> dict:
             "groups": groups,
         })
 
+    if action == "health":
+        include_unavailable = bool(getattr(args, "include_unavailable", False))
+        health = _mx_health_snapshot(include_unavailable=include_unavailable)
+        return sanitize_for_json({
+            "command": "mx",
+            "action": "health",
+            "status": health["status"],
+            "include_unavailable": include_unavailable,
+            "health": health,
+        })
+
     kwargs = {}
     for field in ("query", "stock_code", "quantity", "price", "use_market_price", "order_id", "cancel_all"):
         value = getattr(args, field, None)
@@ -940,6 +993,7 @@ def status_today(sync_state: bool = True) -> dict:
     pool_sync_state = audit_state()
     market_snapshot = load_market_snapshot()
     shadow_snapshot = _shadow_trade_snapshot()
+    mx_health = _mx_health_snapshot(include_unavailable=True)
     try:
         order_snapshot = _compact_order_snapshot(load_order_snapshot(scope="paper_mx"))
     except Exception as e:
@@ -1008,6 +1062,7 @@ def status_today(sync_state: bool = True) -> dict:
             "source_chain": market_snapshot.get("source_chain", []),
             "as_of_date": market_snapshot.get("as_of_date", ""),
         },
+        "mx_health": mx_health,
         "signal_bus": signal_bus,
         "alert_snapshot": alert_snapshot,
         "pool_sync_state": pool_sync_state,
@@ -1019,6 +1074,7 @@ def status_today(sync_state: bool = True) -> dict:
             "positions_count": shadow_snapshot.get("positions_count", 0),
             "automation_scope": shadow_snapshot.get("automation_scope", ""),
             "advisory_summary": shadow_snapshot.get("advisory_summary", {}),
+            "mx_health": shadow_snapshot.get("mx_health", {}),
         },
         "rule_automation_scope": AUTOMATED_RULES,
         "pool_management": {
@@ -1181,6 +1237,8 @@ def main():
     mx_list.add_argument("--include-unavailable", action="store_true", help="Include unavailable MX capabilities")
     mx_groups = mx_sub.add_parser("groups")
     mx_groups.add_argument("--include-unavailable", action="store_true", help="Include unavailable MX capabilities")
+    mx_health = mx_sub.add_parser("health")
+    mx_health.add_argument("--include-unavailable", action="store_true", help="Include unavailable MX capabilities")
     mx_run = mx_sub.add_parser("run")
     mx_run.add_argument("mx_command", help="MX command id or alias")
     mx_run.add_argument("--query", default=None, help="Natural language query for data/search/xuangu/zixuan manage")
@@ -1449,6 +1507,14 @@ def main():
                 print(f"item_count: {result.get('item_count', 0)}")
             elif result.get("action") == "groups":
                 print(f"group_count: {result.get('group_count', 0)}")
+            elif result.get("action") == "health":
+                health = result.get("health", {})
+                print(
+                    "health: "
+                    f"available={health.get('available_count', 0)} "
+                    f"unavailable={health.get('unavailable_count', 0)} "
+                    f"commands={health.get('command_count', 0)}"
+                )
             else:
                 print(f"mx_command: {result.get('mx_command', '')}")
         elif result.get("command") == "workflows":

@@ -65,6 +65,35 @@ class TradeMxCliTests(unittest.TestCase):
         self.assertEqual(result["action"], "run")
         mx_mock.assert_called_once()
 
+    def test_mx_health_command_dispatches(self):
+        import scripts.cli.trade as trade
+
+        payload = {
+            "command": "mx",
+            "action": "health",
+            "status": "warning",
+            "health": {
+                "status": "warning",
+                "available_count": 4,
+                "unavailable_count": 1,
+                "command_count": 5,
+            },
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(trade, "mx_command", return_value=payload) as mx_mock, mock.patch.object(
+            trade.sys,
+            "argv",
+            ["trade", "--json", "mx", "health"],
+        ):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["command"], "mx")
+        self.assertEqual(result["action"], "health")
+        self.assertEqual(result["health"]["available_count"], 4)
+        mx_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

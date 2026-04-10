@@ -32,6 +32,7 @@ import akshare as ak
 
 from scripts.engine.scorer import batch_score, get_recommendation
 from scripts.engine.composite import build_today_decision
+from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
@@ -45,6 +46,32 @@ _logger = get_logger("pipeline.stock_screener")
 # mx-xuangu 调用（优先，通过妙想智能选股 API）
 # ---------------------------------------------------------------------------
 
+def _mx_health_snapshot(include_unavailable: bool = False) -> dict:
+    items = list_mx_command_metadata(include_unavailable=include_unavailable)
+    groups = mx_command_groups(include_unavailable=include_unavailable)
+    unavailable_items = [item for item in items if not item.get("available", False)]
+    available_items = [item for item in items if item.get("available", False)]
+    required_commands = ["mx.xuangu.search", "mx.zixuan.query", "mx.zixuan.manage"]
+    item_lookup = {item.get("id", ""): item for item in items}
+    required = {
+        command_id: {
+            "available": bool(item_lookup.get(command_id, {}).get("available", False)),
+            "availability_note": item_lookup.get(command_id, {}).get("availability_note", ""),
+        }
+        for command_id in required_commands
+    }
+    return {
+        "status": "ok" if not unavailable_items else "warning",
+        "available_count": len(available_items),
+        "unavailable_count": len(unavailable_items),
+        "command_count": len(items),
+        "group_count": len(groups),
+        "groups": {name: len(values) for name, values in groups.items()},
+        "required": required,
+        "unavailable_commands": [item.get("id", "") for item in unavailable_items],
+        "source": "scripts.mx.cli_tools",
+    }
+
 def _call_mx_screener(query: str, select_type: str = "A股") -> list:
     """
     调用妙想智能选股 API 进行自然语言筛选。
@@ -57,30 +84,26 @@ def _call_mx_screener(query: str, select_type: str = "A股") -> list:
         供 scorer 直接使用，避免再逐个调 akshare。
     """
     try:
-        from scripts.mx.mx_xuangu import MXXuangu
-    except ImportError as e:
-        _logger.warning(f"[mx-xuangu] 导入失败: {e}")
-        return []
-
-    try:
-        mx = MXXuangu()
-    except ValueError as e:
-        _logger.warning(f"[mx-xuangu] MX_APIKEY 未配置: {e}")
-        return []
-
-    try:
         _logger.info(f"[mx-xuangu] 调用: query='{query}'")
-        result = mx.search(query)
-        rows, data_source, err = mx.extract_data(result)
+        result = dispatch_mx_command("mx.xuangu.search", query=query)
+    except MXCommandError as e:
+        _logger.warning(f"[mx-xuangu] 调用失败: {e}")
+        return []
 
-        if err:
-            _logger.warning(f"[mx-xuangu] 解析失败: {err}")
-            return []
-
+    try:
+        rows = []
+        if isinstance(result, dict):
+            rows = (
+                result.get("data", {})
+                .get("data", {})
+                .get("searchDataResultDTO", {})
+                .get("dataTableDTOList", [])
+            )
+        elif isinstance(result, list):
+            rows = result
         if not rows:
             _logger.warning("[mx-xuangu] 返回结果为空")
             return []
-
         candidates = []
         for row in rows:
             code = (
@@ -362,11 +385,8 @@ def _sync_to_zixuan(actionable: list) -> None:
     if not actionable:
         return
     try:
-        from scripts.mx.mx_zixuan import MXZixuan
-        mx = MXZixuan()
-
         # 1. 查当前自选股列表
-        current = mx.query()
+        current = dispatch_mx_command("mx.zixuan.query")
         current_data = current.get("data", {}).get("allResults", {}).get("result", {}).get("dataList", [])
         current_codes = {str(s.get("SECURITY_CODE", "")).strip() for s in current_data}
         current_names = {str(s.get("SECURITY_CODE", "")).strip(): str(s.get("SECURITY_SHORT_NAME", "")).strip()
@@ -391,7 +411,7 @@ def _sync_to_zixuan(actionable: list) -> None:
         for code in to_add:
             name = target_map.get(code, code)
             try:
-                result = mx.manage(f"把{name}添加到我的自选股列表")
+                result = dispatch_mx_command("mx.zixuan.manage", query=f"把{name}添加到我的自选股列表")
                 if result.get("status") == 0:
                     added += 1
             except Exception:
@@ -401,7 +421,7 @@ def _sync_to_zixuan(actionable: list) -> None:
         for code in to_remove:
             name = current_names.get(code, code)
             try:
-                result = mx.manage(f"把{name}从我的自选股列表删除")
+                result = dispatch_mx_command("mx.zixuan.manage", query=f"把{name}从我的自选股列表删除")
                 if result.get("status") == 0:
                     removed += 1
             except Exception:
@@ -577,6 +597,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
         stocks_cfg = get_stocks()
         strategy_cfg = get_strategy()
         current_snapshot = load_pool_snapshot()
+        mx_health = _mx_health_snapshot(include_unavailable=True)
 
         blacklist = _get_blacklist(stocks_cfg)
 
@@ -703,6 +724,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 "pool_snapshot_path": snapshot_path,
                 "pool_snapshot_summary": pool_meta.get("snapshot_summary", {}),
                 "pool_snapshot_count": len(snapshot_entries),
+                "mx_health": mx_health,
             },
             today_str,
         )
