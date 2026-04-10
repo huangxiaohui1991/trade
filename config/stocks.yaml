@@ -1,35 +1,25 @@
-core_pool:
-  - code: "300389"
-    name: 艾比森
-    added: 2026-04-09
-    score: 7.6
-  - code: "603063"
-    name: 禾望电气
-    added: 2026-04-09
-    score: 7.0
-
+core_pool: []
 watch_pool:
-  - code: "603619"
-    name: 中曼石油
-    added: 2026-04-09
-    score: 6.9
-  - code: "000612"
-    name: 焦作万方
-    added: 2026-04-09
-    score: 6.9
-  - code: "300249"
-    name: 依米康
-    added: 2026-04-09
-    score: 6.8
-  - code: "600268"
-    name: 国电南自
-    added: 2026-04-09
-    score: 6.6
-  - code: "688188"
-    name: 柏楚电子
-    added: 2026-04-09
-    score: 6.1
-
+- code: '000612'
+  name: 焦作万方
+  added: '2026-04-10'
+  score: 6.9
+- code: '603619'
+  name: 中曼石油
+  added: '2026-04-10'
+  score: 6.9
+- code: '300249'
+  name: 依米康
+  added: '2026-04-10'
+  score: 6.8
+- code: '600268'
+  name: 国电南自
+  added: '2026-04-10'
+  score: 6.6
+- code: '688188'
+  name: 柏楚电子
+  added: '2026-04-10'
+  score: 6.1
 blacklist:
   permanent: []
   temporary: []
