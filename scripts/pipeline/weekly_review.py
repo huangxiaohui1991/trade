@@ -231,6 +231,10 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
     lines.append(f"| 平均盈利单笔 | ¥{_safe_float(review_summary.get('avg_win', 0.0)):+,.2f} |")
     lines.append(f"| 平均亏损单笔 | ¥{_safe_float(review_summary.get('avg_loss', 0.0)):+,.2f} |")
     lines.append(f"| 规则违例数 | {int(review_summary.get('rule_break_count', 0) or 0)} |")
+    attribution_summary = dict((trade_review or {}).get("portfolio_attribution_summary", {}))
+    if attribution_summary:
+        lines.append(f"| 出场风格盈亏 | {attribution_summary.get('pnl_by_exit_style', {})} |")
+        lines.append(f"| 规则偏离分布 | {attribution_summary.get('rule_deviation_counts', {})} |")
     lines.append("")
     if closed_trades:
         lines.append("| 股票 | 开始 | 结束 | 持有天数 | 入场原因 | 出场原因 | 已实现盈亏 | 标签 |")

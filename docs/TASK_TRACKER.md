@@ -107,11 +107,16 @@
 
 ### 复盘归因深化
 
-- [ ] entry factor 结构化沉淀
-- [ ] exit factor 结构化沉淀
-- [ ] 收益归因拆解
-- [ ] 规则偏离解释
-- [ ] 组合级归因摘要
+- [x] entry factor 结构化沉淀
+备注：闭合交易 now 输出 `entry_factors`，来源覆盖 reason code 与 reason text。
+- [x] exit factor 结构化沉淀
+备注：闭合交易 now 输出 `exit_factors`，覆盖风控、池子、对账、人工干预等出场来源。
+- [x] 收益归因拆解
+备注：闭合交易 now 输出 `pnl_attribution`，包含 outcome / pnl_pct / MFE 捕获率 / exit_style。
+- [x] 规则偏离解释
+备注：闭合交易 now 输出 `rule_deviation`，解释 compliant / reconcile / manual_override / drift。
+- [x] 组合级归因摘要
+备注：`load_trade_review` now 输出 `portfolio_attribution_summary`，周报同步展示出场风格盈亏与规则偏离分布。
 
 ### 告警中心深化
 
@@ -129,7 +134,7 @@
 3. [x] 逐日组合模拟主循环
 4. [x] 订单生命周期第二阶段
 5. [x] 组合级风控深化
-6. [ ] 复盘归因深化
+6. [x] 复盘归因深化
 
 ---
 

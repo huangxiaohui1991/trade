@@ -2545,6 +2545,114 @@ def _trade_rule_compliance(reason_codes: list[str]) -> dict:
     }
 
 
+def _trade_factor_summary(reason_codes: list[str], reason_texts: list[str] | None = None) -> list[dict]:
+    normalized = _dedupe(
+        [
+            normalize_reason_code(code, category="trade")
+            for code in reason_codes
+            if str(code or "").strip()
+        ]
+    )
+    texts = " ".join(str(item or "") for item in (reason_texts or [])).lower()
+    factors = []
+
+    def add_factor(code: str, label: str, source: str) -> None:
+        if any(item["code"] == code for item in factors):
+            return
+        factors.append({"code": code, "label": label, "source": source})
+
+    for code in normalized:
+        if code.startswith("BUY_"):
+            add_factor(code, "入场信号", "reason_code")
+        elif code.startswith("RISK_") or code.startswith("TRADE_"):
+            add_factor(code, "风控出场", "reason_code")
+        elif code.startswith("POOL_"):
+            add_factor(code, "池子变化", "reason_code")
+        elif "RECONCILE" in code:
+            add_factor(code, "账实对账", "reason_code")
+        elif "MANUAL" in code or "REPLY" in code or code.startswith("DISCORD_"):
+            add_factor(code, "人工干预", "reason_code")
+
+    if "评分" in texts or "score" in texts:
+        add_factor("FACTOR_SCORE", "评分驱动", "reason_text")
+    if "核心池" in texts or "core" in texts:
+        add_factor("FACTOR_CORE_POOL", "核心池驱动", "reason_text")
+    if "止盈" in texts or "take profit" in texts:
+        add_factor("FACTOR_TAKE_PROFIT", "止盈驱动", "reason_text")
+    if "止损" in texts or "stop loss" in texts:
+        add_factor("FACTOR_STOP_LOSS", "止损驱动", "reason_text")
+    return factors
+
+
+def _trade_pnl_attribution(trade: dict) -> dict:
+    pnl = _safe_float(trade.get("realized_pnl", 0.0), 0.0)
+    entry_price = _safe_float(trade.get("entry_price", 0.0), 0.0)
+    exit_price = _safe_float(trade.get("exit_price", 0.0), 0.0)
+    pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price else 0.0
+    mfe = trade.get("mfe_pct")
+    mae = trade.get("mae_pct")
+    capture_pct = None
+    if mfe not in (None, "") and _safe_float(mfe, 0.0) > 0:
+        capture_pct = round(max(pnl_pct, 0.0) / _safe_float(mfe, 0.0) * 100, 1)
+    if pnl > 0:
+        outcome = "win"
+    elif pnl < 0:
+        outcome = "loss"
+    else:
+        outcome = "flat"
+    return {
+        "outcome": outcome,
+        "realized_pnl": round(pnl, 2),
+        "pnl_pct": pnl_pct,
+        "mfe_pct": mfe,
+        "mae_pct": mae,
+        "mfe_capture_pct": capture_pct,
+        "holding_days_bucket": trade.get("holding_days_bucket", ""),
+        "exit_style": trade.get("exit_style", ""),
+    }
+
+
+def _trade_rule_deviation(rule_compliance: dict) -> dict:
+    status = str(rule_compliance.get("status", "compliant")).strip() or "compliant"
+    return {
+        "status": status,
+        "deviation_count": int(rule_compliance.get("rule_break_count", 0) or 0),
+        "reason_codes": list(rule_compliance.get("reason_codes", [])),
+        "explanation": "规则内交易" if status == "compliant" else f"存在规则偏离: {status}",
+    }
+
+
+def _portfolio_attribution_summary(closed_trades: list[dict]) -> dict:
+    entry_factor_counts: dict[str, int] = {}
+    exit_factor_counts: dict[str, int] = {}
+    pnl_by_exit_style: dict[str, float] = {}
+    deviation_counts: dict[str, int] = {}
+    for trade in closed_trades:
+        for factor in trade.get("entry_factors", []):
+            code = str(factor.get("code", "")).strip()
+            if code:
+                entry_factor_counts[code] = entry_factor_counts.get(code, 0) + 1
+        for factor in trade.get("exit_factors", []):
+            code = str(factor.get("code", "")).strip()
+            if code:
+                exit_factor_counts[code] = exit_factor_counts.get(code, 0) + 1
+        exit_style = str(trade.get("exit_style", "other")).strip() or "other"
+        pnl_by_exit_style[exit_style] = round(
+            pnl_by_exit_style.get(exit_style, 0.0) + _safe_float(trade.get("realized_pnl", 0.0), 0.0),
+            2,
+        )
+        deviation = trade.get("rule_deviation", {}) if isinstance(trade.get("rule_deviation", {}), dict) else {}
+        status = str(deviation.get("status", "unknown")).strip() or "unknown"
+        deviation_counts[status] = deviation_counts.get(status, 0) + 1
+    return {
+        "closed_trade_count": len(closed_trades),
+        "entry_factor_counts": entry_factor_counts,
+        "exit_factor_counts": exit_factor_counts,
+        "pnl_by_exit_style": pnl_by_exit_style,
+        "rule_deviation_counts": deviation_counts,
+    }
+
+
 def _estimate_trade_excursion(
     entry_price: float,
     exit_price: float,
@@ -2768,6 +2876,14 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
             all_reason_codes = list(position["entry_reason_codes"]) + list(position["exit_reason_codes"])
             exit_style, exit_style_code = _trade_exit_style(position["exit_reason_codes"])
             rule_compliance = _trade_rule_compliance(all_reason_codes)
+            entry_factors = _trade_factor_summary(
+                position["entry_reason_codes"],
+                [position.get("entry_reason_text", "")],
+            )
+            exit_factors = _trade_factor_summary(
+                position["exit_reason_codes"],
+                position["exit_reason_texts"],
+            )
             mfe_pct, mae_pct, excursion_source = _compute_actual_trade_excursion(
                 code=code,
                 entry_date=position["entry_date"],
@@ -2782,33 +2898,38 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
                     realized_pnl=position["realized_pnl"],
                     exit_reason_codes=position["exit_reason_codes"],
                 )
+            trade_payload = {
+                "code": code,
+                "name": position["name"],
+                "entry_date": position["entry_date"],
+                "exit_date": event_date,
+                "holding_days": hold_days,
+                "holding_days_bucket": holding_days_bucket,
+                "entry_price": round(position["entry_price"], 3),
+                "exit_price": round(price, 3),
+                "buy_count": position["buy_count"],
+                "sell_count": position["sell_count"],
+                "entry_reason_code": position["entry_reason_code"],
+                "entry_reason_codes": position["entry_reason_codes"],
+                "entry_reason_text": position["entry_reason_text"],
+                "entry_factors": entry_factors,
+                "exit_reason_codes": position["exit_reason_codes"],
+                "exit_reason_texts": position["exit_reason_texts"],
+                "exit_factors": exit_factors,
+                "realized_pnl": round(position["realized_pnl"], 2),
+                "rule_tags": sorted(set(entry_tags + exit_tags)),
+                "exit_style": exit_style,
+                "exit_style_reason_code": exit_style_code,
+                "rule_compliance": rule_compliance,
+                "rule_deviation": _trade_rule_deviation(rule_compliance),
+                "rule_break_count": rule_compliance["rule_break_count"],
+                "mfe_pct": mfe_pct,
+                "mae_pct": mae_pct,
+                "excursion_source": excursion_source,
+            }
+            trade_payload["pnl_attribution"] = _trade_pnl_attribution(trade_payload)
             closed_trades.append(
-                {
-                    "code": code,
-                    "name": position["name"],
-                    "entry_date": position["entry_date"],
-                    "exit_date": event_date,
-                    "holding_days": hold_days,
-                    "holding_days_bucket": holding_days_bucket,
-                    "entry_price": round(position["entry_price"], 3),
-                    "exit_price": round(price, 3),
-                    "buy_count": position["buy_count"],
-                    "sell_count": position["sell_count"],
-                    "entry_reason_code": position["entry_reason_code"],
-                    "entry_reason_codes": position["entry_reason_codes"],
-                    "entry_reason_text": position["entry_reason_text"],
-                    "exit_reason_codes": position["exit_reason_codes"],
-                    "exit_reason_texts": position["exit_reason_texts"],
-                    "realized_pnl": round(position["realized_pnl"], 2),
-                    "rule_tags": sorted(set(entry_tags + exit_tags)),
-                    "exit_style": exit_style,
-                    "exit_style_reason_code": exit_style_code,
-                    "rule_compliance": rule_compliance,
-                    "rule_break_count": rule_compliance["rule_break_count"],
-                    "mfe_pct": mfe_pct,
-                    "mae_pct": mae_pct,
-                    "excursion_source": excursion_source,
-                }
+                trade_payload
             )
             open_positions.pop(code, None)
 
@@ -2838,6 +2959,8 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
         "avg_mae_pct": round(sum(mae_values) / len(mae_values), 2) if mae_values else None,
         "actual_excursion_coverage_pct": round(actual_excursion_count / len(closed_trades) * 100, 1) if closed_trades else 0.0,
     }
+    attribution_summary = _portfolio_attribution_summary(closed_trades)
+    summary_stats["portfolio_attribution"] = attribution_summary
     excursion_sources = {str(item.get("excursion_source", "")).strip() for item in closed_trades if str(item.get("excursion_source", "")).strip()}
     if not mfe_values:
         mfe_mae_status = "pending_market_history"
@@ -2859,6 +2982,7 @@ def load_trade_review(window: int = 90, scope: str = PRIMARY_SCOPE) -> dict:
         "closed_trades": closed_trades,
         "open_positions": list(open_positions.values()),
         "summary_stats": summary_stats,
+        "portfolio_attribution_summary": attribution_summary,
         "source": activity.get("source", "structured_ledger"),
         "mfe_mae_status": mfe_mae_status,
     }

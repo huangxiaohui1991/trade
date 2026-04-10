@@ -84,8 +84,13 @@ class TradeReviewTests(unittest.TestCase):
         self.assertEqual(trade["realized_pnl"], 2200)
         self.assertIn("risk", trade["rule_tags"])
         self.assertIn("entry", trade["rule_tags"])
+        self.assertEqual(trade["entry_factors"][0]["code"], "BUY_CORE_POOL")
+        self.assertEqual(trade["exit_factors"][0]["code"], "RISK_TAKE_PROFIT_T1")
+        self.assertEqual(trade["pnl_attribution"]["outcome"], "win")
+        self.assertEqual(trade["rule_deviation"]["status"], "compliant")
         self.assertIsNotNone(trade["mfe_pct"])
         self.assertIsNotNone(trade["mae_pct"])
+        self.assertEqual(review["portfolio_attribution_summary"]["entry_factor_counts"]["BUY_CORE_POOL"], 1)
         self.assertEqual(review["mfe_mae_status"], "proxy_market_history")
 
     def test_load_trade_review_prefers_actual_market_history_for_excursion(self):
@@ -237,6 +242,11 @@ class TradeReviewTests(unittest.TestCase):
         self.assertEqual(trades["688001"]["rule_compliance"]["status"], "reconcile")
         self.assertTrue(trades["688001"]["rule_compliance"]["has_reconcile"])
         self.assertEqual(trades["688001"]["rule_compliance"]["rule_break_count"], 1)
+        self.assertEqual(trades["688001"]["rule_deviation"]["status"], "reconcile")
+        self.assertEqual(trades["688001"]["pnl_attribution"]["outcome"], "loss")
+        self.assertEqual(review["portfolio_attribution_summary"]["pnl_by_exit_style"]["risk"], 2200.0)
+        self.assertEqual(review["portfolio_attribution_summary"]["pnl_by_exit_style"]["manual"], -500.0)
+        self.assertEqual(review["portfolio_attribution_summary"]["rule_deviation_counts"]["reconcile"], 1)
         self.assertEqual(review["mfe_mae_status"], "mixed_market_history")
 
         vault = mock.Mock(vault_path=self._tmpdir.name, read_core_pool=mock.Mock(return_value=[]))
@@ -256,6 +266,8 @@ class TradeReviewTests(unittest.TestCase):
         self.assertIn("| 平均盈利单笔 | ¥+2,200.00 |", report)
         self.assertIn("| 平均亏损单笔 | ¥-500.00 |", report)
         self.assertIn("| 规则违例数 | 1 |", report)
+        self.assertIn("| 出场风格盈亏 |", report)
+        self.assertIn("| 规则偏离分布 |", report)
 
 
 if __name__ == "__main__":
