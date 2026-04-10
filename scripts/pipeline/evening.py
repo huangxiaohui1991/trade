@@ -202,7 +202,7 @@ def _enrich_today_journal(vault: ObsidianVault, today_str: str,
     vault_path = Path(vault.vault_path)
 
     # 构造路径：vault/交易日志/YYYY-MM-DD.md
-    journal_path = vault_path / "交易日志" / f"{today_str}.md"
+    journal_path = Path(vault_path) / vault.journal_dir / f"{today_str}.md"
     if not journal_path.exists():
         _logger.warning(f"  今日日志不存在，跳过 enrichment: {journal_path.name}")
         return
