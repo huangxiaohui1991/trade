@@ -1263,6 +1263,7 @@ def run_backtest(
     *,
     scope: str = "cn_a_system",
     fixture: str | Path | None = None,
+    codes: str | None = None,
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
@@ -1293,6 +1294,9 @@ def run_backtest(
         veto_presets=veto_presets,
     )
     source_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    if codes:
+        code_set = {c.strip() for c in codes.split(",")}
+        source_trades = [t for t in source_trades if str(t.get("code", "")).strip() in code_set]
     selected_params, rankings, selected_summary = _select_best_parameter_set(source_trades, params_grid, baseline)
     sample_payload = _build_history_samples(
         source_trades,
@@ -1367,6 +1371,7 @@ def run_parameter_sweep(
     *,
     scope: str = "cn_a_system",
     fixture: str | Path | None = None,
+    codes: str | None = None,
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
@@ -1397,6 +1402,9 @@ def run_parameter_sweep(
         veto_presets=veto_presets,
     )
     trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    if codes:
+        code_set = {c.strip() for c in codes.split(",")}
+        trades = [t for t in trades if str(t.get("code", "")).strip() in code_set]
     selected_params, rankings, selected_summary = _select_best_parameter_set(trades, params_grid, baseline)
     sample_payload = _build_history_samples(
         trades,
@@ -1479,6 +1487,7 @@ def run_walk_forward(
     scope: str = "cn_a_system",
     folds: int = 3,
     fixture: str | Path | None = None,
+    codes: str | None = None,
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
@@ -1498,6 +1507,9 @@ def run_walk_forward(
 
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     all_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
+    if codes:
+        code_set = {c.strip() for c in codes.split(",")}
+        all_trades = [t for t in all_trades if str(t.get("code", "")).strip() in code_set]
     baseline = _baseline_parameters()
     params_grid = _parameter_grid(
         buy_thresholds=buy_thresholds,
