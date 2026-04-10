@@ -144,12 +144,14 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertIn("training_summary", result["folds"][0]["score_summary"])
         self.assertIn("evaluation_summary", result["folds"][0]["score_summary"])
         self.assertIn("selected_parameters", result["folds"][0]["score_summary"])
+        self.assertIn("portfolio_replay_summary", result["folds"][0])
         self.assertEqual(result["sample_store"]["sample_count"], 3)
         self.assertTrue(result["sample_store"]["path"])
         self.assertTrue(result["result_path"])
         self.assertTrue(result["report_path"])
         self.assertEqual(result["comparison_summary"]["fold_count"], result["parameters"]["folds"])
         self.assertEqual(len(result["comparison_summary"]["rows"]), result["parameters"]["folds"])
+        self.assertIn("evaluation_peak_exposure_pct", result["comparison_summary"]["rows"][0])
 
     def test_walk_forward_report_includes_fold_comparison_tables(self):
         from scripts.backtest import run_walk_forward

@@ -678,8 +678,11 @@ def _build_portfolio_replay(
     normalized_capital = max(_safe_float(total_capital, 0.0), 1.0)
     strategy = strategy or {}
     position_cfg = (strategy.get("risk", {}) or {}).get("position", {}) or {}
+    portfolio_cfg = (strategy.get("risk", {}) or {}).get("portfolio", {}) or {}
     total_exposure_max = max(min(_safe_float(position_cfg.get("total_max", 0.60), 0.60), 1.0), 0.0)
     single_position_max = max(min(_safe_float(position_cfg.get("single_max", 0.20), 0.20), 1.0), 0.0)
+    consecutive_loss_days_limit = int(portfolio_cfg.get("consecutive_loss_days_limit", 0) or 0)
+    cooldown_days = int(portfolio_cfg.get("cooldown_days", 0) or 0)
     total_cap_limit = round(normalized_capital * total_exposure_max, 2)
     single_cap_limit = round(normalized_capital * single_position_max, 2)
     timeline = []
@@ -691,6 +694,10 @@ def _build_portfolio_replay(
     min_cash_available = round(normalized_capital, 2)
     constrained_trade_count = 0
     rejected_trade_count = 0
+    cooldown_rejected_count = 0
+    processed_exit_dates: set[str] = set()
+    consecutive_loss_days = 0
+    cooldown_until = ""
     allocation_rank_by_date: dict[str, int] = {}
     accepted_trade_details: list[dict[str, Any]] = []
     rejected_trade_details: list[dict[str, Any]] = []
@@ -730,6 +737,34 @@ def _build_portfolio_replay(
         allocation_rank_by_date[entry_date] = allocation_rank_by_date.get(entry_date, 0) + 1
         allocation_rank = allocation_rank_by_date[entry_date]
         accepted_positions = [item for item in accepted_positions if item["exit_date"] > entry_date]
+        for exit_date in sorted({item["exit_date"] for item in normalized_trades if item["exit_date"] <= entry_date}):
+            if exit_date in processed_exit_dates:
+                continue
+            processed_exit_dates.add(exit_date)
+            exit_pnl = round(sum(item["realized_pnl"] for item in normalized_trades if item["exit_date"] == exit_date), 2)
+            if exit_pnl < 0:
+                consecutive_loss_days += 1
+            elif exit_pnl > 0:
+                consecutive_loss_days = 0
+            if consecutive_loss_days_limit > 0 and cooldown_days > 0 and consecutive_loss_days >= consecutive_loss_days_limit:
+                try:
+                    cooldown_until = (_parse_date(exit_date) + timedelta(days=cooldown_days)).isoformat()
+                except Exception:
+                    cooldown_until = exit_date
+        if cooldown_until and entry_date <= cooldown_until:
+            rejected_trade_count += 1
+            cooldown_rejected_count += 1
+            rejected_trade_details.append({
+                "code": trade.get("code", ""),
+                "entry_date": trade["entry_date"],
+                "desired_capital": round(trade["desired_capital"], 2),
+                "priority_score": round(_safe_float(trade.get("priority_score", 0.0), 0.0), 4),
+                "allocation_rank": allocation_rank,
+                "reason": "portfolio_cooldown",
+                "cooldown_until": cooldown_until,
+                "consecutive_loss_days": consecutive_loss_days,
+            })
+            continue
         current_deployed = round(sum(item["capital"] for item in accepted_positions), 2)
         remaining_total = max(total_cap_limit - current_deployed, 0.0)
         capital = min(trade["desired_capital"], single_cap_limit, remaining_total)
@@ -839,6 +874,9 @@ def _build_portfolio_replay(
             "accepted_trade_count": len(normalized_trades),
             "constrained_trade_count": constrained_trade_count,
             "rejected_trade_count": rejected_trade_count,
+            "cooldown_rejected_count": cooldown_rejected_count,
+            "consecutive_loss_days_limit": consecutive_loss_days_limit,
+            "cooldown_days": cooldown_days,
             "allocation_rule": "entry_score_desc_realized_pnl_desc_capital_asc",
             "simulation_mode": "daily_event_replay",
             "intraday_ordering": "exits_before_entries",
@@ -939,6 +977,9 @@ def _build_walk_forward_comparison_summary(fold_reports: list[dict[str, Any]]) -
             "train_eval_pnl_delta": round(evaluation_pnl - training_pnl, 2),
             "train_eval_win_rate_delta": round(evaluation_win_rate - training_win_rate, 1),
             "train_eval_sample_count_delta": evaluation_sample_count - training_sample_count,
+            "evaluation_peak_exposure_pct": item.get("portfolio_replay_summary", {}).get("peak_exposure_pct", 0.0),
+            "evaluation_max_concurrent_positions": item.get("portfolio_replay_summary", {}).get("max_concurrent_positions", 0),
+            "evaluation_cooldown_rejected_count": item.get("portfolio_replay_summary", {}).get("cooldown_rejected_count", 0),
         }
         rows.append(row)
         training_total_realized_pnl += training_pnl
@@ -1359,6 +1400,13 @@ def run_walk_forward(
         selected_params, rankings, training_summary = _select_best_parameter_set(train_trades, params_grid, baseline)
         evaluated_test = _apply_parameter_set(test_trades, selected_params, baseline)
         evaluation_summary = _summarize_trade_list(evaluated_test)
+        fold_portfolio_replay = _build_portfolio_replay(
+            evaluated_test,
+            start=test_start,
+            end=test_end,
+            total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+            strategy=get_strategy(),
+        )
         fold_score = {
             "training_summary": training_summary,
             "evaluation_summary": evaluation_summary,
@@ -1375,6 +1423,7 @@ def run_walk_forward(
             "training_sample_count": int(training_summary["closed_trade_count"]),
             "sample_count": int(evaluation_summary["closed_trade_count"]),
             "score_summary": fold_score,
+            "portfolio_replay_summary": fold_portfolio_replay.get("summary", {}),
             "risk_summary": fold_risk,
             "status": _status_from_components(
                 str(fold_risk.get("risk_state", "ok")),

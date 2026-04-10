@@ -101,8 +101,10 @@
 
 - [ ] 真正的逐日策略回放引擎
 - [ ] 回测参数扩展到 veto / 评分更多维度
-- [ ] 组合层连续亏损冷却纳入回测
-- [ ] 组合层资金占用与持仓上限纳入 walk-forward 评估
+- [x] 组合层连续亏损冷却纳入回测
+备注：portfolio replay 已按 `consecutive_loss_days_limit / cooldown_days` 拒绝冷却期新开仓，并输出 cooldown rejected 明细。
+- [x] 组合层资金占用与持仓上限纳入 walk-forward 评估
+备注：walk-forward 每个 fold now 输出 evaluation portfolio replay summary，并在 comparison rows 中展示峰值仓位/并发/冷却拒绝数。
 - [ ] 回测结果对比视图继续强化
 
 ### 复盘归因深化

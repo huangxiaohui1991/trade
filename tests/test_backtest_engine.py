@@ -143,6 +143,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertIn("training_summary", result["folds"][0]["score_summary"])
         self.assertIn("evaluation_summary", result["folds"][0]["score_summary"])
         self.assertIn("selected_parameters", result["folds"][0]["score_summary"])
+        self.assertIn("portfolio_replay_summary", result["folds"][0])
         self.assertEqual(result["score_summary"]["fold_count"], 3)
         self.assertEqual(result["risk_summary"]["fold_count"], 3)
         self.assertIn(result["status"], {"ok", "warning", "drift"})
@@ -244,3 +245,53 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(day3["cash_available"], 10100.0)
         self.assertEqual(replay["summary"]["ending_cash"], 10100.0)
         self.assertEqual(replay["summary"]["min_cash_available"], 9000.0)
+
+    def test_portfolio_replay_applies_consecutive_loss_cooldown(self):
+        from scripts.backtest.runner import _build_portfolio_replay
+
+        replay = _build_portfolio_replay(
+            [
+                {
+                    "code": "LOSS1",
+                    "entry_date": "2026-04-01",
+                    "exit_date": "2026-04-02",
+                    "entry_price": 10.0,
+                    "shares": 100,
+                    "realized_pnl": -100.0,
+                    "entry_score": 8.0,
+                },
+                {
+                    "code": "LOSS2",
+                    "entry_date": "2026-04-03",
+                    "exit_date": "2026-04-04",
+                    "entry_price": 10.0,
+                    "shares": 100,
+                    "realized_pnl": -100.0,
+                    "entry_score": 8.0,
+                },
+                {
+                    "code": "COOLDOWN",
+                    "entry_date": "2026-04-05",
+                    "exit_date": "2026-04-07",
+                    "entry_price": 10.0,
+                    "shares": 100,
+                    "realized_pnl": 300.0,
+                    "entry_score": 9.0,
+                },
+            ],
+            start=date(2026, 4, 1),
+            end=date(2026, 4, 8),
+            total_capital=10000,
+            strategy={
+                "risk": {
+                    "position": {"total_max": 0.50, "single_max": 0.50},
+                    "portfolio": {"consecutive_loss_days_limit": 2, "cooldown_days": 2},
+                }
+            },
+        )
+
+        self.assertEqual(replay["summary"]["accepted_trade_count"], 2)
+        self.assertEqual(replay["summary"]["cooldown_rejected_count"], 1)
+        self.assertEqual(replay["rejected_trades"][0]["code"], "COOLDOWN")
+        self.assertEqual(replay["rejected_trades"][0]["reason"], "portfolio_cooldown")
+        self.assertEqual(replay["rejected_trades"][0]["cooldown_until"], "2026-04-06")
