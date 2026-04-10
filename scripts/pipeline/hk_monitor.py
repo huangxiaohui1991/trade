@@ -28,7 +28,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.utils.logger import get_logger
-from scripts.utils.discord_push import _post_to_discord
+from scripts.utils.discord_push import _post_embed_to_discord, _build_hk_alert_embed
 
 _logger = get_logger("pipeline.hk_monitor")
 
@@ -90,31 +90,6 @@ def _fetch_hk_price(code: str) -> float | None:
         _logger.info(f"[hk] akshare 获取 {code} 价格失败: {exc}")
 
     return None
-
-
-def _build_hk_alert_message(position: dict, current_price: float, alert_type: str, details: str) -> str:
-    """构建港股告警消息"""
-    name = position.get("name", "")
-    code = position.get("code", "")
-    shares = position.get("shares", 0)
-    cost = position.get("avg_cost", 0)
-    pnl_pct = ((current_price / cost) - 1) * 100 if cost > 0 else 0
-
-    emoji = "🔴" if "止损" in alert_type else "🟡"
-
-    lines = [
-        f"{emoji} 港股告警 — {name}({code})",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"📌 类型: {alert_type}",
-        f"💰 持仓: {shares}股 @ HK${cost:.2f}",
-        f"📈 现价: HK${current_price:.2f} ({pnl_pct:+.1f}%)",
-        f"📋 详情: {details}",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "⚠️ 港股遗留仓位独立管理，不补仓、不加仓",
-    ]
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +182,8 @@ def run(dry_run: bool = False) -> dict:
             alerts.append(alert)
 
             if not dry_run:
-                msg = _build_hk_alert_message(pos, current_price, "绝对止损触发", alert["message"])
-                ok, err = _post_to_discord(msg)
+                embeds = _build_hk_alert_embed(pos, current_price, "绝对止损触发", alert["message"])
+                ok, err = _post_embed_to_discord(embeds)
                 if ok:
                     discord_sent += 1
                 else:
@@ -230,8 +205,8 @@ def run(dry_run: bool = False) -> dict:
             alerts.append(alert)
 
             if not dry_run:
-                msg = _build_hk_alert_message(pos, current_price, "反弹止损上调提醒", alert["message"])
-                ok, err = _post_to_discord(msg)
+                embeds = _build_hk_alert_embed(pos, current_price, "反弹止损上调提醒", alert["message"])
+                ok, err = _post_embed_to_discord(embeds)
                 if ok:
                     discord_sent += 1
                 else:
