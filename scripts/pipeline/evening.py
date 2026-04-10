@@ -573,7 +573,7 @@ def run() -> dict:
         _logger.info(f"[EVENING] 收盘流程完成 → 明日日志: {tomorrow_str}.md")
 
         try:
-            from scripts.pipeline.shadow_trade import check_stop_signals
+            from scripts.pipeline.shadow_trade import check_stop_signals, generate_report as generate_shadow_report
             shadow_results = check_stop_signals()
             triggered = [r for r in shadow_results if r.get("action") != "持有"]
             advisories = [
@@ -588,6 +588,13 @@ def run() -> dict:
                 _logger.info(f">> 影子交易 advisory: {len(advisories)} 只")
                 for r in advisories:
                     _logger.info(f"  {r['name']}({r['code']}): {r.get('advisory_summary', '')}")
+
+            # 生成/更新模拟盘日报（拉最新持仓和价格）
+            try:
+                report_path = generate_shadow_report()
+                _logger.info(f">> 模拟盘报告已更新: {report_path}")
+            except Exception as re:
+                _logger.warning(f">> 模拟盘报告生成失败: {re}")
         except Exception as e:
             _logger.warning(f">> 影子交易检查失败: {e}")
 
