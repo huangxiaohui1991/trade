@@ -127,6 +127,93 @@ class ShadowOrderFlowTests(unittest.TestCase):
         repeated_activity = load_activity_summary(30, scope="paper_mx")
         self.assertEqual(repeated_activity["trade_count"], 1)
 
+    def test_broker_partial_fill_is_logged_incrementally(self):
+        from scripts.pipeline.shadow_trade import _submit_shadow_order, _sync_broker_orders
+        from scripts.state import load_activity_summary, load_order_snapshot
+
+        self._bootstrap_empty_ledger()
+        mx = mock.Mock()
+        mx.trade.return_value = {"code": "200", "orderId": "ORD-3"}
+
+        _submit_shadow_order(
+            mx,
+            side="sell",
+            code="300389",
+            name="艾比森",
+            shares=600,
+            reason="止盈第一批",
+            reason_code="RISK_TAKE_PROFIT_T1",
+            price=21.3,
+            use_market_price=False,
+            order_class="risk",
+        )
+
+        broker = mock.Mock()
+        broker.orders.return_value = {
+            "data": {
+                "orderList": [
+                    {
+                        "orderId": "ORD-3",
+                        "stockCode": "300389",
+                        "stockName": "艾比森",
+                        "type": "sell",
+                        "status": "部分成交",
+                        "quantity": 600,
+                        "filledQuantity": 300,
+                        "avgPrice": 21.3,
+                    }
+                ]
+            }
+        }
+
+        _sync_broker_orders(broker)
+        activity = load_activity_summary(30, scope="paper_mx")
+        self.assertEqual(activity["trade_count"], 1)
+        self.assertEqual(activity["sell_count"], 1)
+        self.assertEqual(activity["trade_events"][0]["shares"], 300)
+
+        snapshot = load_order_snapshot(scope="paper_mx")
+        order = snapshot["orders"][0]
+        self.assertEqual(order["status"], "partially_filled")
+        self.assertEqual(order["metadata"]["broker_logged_filled_shares"], 300)
+        self.assertEqual(order["metadata"]["broker_status_raw"], "部分成交")
+
+        _sync_broker_orders(broker)
+        repeated_activity = load_activity_summary(30, scope="paper_mx")
+        self.assertEqual(repeated_activity["trade_count"], 1)
+
+        broker.orders.return_value["data"]["orderList"][0]["status"] = "已成交"
+        broker.orders.return_value["data"]["orderList"][0]["filledQuantity"] = 600
+        _sync_broker_orders(broker)
+
+        final_activity = load_activity_summary(30, scope="paper_mx")
+        self.assertEqual(final_activity["trade_count"], 2)
+        self.assertEqual(sum(item["shares"] for item in final_activity["trade_events"]), 600)
+
+    def test_broker_fine_grained_statuses_sync_to_order_state(self):
+        from scripts.pipeline.shadow_trade import _sync_broker_orders
+        from scripts.state import load_order_snapshot
+
+        self._bootstrap_empty_ledger()
+        broker = mock.Mock()
+        broker.orders.return_value = {
+            "data": {
+                "orderList": [
+                    {"orderId": "ORD-4", "stockCode": "300389", "stockName": "艾比森", "type": "sell", "status": "撤单中"},
+                    {"orderId": "ORD-5", "stockCode": "603063", "stockName": "禾望电气", "type": "sell", "status": "改挂"},
+                    {"orderId": "ORD-6", "stockCode": "000612", "stockName": "焦作万方", "type": "buy", "status": "待复核"},
+                ]
+            }
+        }
+
+        _sync_broker_orders(broker)
+
+        snapshot = load_order_snapshot(scope="paper_mx")
+        statuses = {item["broker_order_id"]: item["status"] for item in snapshot["orders"]}
+        self.assertEqual(statuses["ORD-4"], "cancel_requested")
+        self.assertEqual(statuses["ORD-5"], "cancel_replace_pending")
+        self.assertEqual(statuses["ORD-6"], "review_required")
+
 
 if __name__ == "__main__":
     unittest.main()

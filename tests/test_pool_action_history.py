@@ -66,6 +66,39 @@ class PoolActionHistoryTests(unittest.TestCase):
         self.assertEqual(history["action_counts"]["promote"], 1)
         self.assertEqual(history["action_counts"]["demote"], 1)
 
+    def test_audit_state_reports_projection_drift_details(self):
+        from scripts.state import audit_state, save_pool_snapshot
+
+        self._bootstrap_empty()
+        with mock.patch("scripts.state.service._project_stocks_yaml", return_value="/tmp/stocks.yaml"), mock.patch(
+            "scripts.state.service.ObsidianVault",
+            return_value=mock.Mock(sync_pool_projection=mock.Mock(return_value={})),
+        ):
+            save_pool_snapshot(
+                [
+                    {"code": "300389", "name": "艾比森", "bucket": "core", "total_score": 7.6},
+                    {"code": "603063", "name": "禾望电气", "bucket": "watch", "total_score": 5.4},
+                ],
+                metadata={"snapshot_date": "2026-04-10", "source": "unit_test"},
+            )
+
+        with mock.patch("scripts.state.service.get_stocks", return_value={
+            "core_pool": [{"code": "300389", "name": "艾比森", "score": 7.0}],
+            "watch_pool": [{"code": "000612", "name": "焦作万方", "score": 5.8}],
+        }), mock.patch("scripts.state.service._load_md_rows", side_effect=lambda path: [
+            {"代码": "300389", "四维总分": "7.6"},
+            {"代码": "603063", "四维总分": "5.4"},
+        ] if "核心池" in path else []):
+            result = audit_state()
+
+        self.assertEqual(result["status"], "drift")
+        stocks_check = result["checks"]["stocks_yaml"]
+        self.assertEqual(stocks_check["missing_codes"], ["603063"])
+        self.assertEqual(stocks_check["extra_codes"], ["000612"])
+        self.assertEqual(stocks_check["score_mismatches"][0]["code"], "300389")
+        obsidian_check = result["checks"]["obsidian_projection"]
+        self.assertEqual(obsidian_check["bucket_mismatches"][0]["code"], "603063")
+
 
 if __name__ == "__main__":
     unittest.main()

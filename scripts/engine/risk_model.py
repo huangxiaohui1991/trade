@@ -83,6 +83,79 @@ def _daily_realized_pnl(trade_events: list[dict]) -> dict[str, float]:
     return by_day
 
 
+def _position_code(position: dict) -> str:
+    return str(position.get("code", position.get("stock_code", "")) or "").strip()
+
+
+def _position_market_value(position: dict) -> float:
+    market_value = _safe_float(position.get("market_value", position.get("marketValue", 0.0)), 0.0)
+    if market_value > 0:
+        return market_value
+    shares = _safe_float(position.get("shares", position.get("totalQty", 0)), 0.0)
+    price = _safe_float(position.get("current_price", position.get("price", position.get("lastPrice", 0.0))), 0.0)
+    return round(shares * price, 2) if shares > 0 and price > 0 else 0.0
+
+
+def _position_attr(position: dict, key: str, aliases: tuple[str, ...] = ()) -> str:
+    for candidate in (key, *aliases):
+        value = position.get(candidate)
+        if value not in (None, ""):
+            return str(value).strip()
+    metadata = position.get("metadata", {}) if isinstance(position.get("metadata", {}), dict) else {}
+    for candidate in (key, *aliases):
+        value = metadata.get(candidate)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _resolve_sector(position: dict, portfolio_cfg: dict) -> str:
+    code = _position_code(position)
+    sector = _position_attr(position, "sector", ("industry", "板块", "行业"))
+    if sector:
+        return sector
+    sector_map = portfolio_cfg.get("sector_map", {}) if isinstance(portfolio_cfg.get("sector_map", {}), dict) else {}
+    return str(sector_map.get(code, "")).strip()
+
+
+def _resolve_correlation_group(position: dict, portfolio_cfg: dict) -> str:
+    code = _position_code(position)
+    group = _position_attr(position, "correlation_group", ("theme", "concept", "题材", "相关性分组"))
+    if group:
+        return group
+    groups = portfolio_cfg.get("correlation_groups", {})
+    if isinstance(groups, dict):
+        if code in groups and isinstance(groups.get(code), str):
+            return str(groups.get(code, "")).strip()
+        for group_name, codes in groups.items():
+            if isinstance(codes, (list, tuple, set)) and code in {str(item).strip() for item in codes}:
+                return str(group_name).strip()
+    return ""
+
+
+def _event_risks_for_today(portfolio_cfg: dict, today: date) -> list[dict]:
+    raw_events = portfolio_cfg.get("event_risk_dates", []) or portfolio_cfg.get("event_risks", [])
+    if isinstance(raw_events, dict):
+        raw_events = [
+            {"date": key, **(value if isinstance(value, dict) else {"name": str(value)})}
+            for key, value in raw_events.items()
+        ]
+    result = []
+    for item in raw_events if isinstance(raw_events, list) else []:
+        if not isinstance(item, dict):
+            continue
+        event_date = _parse_trade_date(item.get("date", item.get("event_date", "")))
+        if event_date != today:
+            continue
+        result.append({
+            "date": today.isoformat(),
+            "name": str(item.get("name", item.get("label", "event_risk"))).strip() or "event_risk",
+            "severity": str(item.get("severity", "warning")).strip() or "warning",
+            "codes": list(item.get("codes", [])) if isinstance(item.get("codes", []), list) else [],
+        })
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 止损止盈计算
 # ---------------------------------------------------------------------------
@@ -259,6 +332,8 @@ def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
     consecutive_loss_days_limit = int(portfolio_cfg.get("consecutive_loss_days_limit", 2) or 2)
     cooldown_days = int(portfolio_cfg.get("cooldown_days", 2) or 2)
     max_single_warn_pct = _safe_float(portfolio_cfg.get("max_single_position_warn_pct", 0.25), 0.25)
+    max_sector_warn_pct = _safe_float(portfolio_cfg.get("max_sector_exposure_warn_pct", 0.40), 0.40)
+    max_corr_warn_pct = _safe_float(portfolio_cfg.get("max_correlation_group_exposure_warn_pct", 0.50), 0.50)
 
     day_pnl = _daily_realized_pnl(trade_events or [])
     today_key = today.isoformat()
@@ -292,14 +367,40 @@ def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
 
     largest_position_pct = 0.0
     largest_position_code = ""
+    sector_exposure: dict[str, float] = {}
+    correlation_group_exposure: dict[str, float] = {}
     for position in positions or []:
-        market_value = _safe_float(position.get("market_value", 0.0), 0.0)
+        market_value = _position_market_value(position)
         if total_capital <= 0 or market_value <= 0:
             continue
         pct = market_value / total_capital
         if pct > largest_position_pct:
             largest_position_pct = pct
             largest_position_code = str(position.get("code", "")).strip()
+        sector = _resolve_sector(position, portfolio_cfg)
+        if sector:
+            sector_exposure[sector] = round(sector_exposure.get(sector, 0.0) + market_value, 2)
+        corr_group = _resolve_correlation_group(position, portfolio_cfg)
+        if corr_group:
+            correlation_group_exposure[corr_group] = round(correlation_group_exposure.get(corr_group, 0.0) + market_value, 2)
+
+    largest_sector = ""
+    largest_sector_pct = 0.0
+    for sector, market_value in sector_exposure.items():
+        pct = market_value / total_capital if total_capital else 0.0
+        if pct > largest_sector_pct:
+            largest_sector = sector
+            largest_sector_pct = pct
+
+    largest_correlation_group = ""
+    largest_correlation_group_pct = 0.0
+    for group, market_value in correlation_group_exposure.items():
+        pct = market_value / total_capital if total_capital else 0.0
+        if pct > largest_correlation_group_pct:
+            largest_correlation_group = group
+            largest_correlation_group_pct = pct
+
+    event_risks = _event_risks_for_today(portfolio_cfg, today)
 
     reason_codes = []
     reasons = []
@@ -318,11 +419,26 @@ def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
         reasons.append(
             f"持仓集中度预警 ({largest_position_code or 'unknown'} 占总资金 {largest_position_pct:.1%})"
         )
+    if largest_sector_pct >= max_sector_warn_pct > 0:
+        reason_codes.append("TRADE_SECTOR_CONCENTRATION_WARNING")
+        reasons.append(
+            f"板块集中度预警 ({largest_sector or 'unknown'} 占总资金 {largest_sector_pct:.1%})"
+        )
+    if largest_correlation_group_pct >= max_corr_warn_pct > 0:
+        reason_codes.append("TRADE_CORRELATION_CONCENTRATION_WARNING")
+        reasons.append(
+            f"相关性集中度预警 ({largest_correlation_group or 'unknown'} 占总资金 {largest_correlation_group_pct:.1%})"
+        )
+    if event_risks:
+        reason_codes.append("TRADE_EVENT_RISK_DAY_WARNING")
+        reasons.append(
+            "事件风险日: " + "、".join(item["name"] for item in event_risks)
+        )
 
     state = "ok"
     if any(code in {"TRADE_PORTFOLIO_DAILY_LOSS_LIMIT", "TRADE_CONSECUTIVE_LOSS_COOLDOWN"} for code in reason_codes):
         state = "block"
-    elif "TRADE_POSITION_CONCENTRATION_WARNING" in reason_codes:
+    elif any(code.endswith("_WARNING") for code in reason_codes):
         state = "warning"
 
     return {
@@ -343,6 +459,15 @@ def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
             "largest_position_pct": round(largest_position_pct, 4),
             "largest_position_code": largest_position_code,
             "max_single_position_warn_pct": round(max_single_warn_pct, 4),
+            "sector_exposure": {key: round(value, 2) for key, value in sector_exposure.items()},
+            "largest_sector": largest_sector,
+            "largest_sector_pct": round(largest_sector_pct, 4),
+            "max_sector_exposure_warn_pct": round(max_sector_warn_pct, 4),
+            "correlation_group_exposure": {key: round(value, 2) for key, value in correlation_group_exposure.items()},
+            "largest_correlation_group": largest_correlation_group,
+            "largest_correlation_group_pct": round(largest_correlation_group_pct, 4),
+            "max_correlation_group_exposure_warn_pct": round(max_corr_warn_pct, 4),
+            "event_risks": event_risks,
         },
     }
 

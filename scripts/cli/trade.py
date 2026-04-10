@@ -497,15 +497,39 @@ def _build_alert_snapshot(today_decision: dict, pool_sync_state: dict, shadow_sn
 def _combined_state_audit() -> dict:
     base_audit = audit_state()
     shadow_snapshot = _shadow_trade_snapshot()
+    try:
+        paper_portfolio = load_portfolio_snapshot(scope="paper_mx")
+        paper_summary = paper_portfolio.get("summary", {}) if isinstance(paper_portfolio, dict) else {}
+        paper_portfolio_check = {
+            "ok": True,
+            "status": "ok",
+            "scope": "paper_mx",
+            "as_of_date": paper_portfolio.get("as_of_date", "") if isinstance(paper_portfolio, dict) else "",
+            "holding_count": int(paper_summary.get("holding_count", 0) or 0),
+            "cash_value": float(paper_summary.get("cash_value", 0.0) or 0.0),
+            "total_capital": float(paper_summary.get("total_capital", 0.0) or 0.0),
+            "current_exposure": float(paper_summary.get("current_exposure", 0.0) or 0.0),
+            "source": "load_portfolio_snapshot",
+        }
+    except Exception as exc:
+        paper_portfolio_check = {
+            "ok": False,
+            "status": "error",
+            "scope": "paper_mx",
+            "error": str(exc),
+            "source": "load_portfolio_snapshot",
+        }
     checks = dict(base_audit.get("checks", {}))
     checks["paper_trade_consistency"] = shadow_snapshot.get("consistency", {})
+    checks["paper_portfolio_snapshot"] = paper_portfolio_check
 
     pool_ok = base_audit.get("status") == "ok"
     paper_check = shadow_snapshot.get("consistency", {})
     paper_ok = bool(paper_check.get("ok"))
-    if pool_ok and paper_ok:
+    paper_portfolio_ok = bool(paper_portfolio_check.get("ok"))
+    if pool_ok and paper_ok and paper_portfolio_ok:
         status = "ok"
-    elif pool_ok and paper_check.get("status") == "error":
+    elif pool_ok and (paper_check.get("status") == "error" or paper_portfolio_check.get("status") == "error"):
         status = "warning"
     else:
         status = "drift"
@@ -1006,6 +1030,7 @@ def status_today(sync_state: bool = True) -> dict:
     strategy = get_strategy()
     today_decision = build_today_decision(strategy=strategy)
     portfolio_snapshot = load_portfolio_snapshot(scope="cn_a_system")
+    paper_portfolio_snapshot = load_portfolio_snapshot(scope="paper_mx")
     pool_snapshot = load_pool_snapshot()
     pool_sync_state = audit_state()
     market_snapshot = load_market_snapshot()
@@ -1072,6 +1097,11 @@ def status_today(sync_state: bool = True) -> dict:
         "updated_at": today.get("updated_at", ""),
         "today_decision": today_decision,
         "positions_summary": portfolio_snapshot.get("summary", {}),
+        "paper_mx_portfolio": {
+            "scope": paper_portfolio_snapshot.get("scope", "paper_mx"),
+            "as_of_date": paper_portfolio_snapshot.get("as_of_date", ""),
+            "summary": paper_portfolio_snapshot.get("summary", {}),
+        },
         "market_snapshot": market_snapshot,
         "market_signal": market_snapshot.get("signal", market_snapshot.get("market_signal", "")),
         "market_snapshot_source": {

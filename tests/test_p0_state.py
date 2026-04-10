@@ -177,15 +177,26 @@ class P0StateTests(unittest.TestCase):
                 "event_only_codes": ["300389"],
                 "broker_only_codes": [],
             },
+        }), mock.patch("scripts.cli.trade.load_portfolio_snapshot", return_value={
+            "scope": "paper_mx",
+            "as_of_date": "2026-04-09",
+            "summary": {
+                "holding_count": 1,
+                "cash_value": 10500.0,
+                "total_capital": 30000.0,
+                "current_exposure": 0.65,
+            },
         }):
             result = _combined_state_audit()
 
         self.assertEqual(result["status"], "drift")
         self.assertIn("paper_trade_consistency", result["checks"])
+        self.assertIn("paper_portfolio_snapshot", result["checks"])
         self.assertEqual(
             result["checks"]["paper_trade_consistency"]["event_only_codes"],
             ["300389"],
         )
+        self.assertEqual(result["checks"]["paper_portfolio_snapshot"]["holding_count"], 1)
 
     def test_paper_trade_consistency_snapshot_detects_share_mismatch(self):
         from scripts.pipeline.shadow_trade import paper_trade_consistency_snapshot

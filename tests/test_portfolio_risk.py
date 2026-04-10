@@ -70,6 +70,40 @@ class PortfolioRiskTests(unittest.TestCase):
         self.assertIn("TRADE_POSITION_CONCENTRATION_WARNING", result["reason_codes"])
         self.assertAlmostEqual(result["metrics"]["largest_position_pct"], 0.3333, places=4)
 
+    def test_check_portfolio_risk_warns_on_sector_correlation_and_event_day(self):
+        from scripts.engine.risk_model import check_portfolio_risk
+
+        result = check_portfolio_risk(
+            trade_events=[],
+            positions=[
+                {"code": "300389", "market_value": 80000, "metadata": {"sector": "AI显示", "theme": "AI硬件"}},
+                {"code": "603063", "market_value": 70000, "metadata": {"sector": "AI显示", "theme": "AI硬件"}},
+                {"code": "000612", "market_value": 20000, "metadata": {"sector": "有色", "theme": "周期"}},
+            ],
+            total_capital=300000,
+            today=date(2026, 4, 10),
+            strategy={
+                "risk": {
+                    "portfolio": {
+                        "max_single_position_warn_pct": 0.50,
+                        "max_sector_exposure_warn_pct": 0.40,
+                        "max_correlation_group_exposure_warn_pct": 0.45,
+                        "event_risk_dates": [{"date": "2026-04-10", "name": "财报密集披露"}],
+                    }
+                }
+            },
+        )
+
+        self.assertTrue(result["can_trade"])
+        self.assertEqual(result["state"], "warning")
+        self.assertIn("TRADE_SECTOR_CONCENTRATION_WARNING", result["reason_codes"])
+        self.assertIn("TRADE_CORRELATION_CONCENTRATION_WARNING", result["reason_codes"])
+        self.assertIn("TRADE_EVENT_RISK_DAY_WARNING", result["reason_codes"])
+        self.assertEqual(result["metrics"]["largest_sector"], "AI显示")
+        self.assertAlmostEqual(result["metrics"]["largest_sector_pct"], 0.5, places=4)
+        self.assertEqual(result["metrics"]["largest_correlation_group"], "AI硬件")
+        self.assertEqual(result["metrics"]["event_risks"][0]["name"], "财报密集披露")
+
     def test_build_today_decision_blocks_on_portfolio_risk(self):
         today = date.today()
         yesterday = today - timedelta(days=1)

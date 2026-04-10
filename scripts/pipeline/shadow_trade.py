@@ -212,6 +212,10 @@ def _normalize_order_status(value) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return "placed"
+    if any(token in text for token in ["cancel replace", "replace", "改单", "改挂", "撤改单"]):
+        return "cancel_replace_pending"
+    if any(token in text for token in ["cancel pending", "cancel_requested", "撤单中", "待撤", "已报待撤"]):
+        return "cancel_requested"
     if any(token in text for token in ["part", "partial", "部分成交", "部成"]):
         return "partially_filled"
     if any(token in text for token in ["filled", "全部成交", "已成交", "成交", "success", "done"]):
@@ -220,8 +224,8 @@ def _normalize_order_status(value) -> str:
         return "cancelled"
     if any(token in text for token in ["reject", "error", "fail", "exception", "废单", "失败"]):
         return "exception"
-    if any(token in text for token in ["review", "复核"]):
-        return "reviewed"
+    if any(token in text for token in ["review pending", "review", "复核", "待复核"]):
+        return "review_required"
     if any(token in text for token in ["candidate", "候选"]):
         return "candidate"
     return "placed"
@@ -297,6 +301,7 @@ def _sync_broker_orders(_client: object = None, scope: str = "paper_mx") -> dict
         status = _normalize_order_status(
             _pick_first(raw_order, ["status", "orderStatus", "statusDesc", "orderStatusDesc"], "")
         )
+        raw_status = str(_pick_first(raw_order, ["status", "orderStatus", "statusDesc", "orderStatusDesc"], "")).strip()
         use_market_price = bool(_pick_first(raw_order, ["useMarketPrice", "marketPriceFlag"], False))
         filled_shares = _safe_int(
             _pick_first(
@@ -358,7 +363,11 @@ def _sync_broker_orders(_client: object = None, scope: str = "paper_mx") -> dict
                 ).strip(),
                 "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                 "metadata": {
+                    **(existing.get("metadata", {}) if isinstance(existing.get("metadata", {}), dict) else {}),
                     "raw_order": raw_order,
+                    "broker_status_raw": raw_status,
+                    "broker_status_normalized": status,
+                    "broker_synced_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                 },
             }
         )
@@ -374,12 +383,15 @@ def _sync_broker_orders(_client: object = None, scope: str = "paper_mx") -> dict
 
 def _materialize_filled_order(order: dict) -> dict:
     metadata = order.get("metadata", {}) if isinstance(order.get("metadata", {}), dict) else {}
-    if metadata.get("trade_event_logged"):
-        return order
-    if str(order.get("status", "")).strip() != "filled":
+    status = str(order.get("status", "")).strip()
+    if status not in {"filled", "partially_filled"}:
         return order
 
-    shares = _safe_int(order.get("filled_shares", order.get("requested_shares", 0)), 0)
+    total_filled = _safe_int(order.get("filled_shares", order.get("requested_shares", 0)), 0)
+    logged_filled = _safe_int(metadata.get("broker_logged_filled_shares", 0), 0)
+    if metadata.get("trade_event_logged") and status == "filled":
+        logged_filled = max(logged_filled, total_filled)
+    shares = max(total_filled - logged_filled, 0)
     price = _safe_float(order.get("avg_fill_price", order.get("limit_price", 0.0)), 0.0)
     code = str(order.get("code", "")).strip()
     if not code or shares <= 0 or price <= 0:
@@ -396,15 +408,20 @@ def _materialize_filled_order(order: dict) -> dict:
         str(order.get("reason_text", "")).strip(),
         str(order.get("reason_code", "")).strip(),
         source="shadow_order_sync",
-        metadata={"order_external_id": order.get("external_id", "")},
+        metadata={
+            "order_external_id": order.get("external_id", ""),
+            "broker_fill_status": status,
+            "broker_logged_filled_shares_before": logged_filled,
+        },
     )
     return upsert_order_state(
         {
             "external_id": order.get("external_id", ""),
             "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "metadata": {
-                "trade_event_logged": True,
+                "trade_event_logged": status == "filled",
                 "trade_event_source": "shadow_order_sync",
+                "broker_logged_filled_shares": total_filled,
             },
         }
     )

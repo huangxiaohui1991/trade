@@ -80,16 +80,22 @@
 
 ### P1 收尾
 
-- [ ] `paper_mx` 完全收口为标准 portfolio snapshot
-- [ ] `paper_mx` 的 balance / exposure 契约与主仓一致
-- [ ] `status today` / `doctor` / `state audit` 完全共享同一份 paper snapshot
+- [x] `paper_mx` 完全收口为标准 portfolio snapshot
+备注：`load_portfolio_snapshot("paper_mx")` 固定经 broker 刷新并回写 ledger，失败时保留缓存快照。
+- [x] `paper_mx` 的 balance / exposure 契约与主仓一致
+备注：paper snapshot summary 已统一输出 `holding_count / current_exposure / cash_value / total_capital`。
+- [x] `status today` / `doctor` / `state audit` 完全共享同一份 paper snapshot
+备注：`status today` 暴露 `paper_mx_portfolio`，`state audit/doctor` 共享 `paper_portfolio_snapshot` 检查。
 
 ### P2 执行层增强
 
-- [ ] pool 引擎事务化与 projection 对账强化
+- [x] pool 引擎事务化与 projection 对账强化
+备注：`screener` 已收敛为只走统一 `save_pool_snapshot` 投影；`audit_state` 增加 missing/extra/score/bucket drift 明细。
 - [x] 订单生命周期第二阶段：`partial_fill / cancel_replace / review_queue`
-- [ ] broker 回报更细状态接入订单状态表
-- [ ] 组合风控扩展到板块集中度 / 相关性 / 事件风险
+- [x] broker 回报更细状态接入订单状态表
+备注：broker sync 已接入 `cancel_requested / cancel_replace_pending / review_required / partially_filled`，部分成交按增量写交易事件并保留 raw broker status。
+- [x] 组合风控扩展到板块集中度 / 相关性 / 事件风险
+备注：`check_portfolio_risk` 已输出板块集中度、相关性分组集中度、事件风险日 warning reason code 与 metrics。
 
 ### P3 研究级能力
 
@@ -122,7 +128,7 @@
 2. [x] 同日多信号竞争资金排序规则
 3. [x] 逐日组合模拟主循环
 4. [x] 订单生命周期第二阶段
-5. [ ] 组合级风控深化
+5. [x] 组合级风控深化
 6. [ ] 复盘归因深化
 
 ---

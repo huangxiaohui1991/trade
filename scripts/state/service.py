@@ -1165,17 +1165,42 @@ def bootstrap_state(force: bool = False) -> dict:
 def sync_portfolio_state() -> dict:
     """Refresh structured portfolio balances/positions from portfolio.md."""
     positions, balances, as_of_date = _bootstrap_portfolio_snapshot()
+    paper_status = "skipped"
+    paper_error = ""
+    paper_positions: list[dict] = []
+    paper_balances: list[dict] = []
+    paper_as_of_date = ""
+    try:
+        paper_positions, paper_balances, paper_as_of_date = _paper_portfolio_snapshot()
+        paper_status = "success"
+    except Exception as exc:
+        paper_error = str(exc)
+        LOGGER.warning(f"[state] paper portfolio sync failed: {exc}")
+
     with _connect() as conn:
         _write_positions(conn, positions)
         _write_balances(conn, balances)
+        if paper_status == "success":
+            _replace_portfolio_scope_snapshot(conn, PAPER_SCOPE, paper_positions, paper_balances)
+            _meta_set(conn, "paper_portfolio_sync_at", _now_ts())
+            _meta_set(conn, "paper_portfolio_sync_date", paper_as_of_date)
         _meta_set(conn, "portfolio_sync_at", _now_ts())
         _meta_set(conn, "portfolio_sync_date", as_of_date)
+        _meta_set(conn, "bootstrap_completed", "1")
+        _meta_set(conn, "bootstrap_date", as_of_date)
     return {
         "status": "success",
         "db_path": str(_db_path()),
         "positions": len(positions),
         "scopes": [balance.get("scope", "") for balance in balances],
         "as_of_date": as_of_date,
+        "paper_mx": {
+            "status": paper_status,
+            "positions": len(paper_positions),
+            "balances": len(paper_balances),
+            "as_of_date": paper_as_of_date,
+            "error": paper_error,
+        },
     }
 
 
@@ -2879,21 +2904,67 @@ def audit_state() -> dict:
         "watch": _filtered_md_scores("04-选股/观察池.md"),
     }
 
+    def _compare_pool_view(view: dict[str, dict[str, float]], expected_view: dict[str, dict[str, float]]) -> dict:
+        mismatches = []
+        missing_codes = []
+        extra_codes = []
+        score_mismatches = []
+        bucket_mismatches = []
+        expected_bucket_by_code = {
+            code: bucket
+            for bucket, rows in expected_view.items()
+            for code in rows.keys()
+        }
+        actual_bucket_by_code = {
+            code: bucket
+            for bucket, rows in view.items()
+            for code in rows.keys()
+        }
+        for code, expected_bucket in sorted(expected_bucket_by_code.items()):
+            actual_bucket = actual_bucket_by_code.get(code, "")
+            if not actual_bucket:
+                missing_codes.append(code)
+                continue
+            if actual_bucket != expected_bucket:
+                bucket_mismatches.append({
+                    "code": code,
+                    "expected": expected_bucket,
+                    "actual": actual_bucket,
+                })
+                continue
+            expected_score = expected_view[expected_bucket][code]
+            actual_score = view[actual_bucket][code]
+            if actual_score != expected_score:
+                score_mismatches.append({
+                    "code": code,
+                    "bucket": expected_bucket,
+                    "expected": expected_score,
+                    "actual": actual_score,
+                })
+        for code in sorted(set(actual_bucket_by_code.keys()) - set(expected_bucket_by_code.keys())):
+            extra_codes.append(code)
+        for bucket in ("core", "watch"):
+            if view[bucket] != expected_view[bucket]:
+                mismatches.append({
+                    "bucket": bucket,
+                    "expected": expected_view[bucket],
+                    "actual": view[bucket],
+                })
+        return {
+            "ok": not (missing_codes or extra_codes or score_mismatches or bucket_mismatches),
+            "mismatches": mismatches,
+            "missing_codes": missing_codes,
+            "extra_codes": extra_codes,
+            "score_mismatches": score_mismatches,
+            "bucket_mismatches": bucket_mismatches,
+        }
+
     checks = {}
     overall_ok = True
     for label, view in (("stocks_yaml", config_view), ("obsidian_projection", md_view)):
-        mismatches = []
-        for bucket in ("core", "watch"):
-            if view[bucket] != expected[bucket]:
-                mismatches.append(
-                    {
-                        "bucket": bucket,
-                        "expected": expected[bucket],
-                        "actual": view[bucket],
-                    }
-                )
-        checks[label] = {"ok": not mismatches, "mismatches": mismatches}
-        overall_ok = overall_ok and not mismatches
+        check = _compare_pool_view(view, expected)
+        checks[label] = check
+        overall_ok = overall_ok and check["ok"]
 
     return {
         "status": "ok" if overall_ok else "drift",

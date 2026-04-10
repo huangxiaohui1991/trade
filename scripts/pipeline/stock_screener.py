@@ -661,14 +661,6 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 "universe": universe,
                 "source": source,
             })
-            try:
-                vault.sync_pool_projection(snapshot_entries, {
-                    **pool_meta,
-                    "source": source,
-                    "updated_at": datetime.now().strftime("%Y-%m-%d"),
-                })
-            except Exception as e:
-                _logger.warning(f">> 池子投影同步失败: {e}")
 
         _logger.info(">> 写入筛选报告...")
         report_path = _write_screening_result(scored, pool_name, source)

@@ -84,3 +84,44 @@ class PortfolioLedgerTests(unittest.TestCase):
         self.assertEqual(cached_snapshot["summary"]["holding_count"], 2)
         self.assertEqual(cached_snapshot["summary"]["cash_value"], 125000.0)
         self.assertEqual(cached_snapshot["summary"]["total_capital"], 350000.0)
+
+    def test_sync_portfolio_state_refreshes_paper_mx_contract(self):
+        from scripts.state import load_portfolio_snapshot, sync_portfolio_state
+
+        broker = mock.Mock()
+        broker.positions.return_value = {
+            "code": "200",
+            "data": {
+                "posList": [
+                    {
+                        "stockCode": "300389",
+                        "stockName": "艾比森",
+                        "totalQty": 1000,
+                        "costPrice": 19.13,
+                        "lastPrice": 19.50,
+                        "marketValue": 19500,
+                    },
+                ]
+            },
+        }
+        broker.balance.return_value = {
+            "code": "200",
+            "data": {
+                "totalAssets": 30000,
+                "availBalance": 10500,
+                "totalPosValue": 19500,
+            },
+        }
+
+        with mock.patch("scripts.state.service.MXMoni", return_value=broker):
+            result = sync_portfolio_state()
+
+        self.assertEqual(result["paper_mx"]["status"], "success")
+        self.assertEqual(result["paper_mx"]["positions"], 1)
+
+        with mock.patch("scripts.state.service.MXMoni", side_effect=RuntimeError("broker unavailable")):
+            snapshot = load_portfolio_snapshot(scope="paper_mx")
+
+        self.assertEqual(snapshot["summary"]["holding_count"], 1)
+        self.assertEqual(snapshot["summary"]["cash_value"], 10500.0)
+        self.assertEqual(snapshot["summary"]["total_capital"], 30000.0)
