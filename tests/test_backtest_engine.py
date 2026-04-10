@@ -146,3 +146,29 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertIn(result["status"], {"ok", "warning", "drift"})
         self.assertIn("summary", result["portfolio_replay"])
         self.assertGreater(len(result["portfolio_replay"]["timeline"]), 0)
+
+    def test_portfolio_replay_applies_exposure_constraints(self):
+        from scripts.backtest import run_backtest
+
+        self._seed_trade_rounds()
+
+        constrained_strategy = {
+            "capital": 10000,
+            "scoring": {"weights": {"technical": 2, "fundamental": 3, "flow": 2, "sentiment": 3}},
+            "risk": {
+                "stop_loss": 0.04,
+                "take_profit": {"t1_pct": 0.15},
+                "position": {"total_max": 0.30, "single_max": 0.20},
+            },
+        }
+        with mock.patch("scripts.state.service._load_trade_history_rows", return_value=[]), mock.patch(
+            "scripts.backtest.runner.get_strategy",
+            return_value=constrained_strategy,
+        ):
+            result = run_backtest(start="2026-03-01", end="2026-04-09", scope="cn_a_system")
+
+        summary = result["portfolio_replay"]["summary"]
+        self.assertEqual(summary["single_cap_limit"], 2000.0)
+        self.assertEqual(summary["total_cap_limit"], 3000.0)
+        self.assertGreater(summary["constrained_trade_count"], 0)
+        self.assertLessEqual(summary["peak_exposure_pct"], 0.30)

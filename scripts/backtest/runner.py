@@ -596,15 +596,24 @@ def _build_portfolio_replay(
     start: date,
     end: date,
     total_capital: float,
+    strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_capital = max(_safe_float(total_capital, 0.0), 1.0)
+    strategy = strategy or {}
+    position_cfg = (strategy.get("risk", {}) or {}).get("position", {}) or {}
+    total_exposure_max = max(min(_safe_float(position_cfg.get("total_max", 0.60), 0.60), 1.0), 0.0)
+    single_position_max = max(min(_safe_float(position_cfg.get("single_max", 0.20), 0.20), 1.0), 0.0)
+    total_cap_limit = round(normalized_capital * total_exposure_max, 2)
+    single_cap_limit = round(normalized_capital * single_position_max, 2)
     timeline = []
     peak_exposure = 0.0
     max_positions = 0
     max_capital_deployed = 0.0
     cumulative_realized_pnl = 0.0
+    constrained_trade_count = 0
+    rejected_trade_count = 0
 
-    normalized_trades = []
+    candidate_trades = []
     for trade in trades:
         entry_date = str(trade.get("entry_date", "")).strip()
         exit_date = str(trade.get("exit_date", "")).strip()
@@ -612,12 +621,39 @@ def _build_portfolio_replay(
         shares = _estimate_trade_shares(trade)
         if not entry_date or not exit_date or entry_price <= 0 or shares <= 0:
             continue
-        normalized_trades.append({
+        desired_capital = round(entry_price * shares, 2)
+        candidate_trades.append({
+            "code": str(trade.get("code", "")).strip(),
             "entry_date": entry_date,
             "exit_date": exit_date,
-            "capital": round(entry_price * shares, 2),
+            "desired_capital": desired_capital,
             "realized_pnl": round(_safe_float(trade.get("realized_pnl", 0.0), 0.0), 2),
         })
+
+    candidate_trades.sort(key=lambda item: (item["entry_date"], item["exit_date"], item.get("code", "")))
+    normalized_trades = []
+    accepted_positions: list[dict[str, Any]] = []
+    for trade in candidate_trades:
+        entry_date = trade["entry_date"]
+        accepted_positions = [item for item in accepted_positions if item["exit_date"] > entry_date]
+        current_deployed = round(sum(item["capital"] for item in accepted_positions), 2)
+        remaining_total = max(total_cap_limit - current_deployed, 0.0)
+        capital = min(trade["desired_capital"], single_cap_limit, remaining_total)
+        if capital <= 0:
+            rejected_trade_count += 1
+            continue
+        ratio = capital / trade["desired_capital"] if trade["desired_capital"] > 0 else 0.0
+        if ratio < 0.999:
+            constrained_trade_count += 1
+        accepted = {
+            "code": trade.get("code", ""),
+            "entry_date": trade["entry_date"],
+            "exit_date": trade["exit_date"],
+            "capital": round(capital, 2),
+            "realized_pnl": round(trade["realized_pnl"] * ratio, 2),
+        }
+        normalized_trades.append(accepted)
+        accepted_positions.append(accepted)
 
     for day in _iter_dates(start, end):
         day_str = day.isoformat()
@@ -647,11 +683,18 @@ def _build_portfolio_replay(
     return {
         "summary": {
             "capital": round(normalized_capital, 2),
+            "total_exposure_max": round(total_exposure_max, 4),
+            "single_position_max": round(single_position_max, 4),
+            "total_cap_limit": total_cap_limit,
+            "single_cap_limit": single_cap_limit,
             "timeline_days": len(timeline),
             "max_concurrent_positions": max_positions,
             "peak_exposure_pct": round(peak_exposure, 4),
             "max_capital_deployed": round(max_capital_deployed, 2),
             "ending_realized_pnl": round(cumulative_realized_pnl, 2),
+            "accepted_trade_count": len(normalized_trades),
+            "constrained_trade_count": constrained_trade_count,
+            "rejected_trade_count": rejected_trade_count,
         },
         "timeline": timeline,
     }
@@ -851,6 +894,7 @@ def run_backtest(
         start=start_date,
         end=end_date,
         total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+        strategy=get_strategy(),
     )
     score_summary = _summarize_score(inputs)
     risk_summary = _summarize_risk(inputs)
@@ -959,6 +1003,7 @@ def run_parameter_sweep(
             start=start_date,
             end=end_date,
             total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+            strategy=get_strategy(),
         ),
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
@@ -1120,6 +1165,7 @@ def run_walk_forward(
             start=start_date,
             end=end_date,
             total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+            strategy=get_strategy(),
         ),
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
