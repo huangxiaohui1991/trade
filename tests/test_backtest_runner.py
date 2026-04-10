@@ -212,6 +212,69 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertTrue(result["result_path"])
         self.assertTrue(result["report_path"])
 
+    def test_parameter_sweep_uses_history_replay_when_available(self):
+        from scripts.backtest import run_parameter_sweep
+
+        fixture_payload = {
+            "trade_review": {
+                "scope": "cn_a_system",
+                "window": 5,
+                "closed_trade_count": 1,
+                "win_count": 1,
+                "loss_count": 0,
+                "win_rate": 100.0,
+                "total_realized_pnl": 1000.0,
+                "open_position_count": 0,
+                "closed_trades": [
+                    {
+                        "code": "300389",
+                        "name": "艾比森",
+                        "entry_date": "2026-04-01",
+                        "exit_date": "2026-04-03",
+                        "entry_price": 10.0,
+                        "exit_price": 10.4,
+                        "realized_pnl": 400.0,
+                        "shares": 1000,
+                        "entry_score": 8.0,
+                        "history_rows": [
+                            {"日期": "2026-04-01", "最高": 10.8, "最低": 9.8},
+                            {"日期": "2026-04-02", "最高": 11.4, "最低": 10.2},
+                            {"日期": "2026-04-03", "最高": 11.1, "最低": 10.7},
+                        ],
+                        "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                    }
+                ],
+                "open_positions": [],
+                "source": "fixture",
+                "mfe_mae_status": "actual_market_history",
+            },
+            "pool_snapshot": {"summary": {"core_count": 1, "watch_count": 0}},
+            "market_snapshot": {"signal": "GREEN", "as_of_date": "2026-04-09", "source": "fixture"},
+            "state_audit": {"status": "ok", "snapshot_date": "2026-04-09"},
+            "today_decision": {
+                "action": "NO_TRADE",
+                "portfolio_risk": {"state": "ok", "reason_codes": [], "reasons": []},
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "backtest_fixture.json"
+            fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False), encoding="utf-8")
+            with mock.patch("scripts.backtest.runner.BACKTEST_SAMPLE_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_REPORT_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", Path(tmpdir) / "index.json"):
+                result = run_parameter_sweep(
+                    "2026-04-01",
+                    "2026-04-03",
+                    fixture=fixture_path,
+                    buy_thresholds="7",
+                    stop_losses="0.03",
+                    take_profits="0.1,0.15",
+                )
+
+        ranked = {item["params"]["take_profit"]: item["summary"]["total_realized_pnl"] for item in result["rankings"]}
+        self.assertEqual(ranked[0.1], 1000.0)
+        self.assertEqual(ranked[0.15], 400.0)
+        self.assertEqual(result["sample_store"]["source"], "actual_market_history")
+
     def test_list_backtest_history_reads_latest_entries(self):
         from scripts.backtest import list_backtest_history
 

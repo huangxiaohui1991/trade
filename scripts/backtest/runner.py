@@ -414,6 +414,69 @@ def _trade_reason_codes(trade: dict[str, Any]) -> list[str]:
     return [str(item).strip().upper() for item in trade.get("exit_reason_codes", []) if str(item).strip()]
 
 
+def _estimate_trade_shares(trade: dict[str, Any]) -> int:
+    shares = int(trade.get("shares", 0) or 0)
+    if shares > 0:
+        return shares
+    entry_price = _safe_float(trade.get("entry_price", 0.0), 0.0)
+    exit_price = _safe_float(trade.get("exit_price", entry_price), entry_price)
+    realized_pnl = _safe_float(trade.get("realized_pnl", 0.0), 0.0)
+    diff = exit_price - entry_price
+    if entry_price <= 0 or abs(diff) < 1e-9 or abs(realized_pnl) < 1e-9:
+        return 0
+    return max(int(round(abs(realized_pnl / diff))), 0)
+
+
+def _load_trade_history_for_replay(trade: dict[str, Any]) -> list[dict[str, Any]]:
+    fixture_rows = trade.get("history_rows")
+    if isinstance(fixture_rows, list) and fixture_rows:
+        return [row for row in fixture_rows if isinstance(row, dict)]
+
+    try:
+        from scripts.state.service import _load_trade_history_rows
+    except Exception:
+        return []
+
+    code = str(trade.get("code", "")).strip()
+    entry_date = str(trade.get("entry_date", "")).strip()
+    exit_date = str(trade.get("exit_date", "")).strip()
+    if not code or not entry_date or not exit_date:
+        return []
+    try:
+        rows = _load_trade_history_rows(code, entry_date, exit_date)
+    except Exception:
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _simulate_trade_with_history(trade: dict[str, Any], params: dict[str, float]) -> tuple[float | None, str]:
+    entry_price = _safe_float(trade.get("entry_price", 0.0), 0.0)
+    if entry_price <= 0:
+        return None, ""
+
+    shares = _estimate_trade_shares(trade)
+    if shares <= 0:
+        return None, ""
+
+    rows = _load_trade_history_for_replay(trade)
+    if not rows:
+        return None, ""
+
+    stop_price = round(entry_price * (1 - max(_safe_float(params.get("stop_loss", 0.0), 0.0), 0.0)), 4)
+    take_price = round(entry_price * (1 + max(_safe_float(params.get("take_profit", 0.0), 0.0), 0.0)), 4)
+    fallback_exit = _safe_float(trade.get("exit_price", entry_price), entry_price)
+
+    for row in rows:
+        low_price = _safe_float(row.get("最低", row.get("low", row.get("Low", 0.0))), 0.0)
+        high_price = _safe_float(row.get("最高", row.get("high", row.get("High", 0.0))), 0.0)
+        if low_price > 0 and low_price <= stop_price:
+            return round((stop_price - entry_price) * shares, 2), "historical_stop_loss"
+        if high_price > 0 and high_price >= take_price:
+            return round((take_price - entry_price) * shares, 2), "historical_take_profit"
+
+    return round((fallback_exit - entry_price) * shares, 2), "historical_hold_to_exit"
+
+
 def _apply_parameter_set(
     trades: list[dict[str, Any]],
     params: dict[str, float],
@@ -429,8 +492,12 @@ def _apply_parameter_set(
         realized_pnl = _safe_float(trade.get("realized_pnl", 0.0), 0.0)
         reason_codes = _trade_reason_codes(trade)
         adjustment_note = "unchanged"
+        replay_pnl, replay_note = _simulate_trade_with_history(trade, params)
 
-        if any("STOP_LOSS" in code for code in reason_codes) and realized_pnl < 0:
+        if replay_pnl is not None:
+            realized_pnl = replay_pnl
+            adjustment_note = replay_note
+        elif any("STOP_LOSS" in code for code in reason_codes) and realized_pnl < 0:
             base = max(baseline["stop_loss"], 0.001)
             multiplier = min(max(params["stop_loss"] / base, 0.4), 1.6)
             realized_pnl = round(realized_pnl * multiplier, 2)
