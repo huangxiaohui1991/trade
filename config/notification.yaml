@@ -1,6 +1,8 @@
 # Discord 推送规则
 discord:
-  webhook_url: ""  # 启动时从 launchd 环境变量注入
+  webhook_url: ""  # 旧版 webhook（已弃用，建议使用 bot_token + channel_id）
+  bot_token: ""   # Discord Bot Token（优先）或 webhook_url
+  channel_id: ""  # Bot Token 模式的目标频道 ID
 
   # 盘前摘要
   morning:

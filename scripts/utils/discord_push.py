@@ -51,6 +51,54 @@ def _load_webhook_url() -> str:
     return ""
 
 
+def _load_bot_token() -> str:
+    """
+    优先读取环境变量 DISCORD_BOT_TOKEN，
+    否则从 config/notification.yaml 的 discord.bot_token 读取。
+    """
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    if token:
+        return token
+
+    yaml_path = _get_project_root() / "config" / "notification.yaml"
+    if yaml_path.exists() and yaml is not None:
+        try:
+            with open(yaml_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            return (data.get("discord", {}) or {}).get("bot_token", "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _load_channel_id() -> str:
+    """
+    优先读取环境变量 DISCORD_CHANNEL_ID，
+    否则从 config/notification.yaml 的 discord.channel_id 读取。
+    """
+    channel_id = os.environ.get("DISCORD_CHANNEL_ID", "").strip()
+    if channel_id:
+        return channel_id
+
+    yaml_path = _get_project_root() / "config" / "notification.yaml"
+    if yaml_path.exists() and yaml is not None:
+        try:
+            with open(yaml_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            return (data.get("discord", {}) or {}).get("channel_id", "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _load_dm_user_id() -> str:
+    """
+    读取 DISCORD_DM_USER_ID，优先于 DISCORD_CHANNEL_ID。
+    设置此变量后，Bot 会直接 DM 指定用户，而不是发到服务器频道。
+    """
+    return os.environ.get("DISCORD_DM_USER_ID", "").strip()
+
+
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 # 底层推送
 # ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -112,19 +160,29 @@ def _post_embed_to_discord(
     avatar_url: str = "",
 ) -> Tuple[bool, str]:
     """
-    将 Discord 原生 Rich Embed POST 到 webhook。
+    将 Discord 原生 Rich Embed POST 到 webhook 或 Bot Token API。
 
-    Args:
-        embeds: Embed 对象列表（每个即一张卡片），Discord 单次最多 10 条。
-        content: 普通文本内容（@ 用户等）。
-        username / avatar_url: 自定义机器人名字/头像。
-
-    Returns:
-        (success, error_msg)
+    优先级（从高到低）：
+      1. DISCORD_DM_USER_ID → Bot Token DM 给用户（最优先）
+      2. DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID → Bot Token 发到频道
+      3. DISCORD_WEBHOOK_URL → Webhook 模式（已弃用）
     """
+    bot_token = _load_bot_token()
+    dm_user_id = _load_dm_user_id()
+
+    # 最高优先：DM 模式
+    if bot_token and dm_user_id:
+        return _post_embed_via_dm(bot_token, dm_user_id, embeds, content)
+
+    # 其次：频道模式
+    channel_id = _load_channel_id()
+    if bot_token and channel_id:
+        return _post_embed_via_bot(bot_token, channel_id, embeds, content)
+
+    # 回退 webhook 模式
     url = _load_webhook_url()
     if not url:
-        return False, "Discord webhook URL is not configured"
+        return False, "Discord: neither bot_token+channel_id nor webhook_url configured"
 
     # 截断 content
     if len(content) > 2000:
@@ -132,7 +190,7 @@ def _post_embed_to_discord(
 
     payload = {
         "content": content,
-        "embeds": embeds[:10],  # Discord 上限 10 条
+        "embeds": embeds[:10],
     }
     if username:
         payload["username"] = username
@@ -158,6 +216,99 @@ def _post_embed_to_discord(
         return False, f"HTTP {e.code}: {e.read().decode()[:200]}"
     except Exception as e:
         return False, str(e)
+
+
+def _post_embed_via_bot(
+    token: str,
+    channel_id: str,
+    embeds: list[dict],
+    content: str = "",
+) -> Tuple[bool, str]:
+    """
+    通过 Discord Bot Token 将 Rich Embed 发送到指定频道。
+
+    使用 aiohttp（异步，更适合生产环境）。
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        return False, "aiohttp not installed. Run: pip install aiohttp"
+
+    try:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "AStockTradingBot/1.0",
+        }
+        payload = {"content": content}
+        if embeds:
+            payload["embeds"] = embeds[:10]
+
+        async def _do_post():
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status not in (200, 201):
+                        body = await resp.text()
+                        return False, f"Discord API ({resp.status}): {body[:200]}"
+                    return True, ""
+
+        # 同步包装
+        import asyncio
+        return asyncio.run(_do_post())
+    except Exception as e:
+        return False, f"Discord Bot send failed: {e}"
+
+
+async def _get_dm_channel_id(token: str, user_id: str) -> str:
+    """创建或获取与指定用户的 DM 频道 ID。"""
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        r = await session.post(
+            "https://discord.com/api/v10/users/@me/channels",
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "AStockTradingBot/1.0",
+            },
+            json={"recipient_id": user_id},
+        )
+        if r.status not in (200, 201):
+            body = await r.text()
+            raise RuntimeError(f"创建DM频道失败 ({r.status}): {body[:200]}")
+        data = await r.json()
+        return data["id"]
+
+
+def _post_embed_via_dm(
+    token: str,
+    user_id: str,
+    embeds: list[dict],
+    content: str = "",
+) -> Tuple[bool, str]:
+    """
+    通过 Discord Bot Token 将 Rich Embed DM 给指定用户。
+
+    先通过 POST /users/@me/channels 创建 DM 频道，
+    再向该频道发送消息。
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        return False, "aiohttp not installed. Run: pip install aiohttp"
+
+    try:
+        dm_channel_id = _get_dm_channel_id_sync(token, user_id)
+        return _post_embed_via_bot(token, dm_channel_id, embeds, content)
+    except Exception as e:
+        return False, f"Discord DM send failed: {e}"
+
+
+def _get_dm_channel_id_sync(token: str, user_id: str) -> str:
+    """_get_dm_channel_id 的同步包装。"""
+    import asyncio
+    return asyncio.run(_get_dm_channel_id(token, user_id))
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------

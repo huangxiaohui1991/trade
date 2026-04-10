@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 try:
     import yaml
@@ -63,7 +63,7 @@ def get_notification() -> dict:
     return _load_file("notification")
 
 
-def clear_config_cache(name: str | None = None) -> None:
+def clear_config_cache(name: Optional[str] = None) -> None:
     """Clear one cached config or the full config cache."""
     if name is None:
         _cache.clear()
