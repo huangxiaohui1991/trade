@@ -581,6 +581,82 @@ def _summarize_trade_list(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _iter_dates(start: date, end: date) -> list[date]:
+    current = start
+    items: list[date] = []
+    while current <= end:
+        items.append(current)
+        current += timedelta(days=1)
+    return items
+
+
+def _build_portfolio_replay(
+    trades: list[dict[str, Any]],
+    *,
+    start: date,
+    end: date,
+    total_capital: float,
+) -> dict[str, Any]:
+    normalized_capital = max(_safe_float(total_capital, 0.0), 1.0)
+    timeline = []
+    peak_exposure = 0.0
+    max_positions = 0
+    max_capital_deployed = 0.0
+    cumulative_realized_pnl = 0.0
+
+    normalized_trades = []
+    for trade in trades:
+        entry_date = str(trade.get("entry_date", "")).strip()
+        exit_date = str(trade.get("exit_date", "")).strip()
+        entry_price = _safe_float(trade.get("entry_price", 0.0), 0.0)
+        shares = _estimate_trade_shares(trade)
+        if not entry_date or not exit_date or entry_price <= 0 or shares <= 0:
+            continue
+        normalized_trades.append({
+            "entry_date": entry_date,
+            "exit_date": exit_date,
+            "capital": round(entry_price * shares, 2),
+            "realized_pnl": round(_safe_float(trade.get("realized_pnl", 0.0), 0.0), 2),
+        })
+
+    for day in _iter_dates(start, end):
+        day_str = day.isoformat()
+        active = [
+            item for item in normalized_trades
+            if item["entry_date"] <= day_str < item["exit_date"]
+        ]
+        realized_today = round(
+            sum(item["realized_pnl"] for item in normalized_trades if item["exit_date"] == day_str),
+            2,
+        )
+        cumulative_realized_pnl = round(cumulative_realized_pnl + realized_today, 2)
+        capital_deployed = round(sum(item["capital"] for item in active), 2)
+        exposure_pct = round(capital_deployed / normalized_capital, 4)
+        peak_exposure = max(peak_exposure, exposure_pct)
+        max_positions = max(max_positions, len(active))
+        max_capital_deployed = max(max_capital_deployed, capital_deployed)
+        timeline.append({
+            "date": day_str,
+            "open_position_count": len(active),
+            "capital_deployed": capital_deployed,
+            "exposure_pct": exposure_pct,
+            "realized_pnl_today": realized_today,
+            "cumulative_realized_pnl": cumulative_realized_pnl,
+        })
+
+    return {
+        "summary": {
+            "capital": round(normalized_capital, 2),
+            "timeline_days": len(timeline),
+            "max_concurrent_positions": max_positions,
+            "peak_exposure_pct": round(peak_exposure, 4),
+            "max_capital_deployed": round(max_capital_deployed, 2),
+            "ending_realized_pnl": round(cumulative_realized_pnl, 2),
+        },
+        "timeline": timeline,
+    }
+
+
 def _score_parameter_set(summary: dict[str, Any]) -> tuple[float, float, int]:
     return (
         _safe_float(summary.get("total_realized_pnl", 0.0), 0.0),
@@ -769,6 +845,13 @@ def run_backtest(
         "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
         "source": excursion_status,
     }
+    evaluated_trades = _apply_parameter_set(source_trades, selected_params, baseline)
+    portfolio_replay = _build_portfolio_replay(
+        evaluated_trades,
+        start=start_date,
+        end=end_date,
+        total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+    )
     score_summary = _summarize_score(inputs)
     risk_summary = _summarize_risk(inputs)
     score_summary.update({
@@ -805,6 +888,7 @@ def run_backtest(
         "selected_parameters": selected_params,
         "parameter_rankings": rankings[:10],
         "sample_store": sample_store,
+        "portfolio_replay": portfolio_replay,
     }
     result_path, report_path = _persist_backtest_outputs("run", result)
     result["result_path"] = result_path
@@ -851,6 +935,7 @@ def run_parameter_sweep(
         source_mode=inputs["source_mode"],
     )
     excursion_status = str((inputs.get("trade_review", {}) or {}).get("mfe_mae_status", "proxy_market_history"))
+    replay_trades = _apply_parameter_set(trades, selected_params, baseline)
     result = {
         "command": "backtest",
         "action": "sweep",
@@ -869,6 +954,12 @@ def run_parameter_sweep(
         "selected_parameters": selected_params,
         "ranking_count": len(rankings),
         "rankings": rankings[:20],
+        "portfolio_replay": _build_portfolio_replay(
+            replay_trades,
+            start=start_date,
+            end=end_date,
+            total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+        ),
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
             "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",
@@ -1002,6 +1093,7 @@ def run_walk_forward(
         "worst_risk_state": max((item["risk_summary"]["risk_state"] for item in fold_reports), key=_severity_rank, default="ok"),
         "worst_pool_sync_state": max((item["risk_summary"]["pool_sync_state"] for item in fold_reports), key=_severity_rank, default="ok"),
     }
+    replay_trades = _apply_parameter_set(all_trades, baseline, baseline)
     overall_status = max((item["status"] for item in fold_reports), key=_severity_rank, default="ok")
     if total_sample_count == 0 and overall_status == "ok":
         overall_status = "warning"
@@ -1023,6 +1115,12 @@ def run_walk_forward(
         "risk_summary": risk_summary,
         "state_fields": _state_fields(inputs),
         "folds": fold_reports,
+        "portfolio_replay": _build_portfolio_replay(
+            replay_trades,
+            start=start_date,
+            end=end_date,
+            total_capital=_safe_float(get_strategy().get("capital", 450286), 450286),
+        ),
         "sample_store": {
             "sample_count": sample_payload["sample_count"],
             "path": _persist_history_samples(sample_payload) if sample_payload["sample_count"] else "",

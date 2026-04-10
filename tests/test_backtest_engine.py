@@ -121,6 +121,9 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(result["state_fields"]["trade"]["closed_trade_count"], 2)
         self.assertEqual(result["state_fields"]["decision"]["action"], "NO_TRADE")
         self.assertEqual(result["parameters"]["scope"], "cn_a_system")
+        self.assertEqual(result["portfolio_replay"]["summary"]["max_concurrent_positions"], 1)
+        self.assertGreater(result["portfolio_replay"]["summary"]["peak_exposure_pct"], 0)
+        self.assertEqual(result["portfolio_replay"]["timeline"][0]["date"], "2026-03-01")
 
     def test_run_walk_forward_builds_fold_windows(self):
         from scripts.backtest import run_walk_forward
@@ -141,3 +144,5 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(result["score_summary"]["fold_count"], 3)
         self.assertEqual(result["risk_summary"]["fold_count"], 3)
         self.assertIn(result["status"], {"ok", "warning", "drift"})
+        self.assertIn("summary", result["portfolio_replay"])
+        self.assertGreater(len(result["portfolio_replay"]["timeline"]), 0)

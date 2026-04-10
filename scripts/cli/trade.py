@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.engine.composite import build_today_decision
 from scripts.backtest import compare_backtest_history, list_backtest_history, run_backtest, run_parameter_sweep, run_walk_forward
+from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
 from scripts.pipeline.morning import run as run_morning
@@ -684,6 +685,57 @@ def state_command(action: str, args) -> dict:
     })
 
 
+def mx_command(action: str, args) -> dict:
+    if action == "list":
+        include_unavailable = bool(getattr(args, "include_unavailable", False))
+        items = list_mx_command_metadata(include_unavailable=include_unavailable)
+        return sanitize_for_json({
+            "command": "mx",
+            "action": "list",
+            "status": "ok",
+            "include_unavailable": include_unavailable,
+            "item_count": len(items),
+            "items": items,
+        })
+
+    if action == "groups":
+        include_unavailable = bool(getattr(args, "include_unavailable", False))
+        groups = mx_command_groups(include_unavailable=include_unavailable)
+        return sanitize_for_json({
+            "command": "mx",
+            "action": "groups",
+            "status": "ok",
+            "include_unavailable": include_unavailable,
+            "group_count": len(groups),
+            "groups": groups,
+        })
+
+    kwargs = {}
+    for field in ("query", "stock_code", "quantity", "price", "use_market_price", "order_id", "cancel_all"):
+        value = getattr(args, field, None)
+        if value is not None:
+            kwargs[field] = value
+    try:
+        result = dispatch_mx_command(getattr(args, "mx_command"), **kwargs)
+        return sanitize_for_json({
+            "command": "mx",
+            "action": "run",
+            "status": "ok",
+            "mx_command": getattr(args, "mx_command"),
+            "arguments": kwargs,
+            "result": result,
+        })
+    except MXCommandError as exc:
+        return sanitize_for_json({
+            "command": "mx",
+            "action": "run",
+            "status": "error",
+            "mx_command": getattr(args, "mx_command"),
+            "arguments": kwargs,
+            "error": str(exc),
+        })
+
+
 def run_pipeline(name: str, args) -> dict:
     started = datetime.now()
     run_id = make_run_id(name)
@@ -1123,6 +1175,22 @@ def main():
     sub.add_parser("workflows", help="List shared workflows for Hermes/OpenClaw")
     sub.add_parser("templates", help="List agent response templates")
 
+    mx_parser = sub.add_parser("mx", help="Run MX capability wrappers")
+    mx_sub = mx_parser.add_subparsers(dest="action", required=True)
+    mx_list = mx_sub.add_parser("list")
+    mx_list.add_argument("--include-unavailable", action="store_true", help="Include unavailable MX capabilities")
+    mx_groups = mx_sub.add_parser("groups")
+    mx_groups.add_argument("--include-unavailable", action="store_true", help="Include unavailable MX capabilities")
+    mx_run = mx_sub.add_parser("run")
+    mx_run.add_argument("mx_command", help="MX command id or alias")
+    mx_run.add_argument("--query", default=None, help="Natural language query for data/search/xuangu/zixuan manage")
+    mx_run.add_argument("--stock-code", default=None, help="6-digit stock code for moni trade commands")
+    mx_run.add_argument("--quantity", type=int, default=None, help="Share quantity for moni trade commands")
+    mx_run.add_argument("--price", type=float, default=None, help="Limit price for moni trade commands")
+    mx_run.add_argument("--use-market-price", action="store_true", help="Use market price for moni trade commands")
+    mx_run.add_argument("--order-id", default=None, help="Order id for moni cancel command")
+    mx_run.add_argument("--cancel-all", action="store_true", help="Cancel all moni orders")
+
     state_parser = sub.add_parser("state", help="Manage structured ledger state")
     state_sub = state_parser.add_subparsers(dest="action", required=True)
     state_bootstrap = state_sub.add_parser("bootstrap")
@@ -1226,6 +1294,8 @@ def main():
             with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
                 if args.command == "doctor":
                     result = doctor()
+                elif args.command == "mx":
+                    result = mx_command(args.action, args)
                 elif args.command == "workflows":
                     result = list_workflows()
                 elif args.command == "templates":
@@ -1301,6 +1371,8 @@ def main():
     else:
         if args.command == "doctor":
             result = doctor()
+        elif args.command == "mx":
+            result = mx_command(args.action, args)
         elif args.command == "workflows":
             result = list_workflows()
         elif args.command == "templates":
@@ -1371,6 +1443,14 @@ def main():
                 print("hard_fail:", ", ".join(result["hard_fail"]))
             if result.get("warning"):
                 print("warning:", ", ".join(result["warning"]))
+        elif result.get("command") == "mx":
+            print(f"mx {result.get('action')}: {result.get('status', 'ok')}")
+            if result.get("action") == "list":
+                print(f"item_count: {result.get('item_count', 0)}")
+            elif result.get("action") == "groups":
+                print(f"group_count: {result.get('group_count', 0)}")
+            else:
+                print(f"mx_command: {result.get('mx_command', '')}")
         elif result.get("command") == "workflows":
             for item in result.get("items", []):
                 print(f"{item['name']}: {', '.join(item.get('steps', []))}")
