@@ -301,6 +301,9 @@ def _update_backtest_index(action: str, payload: dict[str, Any], result_path: st
     except Exception:
         items = []
     parameters = payload.get("parameters", {}) or {}
+    score_summary = payload.get("score_summary", {}) or {}
+    risk_summary = payload.get("risk_summary", {}) or {}
+    selected_parameters = payload.get("selected_parameters") or score_summary.get("selected_parameters") or {}
     entry = {
         "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "command": payload.get("command", "backtest"),
@@ -312,6 +315,11 @@ def _update_backtest_index(action: str, payload: dict[str, Any], result_path: st
         "engine_mode": parameters.get("engine_mode", ""),
         "source_mode": parameters.get("source_mode", ""),
         "sample_count": payload.get("sample_count", 0),
+        "total_realized_pnl": score_summary.get("total_realized_pnl", 0),
+        "win_rate": score_summary.get("win_rate", score_summary.get("mean_win_rate", 0)),
+        "risk_state": risk_summary.get("risk_state", risk_summary.get("worst_risk_state", "")),
+        "excursion_source": (payload.get("sample_store", {}) or {}).get("source", ""),
+        "selected_parameters": selected_parameters,
         "result_path": result_path,
         "report_path": report_path,
         "sample_store_path": sample_path,
@@ -335,6 +343,70 @@ def list_backtest_history(*, limit: int = 10) -> dict[str, Any]:
         "index_path": str(BACKTEST_INDEX_PATH),
         "item_count": len(items[:normalized_limit]),
         "items": items[:normalized_limit],
+    }
+
+
+def compare_backtest_history(*, limit: int = 20) -> dict[str, Any]:
+    history = list_backtest_history(limit=max(1, int(limit or 20)))
+    items = list(history.get("items", []))
+    if not items:
+        return {
+            "command": "backtest",
+            "action": "compare",
+            "status": "warning",
+            "index_path": history.get("index_path", str(BACKTEST_INDEX_PATH)),
+            "item_count": 0,
+            "summary": {
+                "status_counts": {},
+                "action_counts": {},
+                "engine_counts": {},
+                "excursion_source_counts": {},
+                "scope_counts": {},
+            },
+            "leaders": {},
+            "items": [],
+        }
+
+    def _pick_best(key: str, reverse: bool = True) -> dict[str, Any]:
+        ranked = sorted(items, key=lambda item: _safe_float(item.get(key, 0), 0.0), reverse=reverse)
+        return ranked[0] if ranked else {}
+
+    status_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    engine_counts: dict[str, int] = {}
+    excursion_source_counts: dict[str, int] = {}
+    scope_counts: dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status", "")).strip() or "unknown"
+        action = str(item.get("action", "")).strip() or "unknown"
+        engine = str(item.get("engine_mode", "")).strip() or "unknown"
+        excursion_source = str(item.get("excursion_source", "")).strip() or "unknown"
+        scope = str(item.get("scope", "")).strip() or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        action_counts[action] = action_counts.get(action, 0) + 1
+        engine_counts[engine] = engine_counts.get(engine, 0) + 1
+        excursion_source_counts[excursion_source] = excursion_source_counts.get(excursion_source, 0) + 1
+        scope_counts[scope] = scope_counts.get(scope, 0) + 1
+
+    return {
+        "command": "backtest",
+        "action": "compare",
+        "status": "ok",
+        "index_path": history.get("index_path", str(BACKTEST_INDEX_PATH)),
+        "item_count": len(items),
+        "summary": {
+            "status_counts": status_counts,
+            "action_counts": action_counts,
+            "engine_counts": engine_counts,
+            "excursion_source_counts": excursion_source_counts,
+            "scope_counts": scope_counts,
+        },
+        "leaders": {
+            "best_pnl": _pick_best("total_realized_pnl"),
+            "best_win_rate": _pick_best("win_rate"),
+            "largest_sample": _pick_best("sample_count"),
+        },
+        "items": items,
     }
 
 

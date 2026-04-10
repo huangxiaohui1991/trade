@@ -229,6 +229,46 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(result["item_count"], 1)
         self.assertEqual(result["items"][0]["action"], "walk_forward")
 
+    def test_compare_backtest_history_builds_leaderboard(self):
+        from scripts.backtest import compare_backtest_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir) / "index.json"
+            index_path.write_text(json.dumps([
+                {
+                    "action": "run",
+                    "status": "ok",
+                    "engine_mode": "proxy_parameter_sweep",
+                    "excursion_source": "actual_market_history",
+                    "scope": "cn_a_system",
+                    "sample_count": 3,
+                    "total_realized_pnl": 1200.0,
+                    "win_rate": 66.7,
+                },
+                {
+                    "action": "walk_forward",
+                    "status": "warning",
+                    "engine_mode": "proxy_walk_forward",
+                    "excursion_source": "proxy_market_history",
+                    "scope": "cn_a_system",
+                    "sample_count": 5,
+                    "total_realized_pnl": 800.0,
+                    "win_rate": 75.0,
+                },
+            ], ensure_ascii=False), encoding="utf-8")
+            with mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", index_path):
+                result = compare_backtest_history(limit=10)
+
+        self.assertEqual(result["command"], "backtest")
+        self.assertEqual(result["action"], "compare")
+        self.assertEqual(result["item_count"], 2)
+        self.assertEqual(result["summary"]["action_counts"]["run"], 1)
+        self.assertEqual(result["summary"]["action_counts"]["walk_forward"], 1)
+        self.assertEqual(result["summary"]["excursion_source_counts"]["actual_market_history"], 1)
+        self.assertEqual(result["leaders"]["best_pnl"]["total_realized_pnl"], 1200.0)
+        self.assertEqual(result["leaders"]["best_win_rate"]["win_rate"], 75.0)
+        self.assertEqual(result["leaders"]["largest_sample"]["sample_count"], 5)
+
     def test_cli_backtest_commands_parse_and_dispatch(self):
         import scripts.cli.trade as trade
 
@@ -271,6 +311,18 @@ class BacktestRunnerTests(unittest.TestCase):
             "index_path": "/tmp/index.json",
             "item_count": 1,
             "items": [{"action": "run", "status": "ok"}],
+        }
+        compare_payload = {
+            "command": "backtest",
+            "action": "compare",
+            "status": "ok",
+            "item_count": 2,
+            "leaders": {
+                "best_pnl": {"total_realized_pnl": 1200.0},
+                "best_win_rate": {"win_rate": 75.0},
+                "largest_sample": {"sample_count": 5},
+            },
+            "items": [],
         }
 
         stdout = io.StringIO()
@@ -366,6 +418,32 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(payload["command"], "backtest")
         self.assertEqual(payload["action"], "history")
         history_mock.assert_called_once()
+
+        stdout = io.StringIO()
+        with mock.patch.object(trade, "run_backtest", return_value=run_payload), mock.patch.object(
+            trade,
+            "run_walk_forward",
+            return_value=walk_payload,
+        ), mock.patch.object(
+            trade,
+            "run_parameter_sweep",
+            return_value=sweep_payload,
+        ), mock.patch.object(
+            trade,
+            "list_backtest_history",
+            return_value=history_payload,
+        ), mock.patch.object(
+            trade,
+            "compare_backtest_history",
+            return_value=compare_payload,
+        ) as compare_mock, mock.patch.object(trade.sys, "argv", ["trade", "--json", "backtest", "compare", "--limit", "5"]):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["command"], "backtest")
+        self.assertEqual(payload["action"], "compare")
+        compare_mock.assert_called_once()
         self.assertEqual(sweep_mock.call_args.kwargs["buy_thresholds"], "6,7,8")
 
 
