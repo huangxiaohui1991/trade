@@ -140,6 +140,79 @@ class OrderConfirmationTests(unittest.TestCase):
         self.assertEqual(items[0]["name"], "艾比森")
         self.assertEqual(items[0]["type"], "止损")
 
+    def test_apply_order_reply_supports_partial_fill(self):
+        from scripts.state import apply_order_reply, load_activity_summary, load_order_snapshot, upsert_order_state
+
+        self._bootstrap_empty()
+        upsert_order_state(
+            {
+                "external_id": "paper:order:005",
+                "scope": "paper_mx",
+                "code": "300389",
+                "name": "艾比森",
+                "side": "sell",
+                "order_class": "condition",
+                "order_type": "conditional",
+                "condition_type": "take_profit_t1",
+                "requested_shares": 1000,
+                "filled_shares": 0,
+                "status": "placed",
+                "confirm_status": "pending",
+                "updated_at": "2026-04-09T10:00:00",
+            }
+        )
+
+        result = apply_order_reply("止盈部分成交了 艾比森 300股 成交¥21.30")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["order"]["status"], "partially_filled")
+        self.assertEqual(result["order"]["filled_shares"], 300)
+        self.assertEqual(result["order"]["avg_fill_price"], 21.3)
+
+        snapshot = load_order_snapshot(scope="paper_mx")
+        self.assertEqual(snapshot["summary"]["partial_fill_count"], 1)
+
+        activity = load_activity_summary(30, scope="paper_mx")
+        self.assertEqual(activity["sell_count"], 1)
+
+    def test_apply_order_reply_supports_replace_and_review_queue(self):
+        from scripts.state import apply_order_reply, load_order_snapshot, pending_condition_order_items, upsert_order_state
+
+        self._bootstrap_empty()
+        upsert_order_state(
+            {
+                "external_id": "paper:order:006",
+                "scope": "paper_mx",
+                "code": "300389",
+                "name": "艾比森",
+                "side": "sell",
+                "order_class": "condition",
+                "order_type": "conditional",
+                "condition_type": "manual_stop",
+                "requested_shares": 1000,
+                "status": "placed",
+                "confirm_status": "pending",
+                "trigger_price": 20.5,
+                "updated_at": "2026-04-09T10:00:00",
+            }
+        )
+
+        replace_result = apply_order_reply("改挂止损 艾比森 ¥20.10")
+        self.assertEqual(replace_result["order"]["status"], "cancel_replace_pending")
+        self.assertEqual(replace_result["order"]["trigger_price"], 20.1)
+
+        review_result = apply_order_reply("复核止损 艾比森")
+        self.assertEqual(review_result["order"]["status"], "review_required")
+        self.assertEqual(review_result["order"]["confirm_status"], "review_pending")
+
+        snapshot = load_order_snapshot(scope="paper_mx")
+        self.assertEqual(snapshot["summary"]["review_queue_count"], 1)
+        self.assertEqual(snapshot["summary"]["cancel_replace_count"], 0)
+
+        items = pending_condition_order_items(scope="paper_mx")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "review_pending")
+
 
 if __name__ == "__main__":
     unittest.main()

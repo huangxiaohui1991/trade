@@ -30,6 +30,7 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.data_engine import DataEngine
+from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command
 from scripts.state import load_activity_summary, load_market_snapshot, load_pool_snapshot, load_portfolio_snapshot
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_morning_summary
@@ -130,9 +131,6 @@ def _get_morning_news(core_items: list, positions: list) -> list:
     """
     news_items = []
     try:
-        from scripts.mx.mx_search import MXSearch
-        mx = MXSearch()
-
         # 收集需要搜索的股票（核心池 + 持仓，去重）
         stocks_to_search = {}
         for item in core_items:
@@ -148,11 +146,11 @@ def _get_morning_news(core_items: list, positions: list) -> list:
 
         for code, name in stocks_to_search.items():
             try:
-                result = mx.search(f"{name} 最新公告 新闻")
-                data = result.get("data", {})
-                inner = data.get("data", {})
-                search_resp = inner.get("llmSearchResponse", {})
-                items = search_resp.get("data", [])
+                result = dispatch_mx_command("news", query=f"{name} 最新公告 新闻")
+                data = result.get("data", {}) if isinstance(result, dict) else {}
+                inner = data.get("data", {}) if isinstance(data, dict) else {}
+                search_resp = inner.get("llmSearchResponse", {}) if isinstance(inner, dict) else {}
+                items = search_resp.get("data", []) if isinstance(search_resp, dict) else []
 
                 if not items:
                     continue
@@ -178,11 +176,13 @@ def _get_morning_news(core_items: list, positions: list) -> list:
                             entry["rating"] = rating
                         news_items.append(entry)
 
+            except MXCommandError as e:
+                _logger.info(f"[morning_news] {name} 搜索失败: {e}")
             except Exception as e:
                 _logger.info(f"[morning_news] {name} 搜索失败: {e}")
 
     except Exception as e:
-        _logger.warning(f"[morning_news] MX 搜索不可用: {e}")
+        _logger.warning(f"[morning_news] MX capability 搜索不可用: {e}")
 
     return news_items
 

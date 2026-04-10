@@ -270,6 +270,7 @@ def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
     score_summary = payload.get("score_summary", {}) or {}
     risk_summary = payload.get("risk_summary", {}) or {}
     sample_store = payload.get("sample_store", {}) or {}
+    comparison_summary = payload.get("comparison_summary", {}) or {}
     lines = [
         f"# Backtest {action}",
         "",
@@ -309,6 +310,75 @@ def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
             f"- Stop Loss: {(score_summary.get('selected_parameters', {}) or {}).get('stop_loss', '')}",
             f"- Take Profit: {(score_summary.get('selected_parameters', {}) or {}).get('take_profit', '')}",
         ])
+
+    if action.replace("_", "-") == "walk-forward" and comparison_summary:
+        rows = comparison_summary.get("rows", []) or []
+        lines.extend([
+            "",
+            "## Fold Comparison",
+            "",
+        ])
+        if rows:
+            lines.extend([
+                _markdown_table(
+                    [
+                        "Fold",
+                        "Train Window",
+                        "Test Window",
+                        "Selected Parameters",
+                        "Train PnL",
+                        "Train Win Rate",
+                        "Train Samples",
+                        "Eval PnL",
+                        "Eval Win Rate",
+                        "Eval Samples",
+                    ],
+                    [
+                        [
+                            row.get("fold", ""),
+                            row.get("train_window", ""),
+                            row.get("test_window", ""),
+                            row.get("selected_parameters", ""),
+                            row.get("training_pnl", ""),
+                            row.get("training_win_rate", ""),
+                            row.get("training_sample_count", ""),
+                            row.get("evaluation_pnl", ""),
+                            row.get("evaluation_win_rate", ""),
+                            row.get("evaluation_sample_count", ""),
+                        ]
+                        for row in rows
+                    ],
+                ),
+                "",
+                "## Aggregate Comparison",
+                "",
+                _markdown_table(
+                    ["Metric", "Train", "Eval", "Delta"],
+                    [
+                        [
+                            "Realized PnL",
+                            comparison_summary.get("training_total_realized_pnl", 0),
+                            comparison_summary.get("evaluation_total_realized_pnl", 0),
+                            comparison_summary.get("train_eval_pnl_delta", 0),
+                        ],
+                        [
+                            "Win Rate",
+                            comparison_summary.get("training_mean_win_rate", 0),
+                            comparison_summary.get("evaluation_mean_win_rate", 0),
+                            comparison_summary.get("train_eval_win_rate_delta", 0),
+                        ],
+                        [
+                            "Sample Count",
+                            comparison_summary.get("training_mean_sample_count", 0),
+                            comparison_summary.get("evaluation_mean_sample_count", 0),
+                            comparison_summary.get("train_eval_sample_count_delta", 0),
+                        ],
+                    ],
+                ),
+                "",
+                f"- Best Eval Fold: {((comparison_summary.get('best_eval_fold', {}) or {}).get('fold', ''))}",
+                f"- Best Train Fold: {((comparison_summary.get('best_train_fold', {}) or {}).get('fold', ''))}",
+            ])
 
     lines.extend([
         "",
@@ -590,6 +660,13 @@ def _iter_dates(start: date, end: date) -> list[date]:
     return items
 
 
+def _allocation_priority_score(trade: dict[str, Any]) -> float:
+    for key in ("entry_score", "score", "total_score"):
+        if trade.get(key) not in (None, ""):
+            return round(_safe_float(trade.get(key), 0.0), 4)
+    return 0.0
+
+
 def _build_portfolio_replay(
     trades: list[dict[str, Any]],
     *,
@@ -610,8 +687,13 @@ def _build_portfolio_replay(
     max_positions = 0
     max_capital_deployed = 0.0
     cumulative_realized_pnl = 0.0
+    cash_available = round(normalized_capital, 2)
+    min_cash_available = round(normalized_capital, 2)
     constrained_trade_count = 0
     rejected_trade_count = 0
+    allocation_rank_by_date: dict[str, int] = {}
+    accepted_trade_details: list[dict[str, Any]] = []
+    rejected_trade_details: list[dict[str, Any]] = []
 
     candidate_trades = []
     for trade in trades:
@@ -628,19 +710,39 @@ def _build_portfolio_replay(
             "exit_date": exit_date,
             "desired_capital": desired_capital,
             "realized_pnl": round(_safe_float(trade.get("realized_pnl", 0.0), 0.0), 2),
+            "priority_score": _allocation_priority_score(trade),
         })
 
-    candidate_trades.sort(key=lambda item: (item["entry_date"], item["exit_date"], item.get("code", "")))
+    candidate_trades.sort(
+        key=lambda item: (
+            item["entry_date"],
+            -_safe_float(item.get("priority_score", 0.0), 0.0),
+            -_safe_float(item.get("realized_pnl", 0.0), 0.0),
+            _safe_float(item.get("desired_capital", 0.0), 0.0),
+            item["exit_date"],
+            item.get("code", ""),
+        )
+    )
     normalized_trades = []
     accepted_positions: list[dict[str, Any]] = []
     for trade in candidate_trades:
         entry_date = trade["entry_date"]
+        allocation_rank_by_date[entry_date] = allocation_rank_by_date.get(entry_date, 0) + 1
+        allocation_rank = allocation_rank_by_date[entry_date]
         accepted_positions = [item for item in accepted_positions if item["exit_date"] > entry_date]
         current_deployed = round(sum(item["capital"] for item in accepted_positions), 2)
         remaining_total = max(total_cap_limit - current_deployed, 0.0)
         capital = min(trade["desired_capital"], single_cap_limit, remaining_total)
         if capital <= 0:
             rejected_trade_count += 1
+            rejected_trade_details.append({
+                "code": trade.get("code", ""),
+                "entry_date": trade["entry_date"],
+                "desired_capital": round(trade["desired_capital"], 2),
+                "priority_score": round(_safe_float(trade.get("priority_score", 0.0), 0.0), 4),
+                "allocation_rank": allocation_rank,
+                "reason": "capital_limit",
+            })
             continue
         ratio = capital / trade["desired_capital"] if trade["desired_capital"] > 0 else 0.0
         if ratio < 0.999:
@@ -650,13 +752,32 @@ def _build_portfolio_replay(
             "entry_date": trade["entry_date"],
             "exit_date": trade["exit_date"],
             "capital": round(capital, 2),
+            "desired_capital": round(trade["desired_capital"], 2),
             "realized_pnl": round(trade["realized_pnl"] * ratio, 2),
+            "priority_score": round(_safe_float(trade.get("priority_score", 0.0), 0.0), 4),
+            "allocation_rank": allocation_rank,
         }
         normalized_trades.append(accepted)
         accepted_positions.append(accepted)
+        accepted_trade_details.append({
+            "code": accepted["code"],
+            "entry_date": accepted["entry_date"],
+            "capital": accepted["capital"],
+            "desired_capital": accepted["desired_capital"],
+            "priority_score": accepted["priority_score"],
+            "allocation_rank": accepted["allocation_rank"],
+        })
 
     for day in _iter_dates(start, end):
         day_str = day.isoformat()
+        exited_today = [item for item in normalized_trades if item["exit_date"] == day_str]
+        for item in exited_today:
+            cash_available = round(cash_available + item["capital"] + item["realized_pnl"], 2)
+
+        entered_today = [item for item in normalized_trades if item["entry_date"] == day_str]
+        for item in entered_today:
+            cash_available = round(cash_available - item["capital"], 2)
+
         active = [
             item for item in normalized_trades
             if item["entry_date"] <= day_str < item["exit_date"]
@@ -671,11 +792,32 @@ def _build_portfolio_replay(
         peak_exposure = max(peak_exposure, exposure_pct)
         max_positions = max(max_positions, len(active))
         max_capital_deployed = max(max_capital_deployed, capital_deployed)
+        min_cash_available = min(min_cash_available, cash_available)
         timeline.append({
             "date": day_str,
             "open_position_count": len(active),
+            "entry_count": len(entered_today),
+            "exit_count": len(exited_today),
+            "entries": [
+                {
+                    "code": item.get("code", ""),
+                    "capital": item.get("capital", 0.0),
+                    "priority_score": item.get("priority_score", 0.0),
+                    "allocation_rank": item.get("allocation_rank", 0),
+                }
+                for item in entered_today
+            ],
+            "exits": [
+                {
+                    "code": item.get("code", ""),
+                    "capital_released": item.get("capital", 0.0),
+                    "realized_pnl": item.get("realized_pnl", 0.0),
+                }
+                for item in exited_today
+            ],
             "capital_deployed": capital_deployed,
             "exposure_pct": exposure_pct,
+            "cash_available": round(cash_available, 2),
             "realized_pnl_today": realized_today,
             "cumulative_realized_pnl": cumulative_realized_pnl,
         })
@@ -692,11 +834,139 @@ def _build_portfolio_replay(
             "peak_exposure_pct": round(peak_exposure, 4),
             "max_capital_deployed": round(max_capital_deployed, 2),
             "ending_realized_pnl": round(cumulative_realized_pnl, 2),
+            "ending_cash": round(cash_available, 2),
+            "min_cash_available": round(min_cash_available, 2),
             "accepted_trade_count": len(normalized_trades),
             "constrained_trade_count": constrained_trade_count,
             "rejected_trade_count": rejected_trade_count,
+            "allocation_rule": "entry_score_desc_realized_pnl_desc_capital_asc",
+            "simulation_mode": "daily_event_replay",
+            "intraday_ordering": "exits_before_entries",
         },
+        "accepted_trades": accepted_trade_details,
+        "rejected_trades": rejected_trade_details,
         "timeline": timeline,
+    }
+
+
+def _format_walk_forward_parameters(parameters: dict[str, Any]) -> str:
+    if not parameters:
+        return ""
+    ordered_keys = [
+        ("buy_threshold", "buy"),
+        ("stop_loss", "stop"),
+        ("take_profit", "take"),
+        ("technical_weight", "tech"),
+        ("fundamental_weight", "fund"),
+        ("flow_weight", "flow"),
+        ("sentiment_weight", "sent"),
+    ]
+    parts = []
+    for source_key, label in ordered_keys:
+        value = parameters.get(source_key)
+        if value in (None, ""):
+            continue
+        parts.append(f"{label}={value}")
+    if not parts:
+        for key in sorted(parameters):
+            value = parameters.get(key)
+            if value in (None, ""):
+                continue
+            parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
+def _markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
+    if not headers:
+        return ""
+    lines = [
+        "| " + " | ".join(str(header) for header in headers) + " |",
+        "|" + "|".join([" --- "] * len(headers)) + "|",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+def _build_walk_forward_comparison_summary(fold_reports: list[dict[str, Any]]) -> dict[str, Any]:
+    if not fold_reports:
+        return {
+            "fold_count": 0,
+            "training_total_realized_pnl": 0.0,
+            "evaluation_total_realized_pnl": 0.0,
+            "training_mean_win_rate": 0.0,
+            "evaluation_mean_win_rate": 0.0,
+            "training_mean_sample_count": 0.0,
+            "evaluation_mean_sample_count": 0.0,
+            "train_eval_pnl_delta": 0.0,
+            "train_eval_win_rate_delta": 0.0,
+            "train_eval_sample_count_delta": 0.0,
+            "best_eval_fold": {},
+            "best_train_fold": {},
+            "rows": [],
+        }
+
+    rows = []
+    training_total_realized_pnl = 0.0
+    evaluation_total_realized_pnl = 0.0
+    training_total_win_rate = 0.0
+    evaluation_total_win_rate = 0.0
+    training_total_sample_count = 0
+    evaluation_total_sample_count = 0
+    best_eval_fold = None
+    best_train_fold = None
+    for item in fold_reports:
+        training_summary = item["score_summary"]["training_summary"]
+        evaluation_summary = item["score_summary"]["evaluation_summary"]
+        selected_parameters = item["score_summary"].get("selected_parameters", {})
+        training_pnl = round(_safe_float(training_summary.get("total_realized_pnl", 0.0), 0.0), 2)
+        evaluation_pnl = round(_safe_float(evaluation_summary.get("total_realized_pnl", 0.0), 0.0), 2)
+        training_win_rate = round(_safe_float(training_summary.get("win_rate", 0.0), 0.0), 1)
+        evaluation_win_rate = round(_safe_float(evaluation_summary.get("win_rate", 0.0), 0.0), 1)
+        training_sample_count = int(training_summary.get("closed_trade_count", 0) or 0)
+        evaluation_sample_count = int(evaluation_summary.get("closed_trade_count", 0) or 0)
+        row = {
+            "fold": item.get("fold", 0),
+            "train_window": f"{item.get('train_start', '')} -> {item.get('train_end', '')}",
+            "test_window": f"{item.get('test_start', '')} -> {item.get('test_end', '')}",
+            "selected_parameters": _format_walk_forward_parameters(selected_parameters),
+            "training_pnl": training_pnl,
+            "training_win_rate": training_win_rate,
+            "training_sample_count": training_sample_count,
+            "evaluation_pnl": evaluation_pnl,
+            "evaluation_win_rate": evaluation_win_rate,
+            "evaluation_sample_count": evaluation_sample_count,
+            "train_eval_pnl_delta": round(evaluation_pnl - training_pnl, 2),
+            "train_eval_win_rate_delta": round(evaluation_win_rate - training_win_rate, 1),
+            "train_eval_sample_count_delta": evaluation_sample_count - training_sample_count,
+        }
+        rows.append(row)
+        training_total_realized_pnl += training_pnl
+        evaluation_total_realized_pnl += evaluation_pnl
+        training_total_win_rate += training_win_rate
+        evaluation_total_win_rate += evaluation_win_rate
+        training_total_sample_count += training_sample_count
+        evaluation_total_sample_count += evaluation_sample_count
+        if best_eval_fold is None or evaluation_pnl > _safe_float(best_eval_fold["evaluation_pnl"], 0.0):
+            best_eval_fold = row
+        if best_train_fold is None or training_pnl > _safe_float(best_train_fold["training_pnl"], 0.0):
+            best_train_fold = row
+
+    fold_count = len(rows)
+    return {
+        "fold_count": fold_count,
+        "training_total_realized_pnl": round(training_total_realized_pnl, 2),
+        "evaluation_total_realized_pnl": round(evaluation_total_realized_pnl, 2),
+        "training_mean_win_rate": round(training_total_win_rate / fold_count, 1),
+        "evaluation_mean_win_rate": round(evaluation_total_win_rate / fold_count, 1),
+        "training_mean_sample_count": round(training_total_sample_count / fold_count, 1),
+        "evaluation_mean_sample_count": round(evaluation_total_sample_count / fold_count, 1),
+        "train_eval_pnl_delta": round(evaluation_total_realized_pnl - training_total_realized_pnl, 2),
+        "train_eval_win_rate_delta": round((evaluation_total_win_rate - training_total_win_rate) / fold_count, 1),
+        "train_eval_sample_count_delta": round((evaluation_total_sample_count - training_total_sample_count) / fold_count, 1),
+        "best_eval_fold": best_eval_fold or {},
+        "best_train_fold": best_train_fold or {},
+        "rows": rows,
     }
 
 
@@ -1142,6 +1412,7 @@ def run_walk_forward(
     overall_status = max((item["status"] for item in fold_reports), key=_severity_rank, default="ok")
     if total_sample_count == 0 and overall_status == "ok":
         overall_status = "warning"
+    comparison_summary = _build_walk_forward_comparison_summary(fold_reports)
     result = {
         "command": "backtest",
         "action": "walk-forward",
@@ -1158,6 +1429,7 @@ def run_walk_forward(
         "sample_count": total_sample_count,
         "score_summary": score_summary,
         "risk_summary": risk_summary,
+        "comparison_summary": comparison_summary,
         "state_fields": _state_fields(inputs),
         "folds": fold_reports,
         "portfolio_replay": _build_portfolio_replay(

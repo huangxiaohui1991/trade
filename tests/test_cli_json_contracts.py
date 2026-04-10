@@ -41,12 +41,29 @@ class CLIJsonContractTests(unittest.TestCase):
         return json.loads(stdout.getvalue())
 
     def _alert_items_contract(self, alerts: list[dict]) -> list[dict]:
+        def _normalize_details(details: dict) -> dict:
+            if not isinstance(details, dict):
+                return details
+            normalized = dict(details)
+            condition_orders = normalized.get("condition_orders")
+            if isinstance(condition_orders, dict):
+                normalized["condition_orders"] = {
+                    "count": condition_orders.get("count"),
+                    "pending_count": condition_orders.get("pending_count"),
+                    "open_count": condition_orders.get("open_count"),
+                    "exception_count": condition_orders.get("exception_count"),
+                    "status_counts": condition_orders.get("status_counts"),
+                    "condition_type_counts": condition_orders.get("condition_type_counts"),
+                    "sample": condition_orders.get("sample"),
+                }
+            return normalized
+
         return [
             {
                 "level": item["level"],
                 "code": item["code"],
                 "summary": item["summary"],
-                "details": item["details"],
+                "details": _normalize_details(item["details"]),
                 "acknowledged": item["acknowledged"],
                 "acknowledged_at": item["acknowledged_at"],
                 "acknowledged_by": item["acknowledged_by"],

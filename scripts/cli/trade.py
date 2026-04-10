@@ -354,6 +354,9 @@ def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> di
     pending_count = _order_count_from_statuses(status_counts, ["candidate", "pending", "confirm_pending"])
     open_count = _order_count_from_statuses(status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"])
     exception_count = _order_count_from_statuses(status_counts, ["exception", "rejected", "failed", "cancel_failed"])
+    review_queue_count = _order_count_from_statuses(status_counts, ["review_required", "review_pending"])
+    partial_fill_count = _order_count_from_statuses(status_counts, ["partially_filled"])
+    cancel_replace_count = _order_count_from_statuses(status_counts, ["cancel_replace_pending"])
 
     condition_orders = []
     for order in orders:
@@ -375,6 +378,9 @@ def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> di
         "pending_count": _order_count_from_statuses(condition_status_counts, ["candidate", "pending", "confirm_pending"]),
         "open_count": _order_count_from_statuses(condition_status_counts, ["placed", "partially_filled", "cancel_requested", "triggered"]),
         "exception_count": _order_count_from_statuses(condition_status_counts, ["exception", "rejected", "failed", "cancel_failed"]),
+        "review_queue_count": _order_count_from_statuses(condition_status_counts, ["review_required", "review_pending"]),
+        "partial_fill_count": _order_count_from_statuses(condition_status_counts, ["partially_filled"]),
+        "cancel_replace_count": _order_count_from_statuses(condition_status_counts, ["cancel_replace_pending"]),
         "status_counts": condition_status_counts,
         "condition_type_counts": condition_type_counts,
         "sample": [],
@@ -403,6 +409,9 @@ def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> di
             "pending_count": pending_count,
             "open_count": open_count,
             "exception_count": exception_count,
+            "review_queue_count": summary.get("review_queue_count", review_queue_count),
+            "partial_fill_count": summary.get("partial_fill_count", partial_fill_count),
+            "cancel_replace_count": summary.get("cancel_replace_count", cancel_replace_count),
         },
         "condition_orders": compact_condition_orders,
     }

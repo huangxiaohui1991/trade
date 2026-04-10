@@ -308,17 +308,24 @@ def parse_user_reply(text: str) -> dict:
     支持格式：
       "止损挂了 {股票名} ¥{价格}"
       "止损触发了 {股票名} 成交¥{价格}"
+      "止损部分成交了 {股票名} {数量}股 成交¥{价格}"
       "取消止损 {股票名}"
+      "改挂止损 {股票名} ¥{价格}"
+      "复核止损 {股票名}"
       "止盈挂了 {股票名} ¥{价格}"
       "止盈触发了 {股票名} 成交¥{价格}"
+      "止盈部分成交了 {股票名} {数量}股 成交¥{价格}"
       "取消止盈 {股票名}"
+      "改挂止盈 {股票名} ¥{价格}"
+      "复核止盈 {股票名}"
 
     返回: {
-        "action": "挂单"|"触发"|"取消",
+        "action": "挂单"|"触发"|"取消"|"部分成交"|"改挂"|"复核",
         "type": "止损"|"止盈",
         "stock": "股票名",
         "price": float (挂单价),
         "filled_price": float (成交价，触发时),
+        "filled_shares": int (部分成交股数),
         "raw": str (原始文本)
     }
     """
@@ -328,6 +335,7 @@ def parse_user_reply(text: str) -> dict:
         "stock": None,
         "price": None,
         "filled_price": None,
+        "filled_shares": None,
         "raw": text
     }
 
@@ -352,11 +360,38 @@ def parse_user_reply(text: str) -> dict:
         result["filled_price"] = float(m.group(3).replace(',', ''))
         return result
 
+    # 止损/止盈部分成交了 格式：{type}部分成交了 {stock} {shares}股 成交¥{price}
+    m = re.match(r'^(止损|止盈)部分成交了\s+(.+?)\s+(\d+)股\s+成交¥([\d,]+(?:\.\d+)?)$', text)
+    if m:
+        result["type"] = m.group(1)
+        result["action"] = "部分成交"
+        result["stock"] = m.group(2)
+        result["filled_shares"] = int(m.group(3))
+        result["filled_price"] = float(m.group(4).replace(',', ''))
+        return result
+
     # 取消止损/取消止盈 格式：取消{type} {stock}
     m = re.match(r'^取消(止损|止盈)\s+(.+)$', text)
     if m:
         result["type"] = m.group(1)
         result["action"] = "取消"
+        result["stock"] = m.group(2)
+        return result
+
+    # 改挂止损/改挂止盈 格式：改挂{type} {stock} ¥{price}
+    m = re.match(r'^改挂(止损|止盈)\s+(.+?)\s+¥([\d,]+(?:\.\d+)?)$', text)
+    if m:
+        result["type"] = m.group(1)
+        result["action"] = "改挂"
+        result["stock"] = m.group(2)
+        result["price"] = float(m.group(3).replace(',', ''))
+        return result
+
+    # 复核止损/复核止盈 格式：复核{type} {stock}
+    m = re.match(r'^复核(止损|止盈)\s+(.+)$', text)
+    if m:
+        result["type"] = m.group(1)
+        result["action"] = "复核"
         result["stock"] = m.group(2)
         return result
 

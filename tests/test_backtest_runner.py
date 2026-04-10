@@ -148,6 +148,74 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertTrue(result["sample_store"]["path"])
         self.assertTrue(result["result_path"])
         self.assertTrue(result["report_path"])
+        self.assertEqual(result["comparison_summary"]["fold_count"], result["parameters"]["folds"])
+        self.assertEqual(len(result["comparison_summary"]["rows"]), result["parameters"]["folds"])
+
+    def test_walk_forward_report_includes_fold_comparison_tables(self):
+        from scripts.backtest import run_walk_forward
+
+        fixture_payload = {
+            "trade_review": {
+                "scope": "cn_a_system",
+                "window": 9,
+                "closed_trade_count": 3,
+                "win_count": 2,
+                "loss_count": 1,
+                "win_rate": 66.7,
+                "total_realized_pnl": 1800.0,
+                "open_position_count": 0,
+                "closed_trades": [
+                    {
+                        "code": "300389",
+                        "exit_date": "2026-04-03",
+                        "realized_pnl": 1200.0,
+                        "entry_score": 7.8,
+                        "exit_reason_codes": ["RISK_TAKE_PROFIT_T1"],
+                    },
+                    {
+                        "code": "603063",
+                        "exit_date": "2026-04-06",
+                        "realized_pnl": -300.0,
+                        "entry_score": 6.3,
+                        "exit_reason_codes": ["RISK_ABSOLUTE_STOP_LOSS"],
+                    },
+                    {
+                        "code": "000612",
+                        "exit_date": "2026-04-09",
+                        "realized_pnl": 900.0,
+                        "entry_score": 8.0,
+                        "exit_reason_codes": ["POOL_DEMOTE"],
+                    },
+                ],
+                "open_positions": [],
+                "source": "fixture",
+                "mfe_mae_status": "pending_market_history",
+            },
+            "pool_snapshot": {"summary": {"core_count": 1, "watch_count": 1}},
+            "market_snapshot": {"signal": "CLEAR", "as_of_date": "2026-04-09", "source": "fixture"},
+            "state_audit": {"status": "ok", "snapshot_date": "2026-04-09"},
+            "today_decision": {
+                "action": "NO_TRADE",
+                "portfolio_risk": {"state": "ok", "reason_codes": [], "reasons": []},
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "backtest_fixture.json"
+            fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False), encoding="utf-8")
+            with mock.patch("scripts.backtest.runner.BACKTEST_SAMPLE_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_REPORT_DIR", Path(tmpdir)), mock.patch("scripts.backtest.runner.BACKTEST_INDEX_PATH", Path(tmpdir) / "index.json"):
+                result = run_walk_forward("2026-04-01", "2026-04-09", folds=3, fixture=fixture_path)
+            report_text = Path(result["report_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("## Fold Comparison", report_text)
+        self.assertIn("## Aggregate Comparison", report_text)
+        self.assertIn("Selected Parameters", report_text)
+        self.assertIn("Train PnL", report_text)
+        self.assertIn("Eval PnL", report_text)
+        self.assertIn("Best Eval Fold", report_text)
+        self.assertEqual(result["comparison_summary"]["fold_count"], 3)
+        self.assertEqual(len(result["comparison_summary"]["rows"]), 3)
+        self.assertTrue(result["comparison_summary"]["rows"][0]["selected_parameters"])
 
     def test_run_parameter_sweep_ranks_candidates(self):
         from scripts.backtest import run_parameter_sweep

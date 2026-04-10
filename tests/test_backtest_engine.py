@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 from unittest import mock
 
 
@@ -123,6 +124,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(result["parameters"]["scope"], "cn_a_system")
         self.assertEqual(result["portfolio_replay"]["summary"]["max_concurrent_positions"], 1)
         self.assertGreater(result["portfolio_replay"]["summary"]["peak_exposure_pct"], 0)
+        self.assertEqual(result["portfolio_replay"]["summary"]["simulation_mode"], "daily_event_replay")
         self.assertEqual(result["portfolio_replay"]["timeline"][0]["date"], "2026-03-01")
 
     def test_run_walk_forward_builds_fold_windows(self):
@@ -172,3 +174,73 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(summary["total_cap_limit"], 3000.0)
         self.assertGreater(summary["constrained_trade_count"], 0)
         self.assertLessEqual(summary["peak_exposure_pct"], 0.30)
+
+    def test_portfolio_replay_orders_same_day_candidates_by_priority(self):
+        from scripts.backtest.runner import _build_portfolio_replay
+
+        replay = _build_portfolio_replay(
+            [
+                {
+                    "code": "LOW",
+                    "entry_date": "2026-04-01",
+                    "exit_date": "2026-04-04",
+                    "entry_price": 10.0,
+                    "shares": 1000,
+                    "realized_pnl": 1000,
+                    "entry_score": 6.8,
+                },
+                {
+                    "code": "HIGH",
+                    "entry_date": "2026-04-01",
+                    "exit_date": "2026-04-05",
+                    "entry_price": 10.0,
+                    "shares": 1000,
+                    "realized_pnl": 800,
+                    "entry_score": 9.2,
+                },
+            ],
+            start=date(2026, 4, 1),
+            end=date(2026, 4, 6),
+            total_capital=10000,
+            strategy={"risk": {"position": {"total_max": 0.20, "single_max": 0.20}}},
+        )
+
+        self.assertEqual(replay["summary"]["allocation_rule"], "entry_score_desc_realized_pnl_desc_capital_asc")
+        self.assertEqual(replay["summary"]["accepted_trade_count"], 1)
+        self.assertEqual(replay["summary"]["rejected_trade_count"], 1)
+        self.assertEqual(replay["accepted_trades"][0]["code"], "HIGH")
+        self.assertEqual(replay["accepted_trades"][0]["allocation_rank"], 1)
+        self.assertEqual(replay["rejected_trades"][0]["code"], "LOW")
+        self.assertEqual(replay["rejected_trades"][0]["allocation_rank"], 2)
+
+    def test_portfolio_replay_tracks_daily_cash_entries_and_exits(self):
+        from scripts.backtest.runner import _build_portfolio_replay
+
+        replay = _build_portfolio_replay(
+            [
+                {
+                    "code": "AAA",
+                    "entry_date": "2026-04-01",
+                    "exit_date": "2026-04-03",
+                    "entry_price": 10.0,
+                    "shares": 100,
+                    "realized_pnl": 100.0,
+                    "entry_score": 8.0,
+                }
+            ],
+            start=date(2026, 4, 1),
+            end=date(2026, 4, 4),
+            total_capital=10000,
+            strategy={"risk": {"position": {"total_max": 0.50, "single_max": 0.50}}},
+        )
+
+        day1 = replay["timeline"][0]
+        day3 = replay["timeline"][2]
+        self.assertEqual(day1["entry_count"], 1)
+        self.assertEqual(day1["entries"][0]["code"], "AAA")
+        self.assertEqual(day1["cash_available"], 9000.0)
+        self.assertEqual(day3["exit_count"], 1)
+        self.assertEqual(day3["exits"][0]["code"], "AAA")
+        self.assertEqual(day3["cash_available"], 10100.0)
+        self.assertEqual(replay["summary"]["ending_cash"], 10100.0)
+        self.assertEqual(replay["summary"]["min_cash_available"], 9000.0)

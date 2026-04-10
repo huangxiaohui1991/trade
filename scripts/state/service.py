@@ -564,6 +564,10 @@ def _upsert_trade_event(conn: sqlite3.Connection, event: dict) -> None:
 
 
 _ORDER_TERMINAL_STATUSES = {"filled", "cancelled", "reviewed", "exception"}
+_ORDER_PENDING_STATUSES = {"candidate", "pending", "confirm_pending"}
+_ORDER_OPEN_STATUSES = {"placed", "partially_filled", "cancel_requested", "triggered", "cancel_replace_pending"}
+_ORDER_EXCEPTION_STATUSES = {"exception", "rejected", "failed", "cancel_failed"}
+_ORDER_REVIEW_QUEUE_STATUSES = {"review_required", "review_pending"}
 
 
 def _normalize_order_payload(order: dict, existing: dict | None = None) -> dict:
@@ -1323,14 +1327,25 @@ def load_order_snapshot(scope: str | None = None, status: str | None = None) -> 
 
     terminal_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_TERMINAL_STATUSES)
     unresolved_count = len(orders) - terminal_count
+    pending_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_PENDING_STATUSES)
+    open_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_OPEN_STATUSES)
+    exception_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_EXCEPTION_STATUSES)
+    review_queue_count = sum(1 for order in orders if str(order.get("status", "")).strip() in _ORDER_REVIEW_QUEUE_STATUSES)
+    partial_fill_count = sum(1 for order in orders if str(order.get("status", "")).strip() == "partially_filled")
+    cancel_replace_count = sum(1 for order in orders if str(order.get("status", "")).strip() == "cancel_replace_pending")
     return {
         "scope": scope or "all",
         "status": status or "all",
         "orders": orders,
         "summary": {
             "order_count": len(orders),
-            "open_count": unresolved_count,
+            "open_count": open_count or unresolved_count,
+            "pending_count": pending_count,
+            "exception_count": exception_count,
             "terminal_count": terminal_count,
+            "review_queue_count": review_queue_count,
+            "partial_fill_count": partial_fill_count,
+            "cancel_replace_count": cancel_replace_count,
             "status_counts": status_counts,
             "scope_counts": scope_counts,
             "class_counts": class_counts,
@@ -1379,7 +1394,10 @@ def _pending_condition_orders(scope: str = PAPER_SCOPE, conn: sqlite3.Connection
             continue
         if status in _ORDER_TERMINAL_STATUSES:
             continue
-        if confirm_status in {"pending", "timed_out"} or status == "candidate":
+        if (
+            confirm_status in {"pending", "timed_out", "review_pending"}
+            or status in {"candidate", "review_required", "partially_filled", "cancel_replace_pending"}
+        ):
             result.append(order)
     return result
 
@@ -1496,9 +1514,36 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                 update["trigger_price"] = _safe_float(parsed["price"], 0.0)
             if not matched.get("placed_at"):
                 update["placed_at"] = now_ts
+        elif parsed["action"] == "改挂":
+            update["status"] = "cancel_replace_pending"
+            update["confirm_status"] = "pending"
+            if parsed.get("price") is not None:
+                update["trigger_price"] = _safe_float(parsed["price"], 0.0)
+            update["metadata"] = {
+                **metadata,
+                "reply_history": reply_history,
+                "replace_requested": True,
+                "replace_requested_at": now_ts,
+            }
         elif parsed["action"] == "取消":
             update["status"] = "cancelled"
             update["cancelled_at"] = now_ts
+        elif parsed["action"] == "复核":
+            update["status"] = "review_required"
+            update["confirm_status"] = "review_pending"
+            update["metadata"] = {
+                **metadata,
+                "reply_history": reply_history,
+                "review_required": True,
+                "review_required_at": now_ts,
+            }
+        elif parsed["action"] == "部分成交":
+            update["status"] = "partially_filled"
+            update["filled_at"] = now_ts
+            update["avg_fill_price"] = _safe_float(parsed.get("filled_price", 0.0), 0.0)
+            parsed_filled = _safe_int(parsed.get("filled_shares", 0), 0)
+            existing_filled = _safe_int(matched.get("filled_shares", 0), 0)
+            update["filled_shares"] = max(existing_filled, parsed_filled)
         elif parsed["action"] == "触发":
             update["status"] = "filled"
             update["filled_at"] = now_ts
@@ -1508,8 +1553,18 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
 
         updated_order = upsert_order_state(update, conn=conn)
 
-        if parsed["action"] == "触发" and not metadata.get("trade_event_logged"):
-            shares = _safe_int(updated_order.get("filled_shares", updated_order.get("requested_shares", 0)), 0)
+        trade_delta_shares = 0
+        if parsed["action"] == "部分成交":
+            trade_delta_shares = max(
+                _safe_int(updated_order.get("filled_shares", 0), 0) - _safe_int(matched.get("filled_shares", 0), 0),
+                0,
+            )
+        elif parsed["action"] == "触发":
+            trade_delta_shares = _safe_int(updated_order.get("filled_shares", updated_order.get("requested_shares", 0)), 0)
+
+        should_record_fill = parsed["action"] in {"部分成交", "触发"} and trade_delta_shares > 0
+        if should_record_fill:
+            shares = trade_delta_shares
             price = _safe_float(updated_order.get("avg_fill_price", 0.0), 0.0)
             side = str(updated_order.get("side", "sell")).strip() or "sell"
             if shares > 0 and price > 0:
@@ -1533,6 +1588,7 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                         "metadata": {
                             "order_external_id": updated_order.get("external_id", ""),
                             "reply": parsed,
+                            "fill_action": parsed["action"],
                         },
                         "created_at": now_ts,
                     },
@@ -1547,7 +1603,8 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                                 if isinstance(updated_order.get("metadata", {}), dict)
                                 else {}
                             ),
-                            "trade_event_logged": True,
+                            "trade_event_logged": parsed["action"] == "触发",
+                            "last_fill_action": parsed["action"],
                             "trade_event_source": "discord_reply",
                         },
                     },
