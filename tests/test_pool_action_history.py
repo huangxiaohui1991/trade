@@ -66,6 +66,33 @@ class PoolActionHistoryTests(unittest.TestCase):
         self.assertEqual(history["action_counts"]["promote"], 1)
         self.assertEqual(history["action_counts"]["demote"], 1)
 
+    def test_pool_snapshot_preserves_data_quality_metadata(self):
+        from scripts.state import load_pool_snapshot, save_pool_snapshot
+
+        self._bootstrap_empty()
+        with mock.patch("scripts.state.service._project_stocks_yaml", return_value="/tmp/stocks.yaml"), mock.patch(
+            "scripts.state.service.ObsidianVault",
+            return_value=mock.Mock(sync_pool_projection=mock.Mock(return_value={})),
+        ):
+            save_pool_snapshot(
+                [
+                    {
+                        "code": "300389",
+                        "name": "艾比森",
+                        "bucket": "core",
+                        "total_score": 6.8,
+                        "data_quality": "degraded",
+                        "data_missing_fields": ["营收", "现金流"],
+                    },
+                ],
+                metadata={"snapshot_date": "2026-04-10", "source": "unit_test"},
+            )
+
+        entry = load_pool_snapshot()["core_pool"][0]
+        self.assertEqual(entry["data_quality"], "degraded")
+        self.assertEqual(entry["data_missing_fields"], ["营收", "现金流"])
+        self.assertEqual(entry["metadata"]["data_quality"], "degraded")
+
     def test_audit_state_reports_projection_drift_details(self):
         from scripts.state import audit_state, save_pool_snapshot
 

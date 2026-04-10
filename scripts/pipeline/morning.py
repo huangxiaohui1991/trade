@@ -78,11 +78,23 @@ def _get_core_pool_status(engine: DataEngine) -> list:
                 tech = engine.get_technical(code, 20)
                 flow = engine.get_fund_flow(code)
             except Exception:
-                core_items.append({"name": name, "code": code, "status": "数据获取失败", "score": 0})
+                core_items.append({
+                    "name": name,
+                    "code": code,
+                    "status": "数据获取失败",
+                    "score": 0,
+                    "data_quality": "error",
+                })
                 continue
 
             if "error" in tech:
-                core_items.append({"name": name, "code": code, "status": f"技术面: {tech['error']}", "score": 0})
+                core_items.append({
+                    "name": name,
+                    "code": code,
+                    "status": f"技术面: {tech['error']}",
+                    "score": 0,
+                    "data_quality": "error",
+                })
                 continue
 
             price = tech.get("current_price", 0)
@@ -93,6 +105,9 @@ def _get_core_pool_status(engine: DataEngine) -> list:
                 score = float(raw_score) if raw_score else 0.0
             except (TypeError, ValueError):
                 score = 0.0
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            data_quality = item.get("data_quality", metadata.get("data_quality", "ok"))
+            data_missing_fields = item.get("data_missing_fields", metadata.get("data_missing_fields", []))
 
             if not above_ma20:
                 status = "跌破MA20，需观察"
@@ -104,10 +119,14 @@ def _get_core_pool_status(engine: DataEngine) -> list:
             # 获取评分
             if score == 0:
                 try:
-                    score = score_stock(code, name).get("total_score", 0)
+                    score_result = score_stock(code, name)
+                    score = score_result.get("total_score", 0)
+                    data_quality = score_result.get("data_quality", data_quality)
+                    data_missing_fields = score_result.get("data_missing_fields", data_missing_fields)
                 except Exception as e:
                     _logger.warning(f"[core_pool] 评分获取失败 {name}({code}): {e}")
                     score = 0
+                    data_quality = "error"
 
             core_items.append({
                 "name": name,
@@ -118,6 +137,8 @@ def _get_core_pool_status(engine: DataEngine) -> list:
                 "main_outflow": flow.get("main_outflow", False),
                 "status": status,
                 "score": score,
+                "data_quality": data_quality,
+                "data_missing_fields": data_missing_fields,
             })
     except Exception as e:
         _logger.warning(f"[core_pool] 读取失败: {e}")
@@ -226,6 +247,8 @@ def _build_discord_data(market_data: dict, positions: list, core_items: list,
             "name": item.get("name", ""),
             "score": score,
             "note": note,
+            "data_quality": item.get("data_quality", "ok"),
+            "data_missing_fields": item.get("data_missing_fields", []),
         })
 
     # 格式化 market for Discord

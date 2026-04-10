@@ -23,6 +23,8 @@
 #   hermes_cron.sh scoring
 #   hermes_cron.sh weekly
 #   hermes_cron.sh sentiment
+#   hermes_cron.sh hk_monitor
+#   hermes_cron.sh monthly
 
 set -e
 
@@ -52,7 +54,7 @@ fi
 MODE="${1:-}"
 
 if [[ -z "$MODE" ]]; then
-    echo "用法: hermes_cron.sh [morning|noon|evening|scoring|weekly|sentiment]"
+    echo "用法: hermes_cron.sh [morning|noon|evening|scoring|weekly|sentiment|hk_monitor|monthly]"
     exit 1
 fi
 
@@ -60,11 +62,45 @@ echo "=== [Hermes Cron] $(date '+%Y-%m-%d %H:%M:%S') MODE=$MODE ==="
 
 cd "$SCRIPT_DIR"
 
-# 交易日历检查（周报不受交易日限制）
-if [[ "$MODE" != "weekly" ]]; then
+record_non_trading_skip() {
+    local pipeline="$1"
+    "$PYTHON" - "$pipeline" "$MODE" <<'PY'
+import sys
+
+from scripts.utils.runtime_state import update_pipeline_state
+
+pipeline = sys.argv[1]
+mode = sys.argv[2]
+update_pipeline_state(
+    pipeline,
+    "skipped",
+    {
+        "reason": "non_trading_day",
+        "skipped_reason": "non_trading_day",
+        "mode": mode,
+        "source": "hermes_cron",
+    },
+)
+PY
+}
+
+is_trading_day_gated_mode() {
+    case "$1" in
+        morning|noon|evening|scoring|sentiment)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# 交易日历检查（仅 A 股日内 pipeline 受交易日限制）
+if is_trading_day_gated_mode "$MODE"; then
     IS_TRADING=$("$PYTHON" -c "from scripts.utils.trading_calendar import is_trading_day; print('yes' if is_trading_day() else 'no')" 2>/dev/null || echo "yes")
     if [[ "$IS_TRADING" == "no" ]]; then
         echo ">> 今日非交易日，跳过 $MODE"
+        record_non_trading_skip "$MODE"
         exit 0
     fi
 fi

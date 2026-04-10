@@ -120,6 +120,15 @@
 - [x] 超时未确认提醒
 备注：`trade order overdue-check` 实现 T+1 再提醒 / T+2 异常标记，crontab 每日 9:15 自动执行。
 
+### P4 实盘磨合
+
+- [x] P4 roadmap 优化为当前状态 / 剩余风险 / 下一步优先级
+备注：已补充实盘试运行护栏、逐笔对账口径、数据源降级阻断待办和 P4/P5/P6 成功标准。
+- [x] 非交易日 skipped 状态落盘
+备注：`hermes_cron.sh` 对 A 股日内 pipeline 写入 `skipped_reason=non_trading_day`，周报/月报/港股检查不受 A 股交易日历限制。
+- [x] 评分数据质量传播到 snapshot 和 Discord
+备注：核心池 snapshot 保留 `data_quality / data_missing_fields`，盘前/收盘核心池评分展示数据降级提示。
+
 ---
 
 ## 完成定义

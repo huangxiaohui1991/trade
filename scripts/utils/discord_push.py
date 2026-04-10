@@ -420,6 +420,27 @@ def _score_emoji(score: float) -> str:
     return "❌"
 
 
+def _data_quality_note(stock: dict) -> str:
+    """评分数据质量提示。"""
+    quality = str(stock.get("data_quality", "ok") or "ok").strip().lower()
+    if quality in {"", "ok"}:
+        return ""
+    missing = stock.get("data_missing_fields") or stock.get("missing_fields") or []
+    if isinstance(missing, str):
+        missing_text = missing.strip()
+    else:
+        missing_text = ",".join(str(item).strip() for item in missing if str(item).strip())
+    if quality == "degraded":
+        note = "⚠️ 数据降级"
+    elif quality == "error":
+        note = "⚠️ 数据错误"
+    else:
+        note = f"⚠️ 数据质量:{quality}"
+    if missing_text:
+        note += f"（缺失:{missing_text}）"
+    return note
+
+
 def _fmt_pct(v: float) -> str:
     """浮点数 → 带符号百分比字符串，如 +0.15%"""
     sign = "+" if v >= 0 else ""
@@ -510,6 +531,9 @@ def _build_morning_embeds(data: dict) -> list[dict]:
             note  = stock.get("note", "")
             emoji = _score_emoji(score)
             val = f"{emoji} **{score:.1f}**"
+            quality_note = _data_quality_note(stock)
+            if quality_note:
+                val += f"\n{quality_note}"
             if note:
                 val += f"\n_{note}_"
             fields.append({"name": name, "value": val, "inline": True})
@@ -666,6 +690,9 @@ def _build_evening_embeds(data: dict) -> list[dict]:
             note  = stock.get("note", "")
             emoji = _score_emoji(score)
             val = f"{emoji} **{score:.1f}**"
+            quality_note = _data_quality_note(stock)
+            if quality_note:
+                val += f"\n{quality_note}"
             if note:
                 val += f"\n_{note}_"
             fields.append({"name": sname, "value": val, "inline": True})
@@ -993,7 +1020,7 @@ def send_morning_summary(data: dict) -> Tuple[bool, str]:
       date, weekday, market_signal
       market: {名称: {price, chg_pct, ma20_pct, ma60_pct, ma60_days, signal}}
       positions: [{name, shares, price, currency, note}]
-      core_pool: [{name, score, note}]
+      core_pool: [{name, score, note, data_quality, data_missing_fields}]
       weekly_bought, weekly_limit
     """
     embeds = _build_morning_embeds(data)
@@ -1024,7 +1051,7 @@ def send_evening_report(data: dict) -> Tuple[bool, str]:
       positions: [{name, shares, value, currency, status}]
       total_value
       alerts: [str, ...]
-      core_pool: [{name, score, note}]
+      core_pool: [{name, score, note, data_quality, data_missing_fields}]
       tomorrow_plan: [str, ...]
     """
     embeds = _build_evening_embeds(data)

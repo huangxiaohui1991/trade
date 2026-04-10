@@ -2208,6 +2208,20 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
             code = _normalize_code(entry.get("code", ""))
             if not code:
                 continue
+            entry_metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+            data_quality = str(entry.get("data_quality", entry_metadata.get("data_quality", "ok")) or "ok").strip()
+            data_missing_fields = entry.get("data_missing_fields", entry_metadata.get("data_missing_fields", []))
+            if isinstance(data_missing_fields, str):
+                data_missing_fields = [item.strip() for item in data_missing_fields.split(",") if item.strip()]
+            elif isinstance(data_missing_fields, (list, tuple, set)):
+                data_missing_fields = [str(item).strip() for item in data_missing_fields if str(item).strip()]
+            else:
+                data_missing_fields = []
+            entry_metadata = {
+                **entry_metadata,
+                "data_quality": data_quality,
+                "data_missing_fields": data_missing_fields,
+            }
             normalized = {
                 "bucket": bucket,
                 "code": code,
@@ -2225,7 +2239,9 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
                 "added_date": entry.get("added_date", snapshot_date),
                 "snapshot_date": entry.get("snapshot_date", snapshot_date),
                 "updated_at": entry.get("updated_at", updated_at),
-                "metadata": entry.get("metadata", {}),
+                "data_quality": data_quality,
+                "data_missing_fields": data_missing_fields,
+                "metadata": entry_metadata,
             }
             normalized_entries.append(normalized)
             conn.execute(
@@ -2319,6 +2335,16 @@ def load_pool_snapshot() -> dict:
             entry["veto_triggered"] = bool(entry["veto_triggered"])
             entry["veto_signals"] = _json_loads(entry.pop("veto_signals_json", "[]"), [])
             entry["metadata"] = _json_loads(entry.pop("metadata_json", "{}"), {})
+            metadata = entry["metadata"] if isinstance(entry["metadata"], dict) else {}
+            entry["data_quality"] = str(metadata.get("data_quality", "ok") or "ok").strip()
+            missing_fields = metadata.get("data_missing_fields", [])
+            if isinstance(missing_fields, str):
+                missing_fields = [item.strip() for item in missing_fields.split(",") if item.strip()]
+            elif isinstance(missing_fields, (list, tuple, set)):
+                missing_fields = [str(item).strip() for item in missing_fields if str(item).strip()]
+            else:
+                missing_fields = []
+            entry["data_missing_fields"] = missing_fields
             entries.append(entry)
         meta = _json_loads(_meta_get(conn, "pool_snapshot_meta", "{}"), {})
         action_history_summary = _latest_pool_action_summary(conn, snapshot_date=meta.get("snapshot_date", _today_str()))

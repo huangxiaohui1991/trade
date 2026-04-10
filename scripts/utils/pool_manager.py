@@ -120,6 +120,16 @@ def _build_note(hard_veto: list, warning_signals: list, bucket: str,
     return {"core": "核心池", "watch": "观察池", "avoid": "规避"}.get(bucket, "")
 
 
+def _normalize_missing_fields(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = "") -> dict:
     score = _safe_score(entry.get("total_score", 0))
     hard_veto, warning_signals = split_veto_signals(entry.get("veto_signals", []))
@@ -131,7 +141,11 @@ def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = 
         7.0,
     )
     note = str(entry.get("note", "") or "").strip()
-    data_quality = str(entry.get("data_quality", "ok") or "ok").strip()
+    metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+    data_quality = str(entry.get("data_quality", metadata.get("data_quality", "ok")) or "ok").strip()
+    missing_fields = _normalize_missing_fields(
+        entry.get("data_missing_fields", entry.get("missing_fields", metadata.get("data_missing_fields", [])))
+    )
     note = _build_note(hard_veto, warning_signals, bucket, note, data_quality)
     normalized = {
         "bucket": bucket,
@@ -148,7 +162,15 @@ def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = 
         "hard_veto_signals": list(entry.get("hard_veto_signals", [])) if entry.get("hard_veto_signals") else hard_veto,
         "note": note,
         "source": str(entry.get("source", source) or source),
+        "data_quality": data_quality,
+        "data_missing_fields": missing_fields,
     }
+    if metadata or data_quality != "ok" or missing_fields:
+        normalized["metadata"] = {
+            **metadata,
+            "data_quality": data_quality,
+            "data_missing_fields": missing_fields,
+        }
     if "previous_bucket" in entry:
         normalized["previous_bucket"] = entry.get("previous_bucket")
     if "updated_at" in entry:
@@ -281,6 +303,17 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
         score = _safe_score(row.get("total_score", 0))
         veto_signals = list(row.get("veto_signals", []) or [])
         hard_veto, warning_signals = split_veto_signals(veto_signals)
+        previous = merged.get(code, {})
+        previous_metadata = previous.get("metadata", {}) if isinstance(previous.get("metadata", {}), dict) else {}
+        data_quality = str(
+            row.get("data_quality", previous.get("data_quality", previous_metadata.get("data_quality", "ok"))) or "ok"
+        ).strip()
+        missing_fields = _normalize_missing_fields(
+            row.get(
+                "data_missing_fields",
+                row.get("missing_fields", previous.get("data_missing_fields", previous_metadata.get("data_missing_fields", []))),
+            )
+        )
         bucket = _normalize_bucket(
             row.get("bucket"),
             score,
@@ -288,10 +321,10 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
             watch_min_score,
             promote_min_score,
         )
-        previous_bucket = merged.get(code, {}).get("bucket", "")
+        previous_bucket = previous.get("bucket", "")
         note = _build_note(hard_veto, warning_signals, bucket,
                           str(row.get("note", "") or "").strip(),
-                          str(row.get("data_quality", "ok") or "ok").strip())
+                          data_quality)
         entry = {
             "bucket": bucket,
             "code": code,
@@ -308,6 +341,13 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
             "note": note,
             "source": str(row.get("source", source) or source),
             "previous_bucket": previous_bucket,
+            "data_quality": data_quality,
+            "data_missing_fields": missing_fields,
+            "metadata": {
+                **previous_metadata,
+                "data_quality": data_quality,
+                "data_missing_fields": missing_fields,
+            },
         }
         merged[code] = entry
 

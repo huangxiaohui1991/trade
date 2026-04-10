@@ -640,8 +640,17 @@ def run() -> dict:
             except (TypeError, ValueError):
                 score = 0.0
             note = str(item.get("note", item.get("备注", "")))
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            data_quality = item.get("data_quality", metadata.get("data_quality", "ok"))
+            data_missing_fields = item.get("data_missing_fields", metadata.get("data_missing_fields", []))
             if name and name not in ["", "—"]:
-                discord_core.append({"name": name, "score": score, "note": note})
+                discord_core.append({
+                    "name": name,
+                    "score": score,
+                    "note": note,
+                    "data_quality": data_quality,
+                    "data_missing_fields": data_missing_fields,
+                })
 
         tomorrow_plan = []
         signal = market_data.get("signal", market_data.get("market_signal", ""))

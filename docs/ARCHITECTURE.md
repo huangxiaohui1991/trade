@@ -262,6 +262,7 @@ blacklist:
 | 核心池评分 | 15:40（周一~五） | 批量评分核心池所有股 + 写回核心池 | → Obsidian |
 | 港股检查 | 16:30（周一~五） | 港股遗留仓位价格更新 + 止损检查 | → Discord |
 | 周报 | 周日 20:00 | 统计本周 P&L + 胜率 + 盈亏比 | → Obsidian + Discord |
+| 月度复盘 | 每月 28 日 20:30 | 汇总月度 P&L + 模拟盘 vs 实盘 + 参数检查 | → Obsidian |
 
 统一命令：
 
@@ -521,6 +522,9 @@ market 模式：
 - [x] 港股遗留仓位自动监控（hk_monitor.py）
 - [x] 订单管理 CLI（trade order 子命令，Hermes-Agent 直接调用）
 - [x] 超时未确认提醒（T+1 再提醒 / T+2 异常标记）
+- [x] 月度复盘自动生成（monthly_review.py）
+- [x] A 股交易日历感知（非交易日自动 skipped 落盘）
+- [x] 评分数据质量标记（data_quality / data_missing_fields）
 
 ### 待继续优化
 
@@ -531,8 +535,8 @@ market 模式：
 ## 十一、当前边界与后续方向
 
 - Discord 未配置 webhook 时，pipeline 会继续执行，但 `daily_state` 会记为 `warning`
-- `sentiment` 在 `hermes_cron.sh` 中仍是 placeholder，尚未独立上线
 - 全市场扫描已有缓存回退，但评分阶段仍依赖外部接口稳定性
+- `data_quality=degraded` 目前会提示风险，但还没有进入买入阻断规则
 - 目前自动化定位仍是“辅助决策 + 影子交易验证”，不是直连实盘下单
 - `openclaw/hermes` 应消费 CLI JSON，不直接依赖内部 Python 模块
 
