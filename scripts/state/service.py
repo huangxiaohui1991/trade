@@ -1811,16 +1811,101 @@ def _count_alerts(alerts: list[dict]) -> tuple[dict, dict, dict]:
 
 def _prepare_alert_entry(level: str, code: str, summary: str, details: dict | None = None) -> dict:
     now = _now_ts()
+    normalized_code = str(code or "").strip() or "UNKNOWN"
+    normalized_summary = str(summary or "").strip()
+    normalized_details = details or {}
+    subject = str(
+        normalized_details.get("code")
+        or normalized_details.get("name")
+        or normalized_details.get("snapshot_date")
+        or normalized_details.get("market_signal")
+        or ""
+    ).strip()
     return {
         "level": str(level or "info").strip().lower() or "info",
-        "code": str(code or "").strip() or "UNKNOWN",
-        "summary": str(summary or "").strip(),
-        "details": details or {},
+        "code": normalized_code,
+        "summary": normalized_summary,
+        "details": normalized_details,
+        "alert_key": f"{normalized_code}:{subject}:{normalized_summary}",
         "acknowledged": False,
         "acknowledged_at": "",
         "acknowledged_by": "",
+        "handling_status": "pending",
+        "throttled": False,
         "updated_at": now,
     }
+
+
+def _dedupe_alerts(alerts: list[dict]) -> tuple[list[dict], int]:
+    by_key: dict[str, dict] = {}
+    suppressed_count = 0
+    for alert in alerts:
+        key = str(alert.get("alert_key", "")).strip() or f"{alert.get('code', '')}:{alert.get('summary', '')}"
+        existing = by_key.get(key)
+        if not existing:
+            by_key[key] = alert
+            continue
+        suppressed_count += 1
+        if _alert_level_order(alert.get("level", "")) < _alert_level_order(existing.get("level", "")):
+            alert["throttled"] = False
+            existing["throttled"] = True
+            by_key[key] = alert
+        else:
+            existing["throttled"] = False
+    return sorted(by_key.values(), key=lambda item: (_alert_level_order(item.get("level", "")), item.get("code", ""), item.get("summary", ""))), suppressed_count
+
+
+def _apply_existing_alert_state(alerts: list[dict], previous_alerts: list[dict]) -> list[dict]:
+    previous_by_key = {
+        str(item.get("alert_key", "")).strip(): item
+        for item in previous_alerts or []
+        if str(item.get("alert_key", "")).strip()
+    }
+    for alert in alerts:
+        previous = previous_by_key.get(str(alert.get("alert_key", "")).strip())
+        if not previous:
+            continue
+        alert["acknowledged"] = bool(previous.get("acknowledged", False))
+        alert["acknowledged_at"] = str(previous.get("acknowledged_at", ""))
+        alert["acknowledged_by"] = str(previous.get("acknowledged_by", ""))
+        alert["handling_status"] = str(previous.get("handling_status", "pending")) or "pending"
+    return alerts
+
+
+def _pool_snapshot_alerts(pool_snapshot: dict) -> list[dict]:
+    alerts = []
+    for entry in pool_snapshot.get("entries", []) if isinstance(pool_snapshot, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        code = str(entry.get("code", "")).strip()
+        name = str(entry.get("name", code)).strip() or code
+        veto_signals = {str(item).strip() for item in entry.get("veto_signals", []) if str(item).strip()}
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        score_delta = _safe_float(
+            entry.get("score_delta", metadata.get("score_delta", metadata.get("score_change", 0.0))),
+            0.0,
+        )
+        details = {
+            "code": code,
+            "name": name,
+            "bucket": entry.get("bucket", ""),
+            "total_score": entry.get("total_score", 0),
+            "veto_signals": sorted(veto_signals),
+        }
+        if "earnings_bomb" in veto_signals:
+            alerts.append(_prepare_alert_entry("warning", "FINANCIAL_EARNINGS_WARNING", f"{name} 财报风险", details))
+        if "limit_up_today" in veto_signals or metadata.get("limit_up_pullback"):
+            alerts.append(_prepare_alert_entry("info", "MARKET_LIMIT_UP_PULLBACK_WATCH", f"{name} 涨停后回落观察", details))
+        if veto_signals.intersection({"volume_break", "high_volume_break", "breakdown_volume"}) or metadata.get("volume_break"):
+            alerts.append(_prepare_alert_entry("warning", "MARKET_VOLUME_BREAK_WARNING", f"{name} 放量破位风险", details))
+        if score_delta <= -1.0:
+            alerts.append(_prepare_alert_entry(
+                "warning",
+                "POOL_SCORE_LOSS",
+                f"{name} 池子评分失分",
+                {**details, "score_delta": score_delta},
+            ))
+    return alerts
 
 
 def build_alert_center_snapshot(
@@ -1895,6 +1980,8 @@ def build_alert_center_snapshot(
             "triggered_position_count": advisory_summary.get("triggered_position_count", 0),
         })
 
+    alerts.extend(_pool_snapshot_alerts(pool_snapshot))
+    alerts, suppressed_count = _dedupe_alerts(alerts)
     level_counts, code_counts, code_level_counts = _count_alerts(alerts)
     status = "ok"
     if any(level in {"warning", "error", "block"} for level in level_counts):
@@ -1912,6 +1999,7 @@ def build_alert_center_snapshot(
         "acknowledged_count": sum(1 for alert in alerts if bool(alert.get("acknowledged"))),
         "pending_count": sum(1 for alert in alerts if not bool(alert.get("acknowledged"))),
         "all_acknowledged": bool(alerts) and all(bool(alert.get("acknowledged")) for alert in alerts),
+        "suppressed_duplicate_count": suppressed_count,
     }
 
     summary = {
@@ -1956,13 +2044,26 @@ def save_alert_snapshot(snapshot: dict, conn: sqlite3.Connection | None = None) 
         conn = context.__enter__()
     try:
         snapshot = dict(snapshot or {})
+        previous_row = conn.execute("SELECT detail_json FROM alert_snapshots WHERE id = 1").fetchone()
+        if previous_row:
+            previous_detail = _json_loads(previous_row["detail_json"], {})
+            previous_alerts = previous_detail.get("alerts", []) if isinstance(previous_detail, dict) else []
+            snapshot["alerts"] = _apply_existing_alert_state(snapshot.get("alerts", []), previous_alerts)
         detail = dict(snapshot)
         summary = dict(snapshot.get("status_summary", {}))
         classification = dict(snapshot.get("classification", {}))
-        ack_summary = dict(snapshot.get("ack_summary", {}))
+        recalculated_ack = {
+            "acknowledged_count": sum(1 for alert in snapshot.get("alerts", []) if bool(alert.get("acknowledged"))),
+            "pending_count": sum(1 for alert in snapshot.get("alerts", []) if not bool(alert.get("acknowledged"))),
+            "all_acknowledged": bool(snapshot.get("alerts", [])) and all(bool(alert.get("acknowledged")) for alert in snapshot.get("alerts", [])),
+        }
+        ack_summary = {**dict(snapshot.get("ack_summary", {})), **recalculated_ack}
+        summary["ack_summary"] = ack_summary
         detail.setdefault("status_summary", summary)
         detail.setdefault("classification", classification)
         detail.setdefault("ack_summary", ack_summary)
+        detail["status_summary"] = summary
+        detail["ack_summary"] = ack_summary
         snapshot_date = str(snapshot.get("snapshot_date", _today_str())).strip() or _today_str()
         updated_at = str(snapshot.get("updated_at", _now_ts())).strip() or _now_ts()
         status = str(snapshot.get("status", summary.get("status", "ok"))).strip() or "ok"

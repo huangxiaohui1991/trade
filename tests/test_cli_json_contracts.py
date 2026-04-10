@@ -58,7 +58,7 @@ class CLIJsonContractTests(unittest.TestCase):
                 }
             return normalized
 
-        return [
+        items = [
             {
                 "level": item["level"],
                 "code": item["code"],
@@ -70,6 +70,14 @@ class CLIJsonContractTests(unittest.TestCase):
             }
             for item in alerts
         ]
+        return sorted(items, key=lambda item: (item["code"], item["summary"], item["level"]))
+
+    def _ack_summary_contract(self, ack_summary: dict) -> dict:
+        return {
+            "acknowledged_count": ack_summary["acknowledged_count"],
+            "pending_count": ack_summary["pending_count"],
+            "all_acknowledged": ack_summary["all_acknowledged"],
+        }
 
     def _doctor_contract(self, payload: dict) -> dict:
         checks = payload["checks"]
@@ -247,7 +255,7 @@ class CLIJsonContractTests(unittest.TestCase):
                     "alert_count": payload["alert_snapshot"]["status_summary"]["alert_count"],
                     "level_counts": payload["alert_snapshot"]["status_summary"]["level_counts"],
                     "code_counts": payload["alert_snapshot"]["status_summary"]["code_counts"],
-                    "ack_summary": payload["alert_snapshot"]["status_summary"]["ack_summary"],
+                    "ack_summary": self._ack_summary_contract(payload["alert_snapshot"]["status_summary"]["ack_summary"]),
                     "snapshot_date": payload["alert_snapshot"]["status_summary"]["snapshot_date"],
                 },
                 "classification": {
@@ -255,7 +263,7 @@ class CLIJsonContractTests(unittest.TestCase):
                     "by_code": payload["alert_snapshot"]["classification"]["by_code"],
                     "by_level_code": payload["alert_snapshot"]["classification"]["by_level_code"],
                 },
-                "ack_summary": payload["alert_snapshot"]["ack_summary"],
+                "ack_summary": self._ack_summary_contract(payload["alert_snapshot"]["ack_summary"]),
                 "signal_bus_state": payload["alert_snapshot"]["signal_bus_state"],
                 "pool_snapshot_date": payload["alert_snapshot"]["pool_snapshot_date"],
                 "market_signal": payload["alert_snapshot"]["market_signal"],
@@ -396,7 +404,7 @@ class CLIJsonContractTests(unittest.TestCase):
                 "alert_count": payload["status_summary"]["alert_count"],
                 "level_counts": payload["status_summary"]["level_counts"],
                 "code_counts": payload["status_summary"]["code_counts"],
-                "ack_summary": payload["status_summary"]["ack_summary"],
+                    "ack_summary": self._ack_summary_contract(payload["status_summary"]["ack_summary"]),
                 "snapshot_date": payload["status_summary"]["snapshot_date"],
             },
             "classification": {
@@ -404,12 +412,23 @@ class CLIJsonContractTests(unittest.TestCase):
                 "by_code": payload["classification"]["by_code"],
                 "by_level_code": payload["classification"]["by_level_code"],
             },
-            "ack_summary": payload["ack_summary"],
+            "ack_summary": self._ack_summary_contract(payload["ack_summary"]),
             "alerts": self._alert_items_contract(payload["alerts"]),
         }
 
     def _run_for_orders(self, argv_variants: list[list[str]], patches: list[mock._patch], contract_fn, fixture_name: str):
         expected = _load_fixture(fixture_name)
+        def _normalize_expected_alerts(value):
+            if isinstance(value, dict):
+                for key, item in list(value.items()):
+                    if key == "alerts" and isinstance(item, list):
+                        value[key] = sorted(item, key=lambda alert: (alert["code"], alert["summary"], alert["level"]))
+                    else:
+                        _normalize_expected_alerts(item)
+            elif isinstance(value, list):
+                for item in value:
+                    _normalize_expected_alerts(item)
+        _normalize_expected_alerts(expected)
         outputs = []
         for argv in argv_variants:
             payload = self._run_main(argv, patches)

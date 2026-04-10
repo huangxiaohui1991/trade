@@ -120,10 +120,14 @@
 
 ### 告警中心深化
 
-- [ ] 财报告警接入
-- [ ] 异动 / 放量破位 / 涨停回落告警接入
-- [ ] 池子失分告警接入
-- [ ] 告警去重、节流、处理状态
+- [x] 财报告警接入
+备注：pool entry `earnings_bomb` now 生成 `FINANCIAL_EARNINGS_WARNING`。
+- [x] 异动 / 放量破位 / 涨停回落告警接入
+备注：pool entry `limit_up_today / volume_break` now 生成涨停回落观察与放量破位告警。
+- [x] 池子失分告警接入
+备注：pool entry `score_delta <= -1.0` now 生成 `POOL_SCORE_LOSS`。
+- [x] 告警去重、节流、处理状态
+备注：告警 now 带 `alert_key / handling_status / throttled`，同 key 去重并统计 suppressed duplicate count，保存时保留历史 ack 状态。
 
 ---
 

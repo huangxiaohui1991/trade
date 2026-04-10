@@ -161,6 +161,45 @@ class AlertCenterTests(unittest.TestCase):
         self.assertEqual(snapshot["status_summary"]["ack_summary"]["pending_count"], 6)
         self.assertTrue(all(alert["acknowledged"] is False for alert in snapshot["alerts"]))
         self.assertTrue(all(alert["acknowledged_at"] == "" for alert in snapshot["alerts"]))
+        self.assertTrue(all(alert["handling_status"] == "pending" for alert in snapshot["alerts"]))
+        self.assertTrue(all(alert["alert_key"] for alert in snapshot["alerts"]))
+
+    def test_pool_snapshot_alerts_cover_financial_market_and_score_loss(self):
+        from scripts.state import build_alert_center_snapshot
+
+        context = self._sample_context()
+        context["pool_sync_state"] = {"status": "ok", "snapshot_date": "2026-04-09"}
+        context["shadow_snapshot"] = {"status": "ok", "consistency": {"ok": True, "status": "ok"}, "advisory_summary": {}}
+        context["order_snapshot"] = {"summary": {"pending_count": 0, "exception_count": 0}, "condition_orders": {}}
+        context["today_decision"] = {"market_signal": "GREEN", "portfolio_risk": {"state": "ok"}}
+        context["pool_snapshot"]["entries"] = [
+            {
+                "bucket": "core",
+                "code": "300389",
+                "name": "艾比森",
+                "total_score": 6.1,
+                "veto_signals": ["earnings_bomb", "limit_up_today", "volume_break"],
+                "metadata": {"score_delta": -1.4},
+            },
+            {
+                "bucket": "core",
+                "code": "300389",
+                "name": "艾比森",
+                "total_score": 6.1,
+                "veto_signals": ["earnings_bomb"],
+                "metadata": {"score_delta": -1.4},
+            },
+        ]
+
+        snapshot = build_alert_center_snapshot(**context)
+        codes = snapshot["classification"]["by_code"]
+
+        self.assertEqual(codes["FINANCIAL_EARNINGS_WARNING"], 1)
+        self.assertEqual(codes["MARKET_LIMIT_UP_PULLBACK_WATCH"], 1)
+        self.assertEqual(codes["MARKET_VOLUME_BREAK_WARNING"], 1)
+        self.assertEqual(codes["POOL_SCORE_LOSS"], 1)
+        self.assertEqual(snapshot["ack_summary"]["suppressed_duplicate_count"], 2)
+        self.assertEqual(snapshot["alert_count"], 4)
 
     def test_load_alert_snapshot_persists_and_round_trips(self):
         from scripts.state import load_alert_snapshot
