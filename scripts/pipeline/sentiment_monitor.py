@@ -148,7 +148,11 @@ def _match_keywords(text: str) -> list[dict]:
 def _load_alert_history() -> dict:
     """加载告警去重历史"""
     try:
-        data = load_json_cache(CACHE_KEY, subfolder="sentiment")
+        data = load_json_cache("sentiment", CACHE_KEY, max_age_seconds=48 * 3600)
+        if isinstance(data, dict) and "data" in data:
+            inner = data["data"]
+            if isinstance(inner, dict):
+                return inner
         if isinstance(data, dict):
             return data
     except Exception:
@@ -160,7 +164,7 @@ def _save_alert_history(history: dict):
     """保存告警去重历史"""
     history["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     try:
-        save_json_cache(CACHE_KEY, history, subfolder="sentiment")
+        save_json_cache("sentiment", CACHE_KEY, history)
     except Exception as exc:
         _logger.warning(f"[sentiment] 保存告警历史失败: {exc}")
 

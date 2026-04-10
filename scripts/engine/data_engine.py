@@ -172,7 +172,39 @@ def get_realtime(codes: list) -> dict:
             _logger.warning(f"[get_realtime] MX fallback 失败: {e2}")
             result["source_chain"].append("mx_data_failed")
 
-        # fallback 2: 历史日线
+        # fallback 2: 腾讯实时行情
+        try:
+            from scripts.engine.financial import _tencent_realtime
+            for code in codes:
+                code = normalize_code(code)
+                if code in result["data"]:
+                    continue
+                tq = _tencent_realtime(code)
+                if tq and tq.get("price", 0) > 0:
+                    result["data"][code] = {
+                        "code": code,
+                        "name": tq.get("name", ""),
+                        "price": tq["price"],
+                        "change_pct": tq.get("change_pct", 0),
+                        "volume": tq.get("volume", 0),
+                        "amount": tq.get("amount", 0),
+                        "high": tq.get("high", 0),
+                        "low": tq.get("low", 0),
+                        "open": tq.get("open", 0),
+                        "prev_close": tq.get("prev_close", 0),
+                        "turnover_rate": tq.get("turnover_rate", 0),
+                        "pe": tq.get("pe", 0),
+                        "pb": tq.get("pb", 0),
+                        "total_mv": tq.get("total_mv", 0),
+                        "circ_mv": tq.get("circ_mv", 0),
+                        "source": "tencent_realtime",
+                    }
+                    if "tencent_realtime" not in result["source_chain"]:
+                        result["source_chain"].append("tencent_realtime")
+        except Exception as e2:
+            _logger.info(f"[get_realtime] 腾讯 fallback 失败: {e2}")
+
+        # fallback 3: 历史日线
         for code in codes:
             code = normalize_code(code)
             try:

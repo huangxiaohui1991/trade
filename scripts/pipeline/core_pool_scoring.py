@@ -53,8 +53,8 @@ def _build_report_content(scores: list, date_str: str) -> str:
         "",
         "---",
         "",
-        "| 股票 | 代码 | 技术(2) | 基本面(3) | 资金(2) | 舆情(3) | **总分(10)** | 建议 |",
-        "|------|------|---------|---------|---------|---------|------------|------|",
+        "| 股票 | 代码 | 技术(2) | 基本面(3) | 资金(2) | 舆情(3) | **总分(10)** | 建议 | 数据 |",
+        "|------|------|---------|---------|---------|---------|------------|------|------|",
     ]
 
     for s in scores:
@@ -66,10 +66,12 @@ def _build_report_content(scores: list, date_str: str) -> str:
         sentiment = s.get("sentiment_score", 0)
         total = s.get("total_score", 0)
         suggestion = get_recommendation(s)
+        dq = s.get("data_quality", "ok")
+        dq_mark = "✅" if dq == "ok" else "⚠️降级"
 
         lines.append(
             f"| {name} | {code} | {tech:.1f} | {fin:.1f} | {flow:.1f} | "
-            f"{sentiment:.1f} | **{total:.1f}** | {suggestion} |"
+            f"{sentiment:.1f} | **{total:.1f}** | {suggestion} | {dq_mark} |"
         )
 
     lines.append("")
@@ -85,6 +87,10 @@ def _build_report_content(scores: list, date_str: str) -> str:
         lines.append(f"- 基本面：{s.get('fundamental_detail', '')}")
         lines.append(f"- 资金流：{s.get('flow_detail', '')}")
         lines.append(f"- 舆情：{s.get('sentiment_detail', '')}")
+        dq = s.get("data_quality", "ok")
+        if dq != "ok":
+            missing = s.get("data_missing_fields", [])
+            lines.append(f"- **⚠️ 数据降级**：缺失 {', '.join(missing) if missing else '部分字段'}，评分可能偏低")
         hard_veto, warning_signals = split_veto_signals(s.get("veto_signals", []))
         if hard_veto:
             lines.append(f"- **一票否决：{', '.join(hard_veto)}**")

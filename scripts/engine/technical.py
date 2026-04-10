@@ -224,6 +224,22 @@ def _get_hist_data(code: str, days: int = 120) -> pd.DataFrame:
     except Exception as e:
         _logger.warning(f"[_get_hist_data] 新浪失败 code={code}: {e}")
 
+    # Source 3: 腾讯
+    try:
+        from scripts.engine.financial import _tencent_hist
+        df = _tencent_hist(code, days)
+        if df is not None and not df.empty:
+            df = df.rename(columns={
+                "date": "日期", "open": "开盘", "close": "收盘",
+                "high": "最高", "low": "最低", "amount": "成交量",
+            })
+            if "涨跌幅" not in df.columns:
+                df["涨跌幅"] = df["收盘"].pct_change() * 100
+            _logger.info(f"[_get_hist_data] 腾讯成功 code={code} rows={len(df)}")
+            return df
+    except Exception as e:
+        _logger.warning(f"[_get_hist_data] 腾讯失败 code={code}: {e}")
+
     return pd.DataFrame()
 
 

@@ -60,6 +60,15 @@ echo "=== [Hermes Cron] $(date '+%Y-%m-%d %H:%M:%S') MODE=$MODE ==="
 
 cd "$SCRIPT_DIR"
 
+# 交易日历检查（周报不受交易日限制）
+if [[ "$MODE" != "weekly" ]]; then
+    IS_TRADING=$("$PYTHON" -c "from scripts.utils.trading_calendar import is_trading_day; print('yes' if is_trading_day() else 'no')" 2>/dev/null || echo "yes")
+    if [[ "$IS_TRADING" == "no" ]]; then
+        echo ">> 今日非交易日，跳过 $MODE"
+        exit 0
+    fi
+fi
+
 echo ">> 同步结构化状态"
 SYNC_JSON=$("$PYTHON" -m scripts.cli.trade state sync --target all --json)
 echo "$SYNC_JSON"
@@ -109,6 +118,10 @@ case "$MODE" in
     hk_monitor)
         echo ">> 港股遗留仓位检查"
         "$PYTHON" -m scripts.cli.trade run hk_monitor --json 2>&1
+        ;;
+    monthly)
+        echo ">> 月度复盘"
+        "$PYTHON" -m scripts.cli.trade run monthly --json 2>&1
         ;;
     *)
         echo "未知模式: $MODE"

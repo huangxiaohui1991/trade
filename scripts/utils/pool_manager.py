@@ -102,13 +102,21 @@ def _normalize_bucket(bucket: str | None, score: float, hard_veto: bool,
     return "watch"
 
 
-def _build_note(hard_veto: list, warning_signals: list, bucket: str, fallback: str = "") -> str:
+def _build_note(hard_veto: list, warning_signals: list, bucket: str,
+                fallback: str = "", data_quality: str = "") -> str:
     if fallback:
+        if data_quality == "degraded" and "⚠️数据降级" not in fallback:
+            return f"{fallback} ⚠️数据降级"
         return fallback
+    parts = []
     if hard_veto:
-        return f"veto:{','.join(hard_veto)}"
+        parts.append(f"veto:{','.join(hard_veto)}")
     if warning_signals:
-        return f"预警:{','.join(warning_signals)}"
+        parts.append(f"预警:{','.join(warning_signals)}")
+    if data_quality == "degraded":
+        parts.append("⚠️数据降级")
+    if parts:
+        return " ".join(parts)
     return {"core": "核心池", "watch": "观察池", "avoid": "规避"}.get(bucket, "")
 
 
@@ -123,7 +131,8 @@ def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = 
         7.0,
     )
     note = str(entry.get("note", "") or "").strip()
-    note = _build_note(hard_veto, warning_signals, bucket, note)
+    data_quality = str(entry.get("data_quality", "ok") or "ok").strip()
+    note = _build_note(hard_veto, warning_signals, bucket, note, data_quality)
     normalized = {
         "bucket": bucket,
         "code": str(entry.get("code", "")).strip(),
@@ -280,7 +289,9 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
             promote_min_score,
         )
         previous_bucket = merged.get(code, {}).get("bucket", "")
-        note = _build_note(hard_veto, warning_signals, bucket, str(row.get("note", "") or "").strip())
+        note = _build_note(hard_veto, warning_signals, bucket,
+                          str(row.get("note", "") or "").strip(),
+                          str(row.get("data_quality", "ok") or "ok").strip())
         entry = {
             "bucket": bucket,
             "code": code,

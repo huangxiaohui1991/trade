@@ -96,7 +96,17 @@ def _score_fundamental(code: str, fin_data: dict) -> dict:
     ROE(1) + 营收增长(1) + 现金流(1)
     """
     if "error" in fin_data:
-        return {"score": 0, "detail": f"数据错误: {fin_data.get('error', fin_data)}"}
+        return {"score": 0, "detail": f"数据错误: {fin_data.get('error', fin_data)}", "data_quality": "error"}
+
+    # 数据质量追踪
+    missing = []
+    if fin_data.get("roe") is None and not fin_data.get("roe_recent"):
+        missing.append("ROE")
+    if fin_data.get("revenue_growth") is None:
+        missing.append("营收")
+    if fin_data.get("operating_cash_flow") is None and fin_data.get("cash_flow_positive") is None:
+        missing.append("现金流")
+    data_quality = "ok" if not missing else "degraded"
 
     # ROE (0-1 分)
     roe = fin_data.get("roe", 0)
@@ -128,11 +138,16 @@ def _score_fundamental(code: str, fin_data: dict) -> dict:
     cf_score = 0.5 if fin_data.get("cash_flow_positive", False) else 0
 
     total = round(min(roe_score + rev_score + cf_score, 3.0), 1)
+    detail = f"ROE:{roe_score:.1f}/1 营收:{rev_score:.1f}/1 现金流:{cf_score:.1f}/1"
+    if missing:
+        detail += f" ⚠️缺失:{','.join(missing)}"
     return {
         "score": total,
-        "detail": f"ROE:{roe_score:.1f}/1 营收:{rev_score:.1f}/1 现金流:{cf_score:.1f}/1",
+        "detail": detail,
         "roe": roe,
         "revenue_growth": rev_growth,
+        "data_quality": data_quality,
+        "missing_fields": missing,
     }
 
 
@@ -379,6 +394,8 @@ def score(code: str, name: Optional[str] = None) -> dict:
         "hard_veto_signals": hard_veto,
         "veto_triggered": veto_triggered,
         "weights": weights,
+        "data_quality": fin_s.get("data_quality", "ok"),
+        "data_missing_fields": fin_s.get("missing_fields", []),
         # 原始数据
         "_raw": {"technical": tech, "fundamental": fin, "fund_flow": flow},
     }
@@ -440,41 +457,56 @@ def _get_real_ma_arrangement(code: str, name: str) -> dict:
 
 def _get_mx_financial_supplement(code: str, name: str) -> dict:
     """
-    补调 MX mx_data 查营收增长率和经营现金流。
+    补调营收增长率和经营现金流。
+    优先 MX mx_data，失败则 fallback 到 get_financial()（MX → 东财 → 新浪）。
     返回 {"revenue_growth": float, "cash_flow_positive": bool}
-    失败返回空 dict。
     """
+    # 1. 先试 MX 快速查询
+    parsed = {}
     try:
         from scripts.mx.mx_data import MXData
         mx = MXData()
         result = mx.query(f"{name} 最近一期营收同比增长率 经营活动现金流净额")
         tables, _, _, err = MXData.parse_result(result)
-        if err or not tables:
-            return {}
-        parsed = {}
-        for table in tables:
-            for row in table.get("rows", []):
-                for key, val in row.items():
-                    val_str = str(val).strip().replace("%", "").replace(",", "")
-                    if "|" in val_str:
-                        val_str = val_str.split("|")[0]
-                    try:
-                        num = float(val_str) if val_str and val_str not in ("", "-", "—") else None
-                    except (ValueError, TypeError):
-                        num = None
-                    if num is None:
-                        continue
-                    if "营收" in key and ("增长" in key or "同比" in key):
-                        parsed.setdefault("revenue_growth", round(num, 2))
-                    elif "经营" in key and "现金" in key:
-                        parsed.setdefault("cash_flow_positive", num > 0)
-                        parsed.setdefault("operating_cash_flow", num)
-        if parsed:
-            _logger.info(f"[mx_fin_sup] {name}: rev={parsed.get('revenue_growth')} cf={parsed.get('cash_flow_positive')}")
-        return parsed
+        if not err and tables:
+            for table in tables:
+                for row in table.get("rows", []):
+                    for key, val in row.items():
+                        val_str = str(val).strip().replace("%", "").replace(",", "")
+                        if "|" in val_str:
+                            val_str = val_str.split("|")[0]
+                        try:
+                            num = float(val_str) if val_str and val_str not in ("", "-", "—") else None
+                        except (ValueError, TypeError):
+                            num = None
+                        if num is None:
+                            continue
+                        if "营收" in key and ("增长" in key or "同比" in key):
+                            parsed.setdefault("revenue_growth", round(num, 2))
+                        elif "经营" in key and "现金" in key:
+                            parsed.setdefault("cash_flow_positive", num > 0)
+                            parsed.setdefault("operating_cash_flow", num)
+            if parsed:
+                _logger.info(f"[mx_fin_sup] {name}: rev={parsed.get('revenue_growth')} cf={parsed.get('cash_flow_positive')}")
     except Exception as e:
-        _logger.info(f"[mx_fin_sup] {name} 失败: {e}")
-        return {}
+        _logger.info(f"[mx_fin_sup] {name} MX 失败: {e}")
+
+    # 2. MX 缺字段时，fallback 到 get_financial（MX → 东财 → 新浪完整链路）
+    if "revenue_growth" not in parsed or "cash_flow_positive" not in parsed:
+        try:
+            from scripts.engine.financial import get_financial
+            fin = get_financial(code)
+            if "revenue_growth" not in parsed and fin.get("revenue_growth") is not None:
+                parsed["revenue_growth"] = fin["revenue_growth"]
+            if "cash_flow_positive" not in parsed and fin.get("cash_flow_positive") is not None:
+                parsed["cash_flow_positive"] = fin["cash_flow_positive"]
+                parsed.setdefault("operating_cash_flow", fin.get("operating_cash_flow", 0))
+            if parsed.get("revenue_growth") is not None or parsed.get("cash_flow_positive") is not None:
+                _logger.info(f"[mx_fin_sup] {name} fallback补充: rev={parsed.get('revenue_growth')} cf={parsed.get('cash_flow_positive')}")
+        except Exception as e:
+            _logger.info(f"[mx_fin_sup] {name} fallback 失败: {e}")
+
+    return parsed
 
 
 def _check_earnings_bomb(code: str, name: str) -> bool:
@@ -621,7 +653,15 @@ def _score_from_mx_data(code: str, name: str, mx_row: dict,
         cf_detail = "0.5/1(无数据)"
 
     fin_total = round(min(roe_score + rev_score + cf_score, 3.0), 1)
+    mx_missing = []
+    if rev_growth is None:
+        mx_missing.append("营收")
+    if cf_positive is None:
+        mx_missing.append("现金流")
+    mx_data_quality = "ok" if not mx_missing else "degraded"
     fin_detail = f"ROE:{roe_score:.1f}/1({roe:.1f}%) 营收:{rev_detail} 现金流:{cf_detail}"
+    if mx_missing:
+        fin_detail += f" ⚠️缺失:{','.join(mx_missing)}"
 
     # ── 优化3: 资金流用换手率替代成交额绝对值 ──
     if turnover >= 3 and turnover <= 10:
@@ -682,6 +722,8 @@ def _score_from_mx_data(code: str, name: str, mx_row: dict,
         "hard_veto_signals": hard_veto,
         "veto_triggered": veto_triggered,
         "weights": weights,
+        "data_quality": mx_data_quality,
+        "data_missing_fields": mx_missing,
     }
 
 

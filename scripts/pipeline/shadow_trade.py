@@ -779,14 +779,26 @@ def _build_shadow_position_view(raw_position: dict, risk_cfg: dict,
                                 trade_context_map: dict | None = None,
                                 history_cache: dict | None = None,
                                 today: date | None = None) -> dict:
-    code = str(raw_position.get("stockCode", raw_position.get("secuCode", raw_position.get("code", "")))).strip()
-    name = str(raw_position.get("stockName", raw_position.get("secuName", raw_position.get("name", "")))).strip()
-    shares = _safe_int(raw_position.get("totalQty", raw_position.get("currentQty", raw_position.get("shares", 0))))
-    cost = _safe_float(raw_position.get("costPrice", raw_position.get("avgCost", raw_position.get("cost", 0))))
-    price = _safe_float(raw_position.get("lastPrice", raw_position.get("currentPrice", raw_position.get("price", 0))))
-    market_value = _safe_float(raw_position.get("marketValue", shares * price))
-    pnl = _safe_float(raw_position.get("profit", raw_position.get("floatProfit", (price - cost) * shares)))
-    pnl_pct = (price / cost - 1) * 100 if cost > 0 else 0.0
+    # MX API 用分单位（costPrice=19340→¥19.34，price=1930→¥19.30）
+    _price_dec = int(raw_position.get("priceDec", 2))
+    _cost_dec  = int(raw_position.get("costPriceDec", 3))
+    _price_raw  = float(raw_position.get("price", 0))
+    _cost_raw   = float(raw_position.get("costPrice", 0))
+    price = _price_raw  / (10 ** _price_dec) if _price_dec > 0 else _price_raw
+    cost  = _cost_raw   / (10 ** _cost_dec)  if _cost_dec  > 0 else _cost_raw
+
+    code   = str(raw_position.get("secCode", raw_position.get("stockCode",
+               raw_position.get("secuCode", raw_position.get("code", ""))))).strip()
+    name   = str(raw_position.get("secName", raw_position.get("stockName",
+               raw_position.get("secuName", raw_position.get("name", ""))))).strip()
+    shares = _safe_int(raw_position.get("count",
+               raw_position.get("totalQty", raw_position.get("currentQty",
+               raw_position.get("shares", 0)))))
+    market_value = _safe_float(raw_position.get("value", 0)) if raw_position.get("value") else shares * price
+    pnl     = _safe_float(raw_position.get("dayProfit", raw_position.get("profit",
+                   raw_position.get("floatProfit", (price - cost) * shares))))
+    pnl_pct = float(raw_position.get("dayProfitPct", raw_position.get("profitPct",
+                   (price / cost - 1) if cost > 0 else 0.0)))  # MX dayProfitPct 已是百分比值，无需再×100
 
     trade_context = (trade_context_map or {}).get(code, {})
     open_date = _parse_date(trade_context.get("open_date"))

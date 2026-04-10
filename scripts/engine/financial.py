@@ -86,6 +86,117 @@ def _sina_financial(code: str) -> dict:
     return result
 
 
+# ── 东财指标接口（报表接口挂时的 fallback）──────────────────────────────
+
+def _fill_from_indicator(code: str, result: dict, missing_fields: list) -> None:
+    """
+    用东财 stock_financial_analysis_indicator 补充缺失字段。
+    这个接口和报表接口是不同的后端，报表挂了这个可能还活着。
+    """
+    try:
+        df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2024")
+        if df is None or df.empty:
+            return
+    except Exception:
+        return
+
+    if "revenue" in missing_fields and "revenue_growth" not in result:
+        rev_col = next((c for c in df.columns if "主营业务收入增长率" in c), None)
+        if rev_col:
+            vals = df[rev_col].dropna().head(4).tolist()
+            if vals:
+                result["revenue_growth"] = round(float(vals[0]), 2)
+                result["source_chain"].append("eastmoney_indicator_revenue")
+                missing_fields[:] = [f for f in missing_fields if f != "revenue"]
+                _logger.info(f"[get_financial] 东财指标补充营收增长: {result['revenue_growth']}%")
+
+    if "cash_flow" in missing_fields and "operating_cash_flow" not in result:
+        cf_col = next((c for c in df.columns if "每股经营性现金流" in c), None)
+        if cf_col:
+            vals = df[cf_col].dropna().head(4).tolist()
+            if vals:
+                cf_per_share = float(vals[0])
+                result["cash_flow_per_share"] = cf_per_share
+                result["cash_flow_positive"] = cf_per_share > 0
+                result["source_chain"].append("eastmoney_indicator_cashflow")
+                missing_fields[:] = [f for f in missing_fields if f != "cash_flow"]
+                _logger.info(f"[get_financial] 东财指标补充现金流: {cf_per_share} 元/股")
+
+    if "roe" in missing_fields and "roe" not in result:
+        roe_col = next((c for c in df.columns if "净资产收益率" in c and "加权" not in c), None)
+        if roe_col:
+            vals = df[roe_col].dropna().head(4).tolist()
+            if vals:
+                result["roe"] = round(float(vals[0]), 2)
+                result["roe_recent"] = [round(float(v), 2) for v in vals]
+                result["source_chain"].append("eastmoney_indicator_roe")
+                missing_fields[:] = [f for f in missing_fields if f != "roe"]
+
+
+# ── 腾讯实时行情（行情数据 fallback）──────────────────────────────────────
+
+def _tencent_realtime(code: str) -> dict | None:
+    """
+    通过腾讯 web.sqt.gtimg.cn 获取实时行情。
+    返回 {price, change_pct, name, pe, pb, turnover_rate, total_mv, circ_mv}
+    """
+    import urllib.request
+    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    url = f"https://web.sqt.gtimg.cn/q={prefix}{code}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            content = resp.read().decode("gbk", errors="ignore")
+        parts = content.split("~")
+        if len(parts) < 50:
+            return None
+        price = float(parts[3]) if parts[3] else 0
+        if price <= 0:
+            return None
+        return {
+            "name": parts[1],
+            "price": price,
+            "change_pct": float(parts[32]) if parts[32] else 0,
+            "open": float(parts[5]) if parts[5] else 0,
+            "high": float(parts[33]) if parts[33] else 0,
+            "low": float(parts[34]) if parts[34] else 0,
+            "prev_close": float(parts[4]) if parts[4] else 0,
+            "volume": int(float(parts[36]) * 100) if parts[36] else 0,
+            "amount": float(parts[37]) * 10000 if parts[37] else 0,
+            "turnover_rate": float(parts[38]) if parts[38] else 0,
+            "pe": float(parts[39]) if parts[39] else 0,
+            "total_mv": float(parts[45]) * 1e8 if parts[45] else 0,
+            "circ_mv": float(parts[44]) * 1e8 if parts[44] else 0,
+            "pb": float(parts[46]) if len(parts) > 46 and parts[46] else 0,
+            "source": "tencent_realtime",
+        }
+    except Exception as e:
+        _logger.info(f"[tencent] {code} 实时行情失败: {e}")
+        return None
+
+
+# ── 腾讯日线历史（日线数据 fallback）──────────────────────────────────────
+
+def _tencent_hist(code: str, days: int = 60) -> "pd.DataFrame | None":
+    """
+    通过 akshare stock_zh_a_hist_tx 获取腾讯日线数据。
+    返回 DataFrame(date, open, close, high, low, amount) 或 None。
+    """
+    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    symbol = f"{prefix}{code}"
+    try:
+        from datetime import timedelta
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start, end_date=end)
+        if df is not None and not df.empty:
+            return df.tail(days)
+        return None
+    except Exception as e:
+        _logger.info(f"[tencent] {code} 日线历史失败: {e}")
+        return None
+
+
 # ── 主接口 ─────────────────────────────────────────────────────────────────
 
 def _try_mx_financial(code: str, name: str) -> dict:
@@ -230,7 +341,7 @@ def get_financial(code: str) -> dict:
                 _logger.warning(f"[get_financial] ROE获取失败 code={code}: {e}")
                 missing_fields.append("roe")
 
-    # ── 营收增长（东财，重试失败则记为缺失）─────────────────────────────────
+    # ── 营收增长（东财报表，重试失败则记为缺失）─────────────────────────────
     if "revenue_growth" not in result:
       for attempt in range(3):
         try:
@@ -260,7 +371,7 @@ def get_financial(code: str) -> dict:
     if "revenue_growth" not in result:
         missing_fields.append("revenue")
 
-    # ── 现金流（东财，重试失败则记为缺失）─────────────────────────────────
+    # ── 现金流（东财报表，重试失败则记为缺失）─────────────────────────────
     if "operating_cash_flow" not in result:
       for attempt in range(3):
         try:
@@ -282,7 +393,14 @@ def get_financial(code: str) -> dict:
     if "operating_cash_flow" not in result:
         missing_fields.append("cash_flow")
 
-    # ── 新浪 fallback：补充东财缺失的字段 ────────────────────────────────
+    # ── 东财指标接口 fallback（报表接口挂时用指标接口补）──────────────────
+    if missing_fields:
+        try:
+            _fill_from_indicator(code, result, missing_fields)
+        except Exception as e:
+            _logger.info(f"[get_financial] 东财指标接口 fallback 失败 code={code}: {e}")
+
+    # ── 新浪 fallback：补充仍然缺失的字段 ────────────────────────────────
     if missing_fields:
         _logger.warning(f"[get_financial] 东财缺失字段 {missing_fields}，尝试新浪 fallback code={code}")
         try:

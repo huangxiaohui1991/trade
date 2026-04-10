@@ -82,6 +82,7 @@ PIPELINES = {
     "screener": lambda args: run_screener(pool=args.pool, universe=args.universe),
     "sentiment": lambda args: _run_sentiment(args),
     "hk_monitor": lambda args: _run_hk_monitor(args),
+    "monthly": lambda args: _run_monthly(args),
 }
 
 
@@ -93,6 +94,11 @@ def _run_sentiment(args):
 def _run_hk_monitor(args):
     from scripts.pipeline.hk_monitor import run as run_hk_monitor
     return run_hk_monitor(dry_run=getattr(args, "dry_run", False))
+
+
+def _run_monthly(args):
+    from scripts.pipeline.monthly_review import run as run_monthly
+    return run_monthly(month=getattr(args, "month", None))
 
 PIPELINE_ALIASES = {
     "stock_screener": "screener",
@@ -1742,6 +1748,8 @@ def main():
     sentiment_parser.add_argument("--dry-run", action="store_true", help="Scan only, no Discord push")
     hk_parser = run_sub.add_parser("hk_monitor")
     hk_parser.add_argument("--dry-run", action="store_true", help="Check only, no Discord push")
+    monthly_parser = run_sub.add_parser("monthly")
+    monthly_parser.add_argument("--month", default=None, help="Month in YYYY-MM format (default: current month)")
 
     status_parser = sub.add_parser("status", help="Show current status")
     status_parser.add_argument("target", choices=["today"])

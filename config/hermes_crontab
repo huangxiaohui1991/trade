@@ -41,3 +41,6 @@ PYTHON_HOME="/Users/hxh/.venv/akshare"
 
 # 周报 — 周日 20:00
 0 20 * * 0 /bin/bash $HERMES_SCRIPT weekly >> $LOG_DIR/cron_weekly.log 2>&1
+
+# 月度复盘 — 每月最后一个工作日 20:30（简化：每月28日）
+30 20 28 * * /bin/bash $HERMES_SCRIPT monthly >> $LOG_DIR/cron_monthly.log 2>&1
