@@ -300,10 +300,7 @@ def _pnl_sign(v: float) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_morning_embeds(data: dict) -> list[dict]:
-    """
-    盘前摘要 → 多卡片 embed。
-    卡片：大盘信号 → 持仓 → 核心池 → 交易计划
-    """
+    """盘前摘要 → 单张卡片 embed。"""
     date_str = data.get("date", datetime.now().strftime("%Y-%m-%d"))
     weekday = data.get("weekday", "")
     if weekday:
@@ -311,72 +308,51 @@ def _build_morning_embeds(data: dict) -> list[dict]:
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
 
-    embeds: list[dict] = []
+    market_signal = data.get("market_signal", "")
+    signal_tag = _signal_emoji_cn(market_signal) if market_signal else "—"
 
-    # ── 大盘信号卡片 ──────────────────────────────────────────────
-    market_fields = []
+    fields: list[dict] = []
+
+    # ── 大盘指数 ──────────────────────────────────────────────────
     for name, info in data.get("market", {}).items():
         price  = info.get("price", 0)
         chg    = info.get("chg_pct", 0)
         ma20   = info.get("ma20_pct", 0)
         ma60   = info.get("ma60_pct", 0)
         sig    = info.get("signal", "")
-        sig_tag = _signal_emoji_cn(sig) if sig else ""
-
+        sig_tag_item = _signal_emoji_cn(sig) if sig else ""
         field_lines = [
             f"`{price:.2f}` ({_fmt_pct(chg)})",
             f"MA20 {_fmt_pct(ma20)} {'▲' if ma20 >= 0 else '▼'}",
             f"MA60 {_fmt_pct(ma60)} {'▲' if ma60 >= 0 else '▼'}",
         ]
-        market_fields.append({
-            "name": f"{sig_tag} {name}" if sig_tag else name,
+        fields.append({
+            "name": f"{sig_tag_item} {name}" if sig_tag_item else name,
             "value": "\n".join(field_lines),
             "inline": True,
         })
 
-    market_signal = data.get("market_signal", "")
-    signal_tag = _signal_emoji_cn(market_signal) if market_signal else "—"
-
-    embeds.append(_build_embed(
-        title=f"📊 盘前摘要 — {date_str}",
-        description=f"综合信号 **{signal_tag}**",
-        color=DISCORD_COLORS["morning"],
-        fields=market_fields,
-        footer=_footer("Hermes · morning_brief", ts),
-        author_name="Hermes 交易系统",
-        timestamp=iso_ts,
-    ))
-
-    # ── 持仓卡片 ──────────────────────────────────────────────────
+    # ── 持仓 ──────────────────────────────────────────────────────
+    fields.append({"name": "\u200b", "value": "**💼 持仓**", "inline": False})
     positions = data.get("positions", [])
     if positions:
-        pos_lines = []
         for pos in positions:
             name  = pos.get("name", "")
             shares = pos.get("shares", 0)
             price = pos.get("price", 0)
             currency = pos.get("currency", "¥")
             note = pos.get("note", "")
-            line = f"**{name}** · {shares} 股 @ `{currency}{price:.2f}`"
+            val = f"{shares} 股 @ `{currency}{price:.2f}`"
             if note:
-                line += f" · _{note}_"
-            pos_lines.append(line)
-        embeds.append(_build_embed(
-            title=f"💼 当前持仓（{len(positions)} 只）",
-            description="\n".join(pos_lines),
-            color=DISCORD_COLORS["morning"],
-        ))
+                val += f"\n_{note}_"
+            fields.append({"name": name, "value": val, "inline": True})
     else:
-        embeds.append(_build_embed(
-            title="💼 当前持仓",
-            description="空仓",
-            color=DISCORD_COLORS["morning"],
-        ))
+        fields.append({"name": "空仓", "value": "\u200b", "inline": True})
 
-    # ── 核心池卡片 ────────────────────────────────────────────────
+    # ── 核心池 ────────────────────────────────────────────────────
     core = data.get("core_pool", [])
     if core:
-        core_fields = []
+        fields.append({"name": "\u200b", "value": "**🎯 核心池**", "inline": False})
         for stock in core:
             name  = stock.get("name", "")
             score = stock.get("score", 0)
@@ -385,27 +361,28 @@ def _build_morning_embeds(data: dict) -> list[dict]:
             val = f"{emoji} **{score:.1f}**"
             if note:
                 val += f"\n_{note}_"
-            core_fields.append({"name": name, "value": val, "inline": True})
-        embeds.append(_build_embed(
-            title=f"🎯 核心池（{len(core)} 只）",
-            color=DISCORD_COLORS["morning"],
-            fields=core_fields,
-        ))
+            fields.append({"name": name, "value": val, "inline": True})
 
-    # ── 交易计划卡片 ──────────────────────────────────────────────
+    # ── 交易计划 ──────────────────────────────────────────────────
     wb  = data.get("weekly_bought", 0)
     wl  = data.get("weekly_limit", 2)
     rem = wl - wb
-    plan_ok = rem > 0
-    status = "✅ 可买入" if plan_ok else "⚠️ 额度用完"
-    embeds.append(_build_embed(
-        title="📋 今日交易计划",
-        description=f"本周已买 **{wb}/{wl}** · 剩余 **{rem}** 次 · {status}",
-        color=DISCORD_COLORS["morning"],
-        footer=_footer("Hermes · morning_brief", ts),
-    ))
+    status = "✅ 可买入" if rem > 0 else "⚠️ 额度用完"
+    fields.append({
+        "name": "📋 交易计划",
+        "value": f"本周已买 **{wb}/{wl}** · 剩余 **{rem}** 次 · {status}",
+        "inline": False,
+    })
 
-    return embeds
+    return [_build_embed(
+        title=f"📊 盘前摘要 — {date_str}",
+        description=f"综合信号 **{signal_tag}**",
+        color=DISCORD_COLORS["morning"],
+        fields=fields,
+        footer=_footer("Hermes · morning_brief", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +390,7 @@ def _build_morning_embeds(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _build_noon_embeds(data: dict) -> list[dict]:
+    """午休检查 → 单张卡片 embed。"""
     date_str = data.get("date", datetime.now().strftime("%Y-%m-%d"))
     weekday  = data.get("weekday", "")
     if weekday:
@@ -420,10 +398,9 @@ def _build_noon_embeds(data: dict) -> list[dict]:
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
 
-    embeds: list[dict] = []
+    fields: list[dict] = []
 
     # ── 大盘 ──────────────────────────────────────────────────────
-    market_fields = []
     for name, info in data.get("market", {}).items():
         price = info.get("price", 0)
         chg   = info.get("chg_pct", 0)
@@ -432,25 +409,12 @@ def _build_noon_embeds(data: dict) -> list[dict]:
         lines = [f"`{price:.2f}` ({_fmt_pct(chg)})"]
         if high and low:
             lines.append(f"振幅 `{low:.2f}` ~ `{high:.2f}`")
-        market_fields.append({
-            "name": name,
-            "value": "\n".join(lines),
-            "inline": True,
-        })
-
-    embeds.append(_build_embed(
-        title=f"☀️ 午休检查 — {date_str}",
-        color=DISCORD_COLORS["noon"],
-        fields=market_fields,
-        footer=_footer("Hermes · noon_check", ts),
-        author_name="Hermes 交易系统",
-        timestamp=iso_ts,
-    ))
+        fields.append({"name": name, "value": "\n".join(lines), "inline": True})
 
     # ── 持仓 ──────────────────────────────────────────────────────
     positions = data.get("positions", [])
     if positions:
-        pos_fields = []
+        fields.append({"name": "\u200b", "value": "**💼 持仓**", "inline": False})
         for pos in positions:
             name   = pos.get("name", "")
             shares = pos.get("shares", 0)
@@ -460,7 +424,7 @@ def _build_noon_embeds(data: dict) -> list[dict]:
             cur    = pos.get("currency", "¥")
             emoji  = _pnl_emoji(pnl)
             sign   = _pnl_sign(pnl)
-            pos_fields.append({
+            fields.append({
                 "name": f"{emoji} {name}",
                 "value": (
                     f"`{shares}` 股 · 成本 `{cur}{cost:.2f}`\n"
@@ -468,29 +432,22 @@ def _build_noon_embeds(data: dict) -> list[dict]:
                 ),
                 "inline": True,
             })
-        embeds.append(_build_embed(
-            title=f"💼 持仓状态（{len(positions)} 只）",
-            color=DISCORD_COLORS["noon"],
-            fields=pos_fields,
-        ))
     else:
-        embeds.append(_build_embed(
-            title="💼 持仓状态",
-            description="空仓",
-            color=DISCORD_COLORS["noon"],
-        ))
+        fields.append({"name": "💼 持仓", "value": "空仓", "inline": False})
 
     # ── 提示 ──────────────────────────────────────────────────────
     tips = data.get("tips", [])
     tips_value = "\n".join(f"• {t}" for t in tips) if tips else "无特殊提示"
-    embeds.append(_build_embed(
-        title="📋 午休提示",
-        description=tips_value,
-        color=DISCORD_COLORS["noon"],
-        footer=_footer("Hermes · noon_check", ts),
-    ))
+    fields.append({"name": "📋 提示", "value": tips_value, "inline": False})
 
-    return embeds
+    return [_build_embed(
+        title=f"☀️ 午休检查 — {date_str}",
+        color=DISCORD_COLORS["noon"],
+        fields=fields,
+        footer=_footer("Hermes · noon_check", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +455,7 @@ def _build_noon_embeds(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _build_evening_embeds(data: dict) -> list[dict]:
+    """收盘报告 → 单张卡片 embed。"""
     date_str = data.get("date", datetime.now().strftime("%Y-%m-%d"))
     weekday  = data.get("weekday", "")
     if weekday:
@@ -505,28 +463,19 @@ def _build_evening_embeds(data: dict) -> list[dict]:
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
 
-    embeds: list[dict] = []
+    fields: list[dict] = []
 
     # ── 大盘 ──────────────────────────────────────────────────────
-    market_fields = []
     for name, info in data.get("market", {}).items():
         price = info.get("price", 0)
         chg   = info.get("chg_pct", 0)
         sig   = info.get("signal", "")
         sig_tag = _signal_emoji_cn(sig) if sig else ""
-        market_fields.append({
+        fields.append({
             "name": name,
             "value": f"`{price:.2f}` ({_fmt_pct(chg)})" + (f"\n{sig_tag}" if sig_tag else ""),
             "inline": True,
         })
-    embeds.append(_build_embed(
-        title=f"📈 收盘报告 — {date_str}",
-        color=DISCORD_COLORS["evening"],
-        fields=market_fields,
-        footer=_footer("Hermes · close_review", ts),
-        author_name="Hermes 交易系统",
-        timestamp=iso_ts,
-    ))
 
     # ── 持仓 ──────────────────────────────────────────────────────
     positions = data.get("positions", [])
@@ -534,72 +483,55 @@ def _build_evening_embeds(data: dict) -> list[dict]:
     cur = data.get("currency", "¥")
 
     if positions:
-        pos_fields = []
+        total_line = f"账户总值 **{cur}{total_value:,.0f}**" if total_value else ""
+        fields.append({"name": "\u200b", "value": f"**💼 持仓**" + (f" · {total_line}" if total_line else ""), "inline": False})
         for pos in positions:
-            name   = pos.get("name", "")
+            pname  = pos.get("name", "")
             shares = pos.get("shares", 0)
             value  = pos.get("value", 0)
             p_cur  = pos.get("currency", "¥")
             status = pos.get("status", "持有中")
-            pos_fields.append({
-                "name": name,
+            fields.append({
+                "name": pname,
                 "value": f"`{shares}` 股 · **{p_cur}{value:,.0f}**\n{status}",
                 "inline": True,
             })
-        desc = f"账户总值 **{cur}{total_value:,.0f}**" if total_value else ""
-        embeds.append(_build_embed(
-            title=f"💼 持仓（{len(positions)} 只）",
-            description=desc,
-            color=DISCORD_COLORS["evening"],
-            fields=pos_fields,
-        ))
     elif total_value:
-        embeds.append(_build_embed(
-            title="💼 持仓",
-            description=f"A股空仓 · 账户总值 **{cur}{total_value:,.0f}**",
-            color=DISCORD_COLORS["evening"],
-        ))
+        fields.append({"name": "💼 持仓", "value": f"A股空仓 · 账户总值 **{cur}{total_value:,.0f}**", "inline": False})
 
     # ── 触发事项 ──────────────────────────────────────────────────
     alerts = data.get("alerts", [])
     if alerts:
         alerts_value = "\n".join(f"• {a}" for a in alerts)
-        embeds.append(_build_embed(
-            title=f"⚠️ 触发事项（{len(alerts)} 项）",
-            description=alerts_value,
-            color=DISCORD_COLORS["evening"],
-        ))
+        fields.append({"name": f"⚠️ 触发事项（{len(alerts)} 项）", "value": alerts_value, "inline": False})
 
     # ── 核心池 ────────────────────────────────────────────────────
     core = data.get("core_pool", [])
     if core:
-        core_fields = []
+        fields.append({"name": "\u200b", "value": "**🎯 核心池评分**", "inline": False})
         for stock in core:
-            name  = stock.get("name", "")
+            sname = stock.get("name", "")
             score = stock.get("score", 0)
             note  = stock.get("note", "")
             emoji = _score_emoji(score)
             val = f"{emoji} **{score:.1f}**"
             if note:
                 val += f"\n_{note}_"
-            core_fields.append({"name": name, "value": val, "inline": True})
-        embeds.append(_build_embed(
-            title=f"🎯 核心池评分（{len(core)} 只）",
-            color=DISCORD_COLORS["evening"],
-            fields=core_fields,
-        ))
+            fields.append({"name": sname, "value": val, "inline": True})
 
     # ── 明日计划 ──────────────────────────────────────────────────
     plan = data.get("tomorrow_plan", [])
     plan_value = "\n".join(f"• {item}" for item in plan) if plan else "暂无计划"
-    embeds.append(_build_embed(
-        title="📋 明日计划",
-        description=plan_value,
-        color=DISCORD_COLORS["evening"],
-        footer=_footer("Hermes · close_review", ts),
-    ))
+    fields.append({"name": "📋 明日计划", "value": plan_value, "inline": False})
 
-    return embeds
+    return [_build_embed(
+        title=f"📈 收盘报告 — {date_str}",
+        color=DISCORD_COLORS["evening"],
+        fields=fields,
+        footer=_footer("Hermes · close_review", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -607,12 +539,13 @@ def _build_evening_embeds(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _build_weekly_embeds(data: dict) -> list[dict]:
+    """周报 → 单张卡片 embed。"""
     week_str = data.get("week", datetime.now().strftime("W%W"))
     year_str = data.get("year", datetime.now().strftime("%Y"))
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
 
-    embeds: list[dict] = []
+    fields: list[dict] = []
 
     # ── 收益总览 ──────────────────────────────────────────────────
     pnl_pct = data.get("pnl_pct", 0)
@@ -622,32 +555,21 @@ def _build_weekly_embeds(data: dict) -> list[dict]:
     sign    = _pnl_sign(pnl_pct)
 
     win_rate = data.get("win_rate", 0)
-    # 兼容 0~1 小数和 0~100 百分比两种传入
     if isinstance(win_rate, (int, float)) and win_rate > 1:
         win_rate_str = f"{win_rate:.0f}%"
     else:
         win_rate_str = f"{win_rate:.0%}"
 
-    pnl_fields = [
-        {"name": "本周收益", "value": f"{emoji} **{sign}{pnl_pct:.2f}%** ({cur}{pnl_abs:+,.0f})", "inline": False},
-        {"name": "胜率", "value": f"`{win_rate_str}`", "inline": True},
-        {"name": "交易", "value": f"`{data.get('trades', 0)} 笔`", "inline": True},
-        {"name": "盈亏比", "value": f"`{data.get('profit_loss_ratio', 0):.2f}`", "inline": True},
-    ]
-    embeds.append(_build_embed(
-        title=f"📋 周报 — {year_str} {week_str}",
-        color=DISCORD_COLORS["weekly"],
-        fields=pnl_fields,
-        footer=_footer("Hermes · weekly_review", ts),
-        author_name="Hermes 交易系统",
-        timestamp=iso_ts,
-    ))
+    fields.append({"name": "本周收益", "value": f"{emoji} **{sign}{pnl_pct:.2f}%** ({cur}{pnl_abs:+,.0f})", "inline": False})
+    fields.append({"name": "胜率", "value": f"`{win_rate_str}`", "inline": True})
+    fields.append({"name": "交易", "value": f"`{data.get('trades', 0)} 笔`", "inline": True})
+    fields.append({"name": "盈亏比", "value": f"`{data.get('profit_loss_ratio', 0):.2f}`", "inline": True})
 
     # ── 持仓变化 ──────────────────────────────────────────────────
     changes = data.get("position_changes", [])
     if changes:
-        change_lines = []
         emap = {"buy": "▲ 买入", "sell": "▼ 卖出", "hold": "— 持有"}
+        change_lines = []
         for entry in changes:
             action = entry.get("action", "hold")
             name   = entry.get("name", "")
@@ -656,16 +578,12 @@ def _build_weekly_embeds(data: dict) -> list[dict]:
             c      = entry.get("currency", "¥")
             tag    = emap.get(action, action)
             change_lines.append(f"{tag} **{name}** · `{shares}` 股 @ `{c}{price:.2f}`")
-        embeds.append(_build_embed(
-            title=f"💼 持仓变化（{len(changes)} 笔）",
-            description="\n".join(change_lines),
-            color=DISCORD_COLORS["weekly"],
-        ))
+        fields.append({"name": f"💼 持仓变化（{len(changes)} 笔）", "value": "\n".join(change_lines), "inline": False})
 
     # ── 核心池异动 ────────────────────────────────────────────────
     core_changes = data.get("core_pool_changes", [])
     if core_changes:
-        cc_fields = []
+        fields.append({"name": "\u200b", "value": "**🎯 核心池异动**", "inline": False})
         for stock in core_changes:
             name      = stock.get("name", "")
             old_score = stock.get("old_score", 0)
@@ -677,24 +595,21 @@ def _build_weekly_embeds(data: dict) -> list[dict]:
             val = f"{chg_mark} `{old_score:.1f}` → `{new_score:.1f}` ({sign_chg})"
             if reason:
                 val += f"\n_{reason}_"
-            cc_fields.append({"name": name, "value": val, "inline": True})
-        embeds.append(_build_embed(
-            title=f"🎯 核心池异动（{len(core_changes)} 只）",
-            color=DISCORD_COLORS["weekly"],
-            fields=cc_fields,
-        ))
+            fields.append({"name": name, "value": val, "inline": True})
 
     # ── 下周计划 ──────────────────────────────────────────────────
     next_plan = data.get("next_week_plan", [])
     plan_value = "\n".join(f"• {item}" for item in next_plan) if next_plan else "暂无计划"
-    embeds.append(_build_embed(
-        title="📋 下周计划",
-        description=plan_value,
-        color=DISCORD_COLORS["weekly"],
-        footer=_footer("Hermes · weekly_review", ts),
-    ))
+    fields.append({"name": "📋 下周计划", "value": plan_value, "inline": False})
 
-    return embeds
+    return [_build_embed(
+        title=f"📋 周报 — {year_str} {week_str}",
+        color=DISCORD_COLORS["weekly"],
+        fields=fields,
+        footer=_footer("Hermes · weekly_review", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +617,7 @@ def _build_weekly_embeds(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _build_sentiment_embeds(data: dict) -> list[dict]:
+    """舆情提醒 → 单张卡片 embed。"""
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
     keywords = data.get("matched_keywords", [])
@@ -716,11 +632,13 @@ def _build_sentiment_embeds(data: dict) -> list[dict]:
 
     title_text = data.get("title", "（无标题）")
     url = data.get("url", "")
+    summary = data.get("summary", "")
 
-    # 用 description 展示标题 + 来源，更紧凑
     desc_lines = [f"**{title_text}**"]
     if url:
         desc_lines.append(f"[查看原文]({url})")
+    if summary:
+        desc_lines.append(f"\n{summary[:3800]}")
 
     fields = [
         {"name": "关键词", "value": f"`{kw_str}`" if kw_str else "—", "inline": True},
@@ -728,7 +646,7 @@ def _build_sentiment_embeds(data: dict) -> list[dict]:
         {"name": "来源", "value": data.get("source", "未知"), "inline": True},
     ]
 
-    embeds = [_build_embed(
+    return [_build_embed(
         title=f"🔔 舆情提醒 — {kw_str}" if kw_str else "🔔 舆情提醒",
         description="\n".join(desc_lines),
         color=sent_color,
@@ -737,16 +655,6 @@ def _build_sentiment_embeds(data: dict) -> list[dict]:
         author_name="Hermes 交易系统",
         timestamp=iso_ts,
     )]
-
-    summary = data.get("summary", "")
-    if summary:
-        embeds.append(_build_embed(
-            title="📝 详情摘要",
-            description=summary[:4096],
-            color=sent_color,
-        ))
-
-    return embeds
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +745,7 @@ def _build_hk_alert_embed(
 # ---------------------------------------------------------------------------
 
 def _build_condition_order_embeds(pending: list) -> list[dict]:
-    """条件单待确认提醒 → embed 卡片。"""
+    """条件单待确认提醒 → 单张卡片 embed。"""
     ts = datetime.now().strftime("%H:%M")
     iso_ts = _now_iso()
 
@@ -851,7 +759,7 @@ def _build_condition_order_embeds(pending: list) -> list[dict]:
             timestamp=iso_ts,
         )]
 
-    order_fields = []
+    fields: list[dict] = []
     for item in pending:
         name       = item.get("name", "")
         order_type = item.get("type", "条件单")
@@ -864,32 +772,27 @@ def _build_condition_order_embeds(pending: list) -> list[dict]:
             tag = "▲ 止盈"
         else:
             tag = order_type
-        order_fields.append({
+        fields.append({
             "name": name,
             "value": f"{tag} @ `{currency}{price:.2f}` · {status}",
             "inline": True,
         })
-    embeds = [_build_embed(
+
+    guide = (
+        '• "止损触发了 {股票名} 成交¥{价格}"\n'
+        '• "止盈触发了 {股票名} 成交¥{价格}"\n'
+        '• "取消止损 {股票名}" / "取消止盈 {股票名}"'
+    )
+    fields.append({"name": "📋 确认方式", "value": guide, "inline": False})
+
+    return [_build_embed(
         title=f"⏰ 条件单提醒（{len(pending)} 笔待确认）",
         color=DISCORD_COLORS["info"],
-        fields=order_fields,
+        fields=fields,
         footer=_footer("Hermes · condition_order", ts),
         author_name="Hermes 交易系统",
         timestamp=iso_ts,
     )]
-
-    # 操作指引卡
-    embeds.append(_build_embed(
-        title="📋 确认方式",
-        description=(
-            '• "止损触发了 {股票名} 成交¥{价格}"\n'
-            '• "止盈触发了 {股票名} 成交¥{价格}"\n'
-            '• "取消止损 {股票名}" / "取消止盈 {股票名}"'
-        ),
-        color=DISCORD_COLORS["info"],
-    ))
-
-    return embeds
 
 
 # ---------------------------------------------------------------------------
