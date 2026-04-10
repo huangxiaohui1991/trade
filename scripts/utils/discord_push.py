@@ -495,8 +495,8 @@ def _build_morning_embeds(data: dict) -> list[dict]:
         sig_tag_item = _signal_emoji_cn(sig) if sig else ""
         field_lines = [
             f"`{price:.2f}` ({_fmt_pct(chg)})",
-            f"MA20 {_fmt_pct(ma20)} {'▲' if ma20 >= 0 else '▼'}",
-            f"MA60 {_fmt_pct(ma60)} {'▲' if ma60 >= 0 else '▼'}",
+            f"MA20 {_fmt_pct(ma20)} {'📈' if ma20 >= 0 else '📉'}",
+            f"MA60 {_fmt_pct(ma60)} {'📈' if ma60 >= 0 else '📉'}",
         ]
         fields.append({
             "name": f"{sig_tag_item} {name}" if sig_tag_item else name,
