@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "docs/ARCHITECTURE.md",
+                "file": "02-日志/2026-04-09.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "ARCHITECTURE"
+              "title": "2026-04-09"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "docs/ARCHITECTURE.md",
+                "file": "00-系统/仪表盘.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "ARCHITECTURE 的反向链接列表"
+              "title": "仪表盘 的反向链接列表"
             }
           },
           {
@@ -164,8 +164,19 @@
               "icon": "lucide-list",
               "title": "ARCHITECTURE 的大纲"
             }
+          },
+          {
+            "id": "4b3b8aaa356dde42",
+            "type": "leaf",
+            "state": {
+              "type": "git-view",
+              "state": {},
+              "icon": "git-pull-request",
+              "title": "Source Control"
+            }
           }
-        ]
+        ],
+        "currentTab": 5
       }
     ],
     "direction": "horizontal",
@@ -180,47 +191,50 @@
       "daily-notes:打开/创建今天的日记": false,
       "templates:插入模板": false,
       "command-palette:打开命令面板": false,
-      "bases:新建数据库": false
+      "bases:新建数据库": false,
+      "obsidian-excalidraw-plugin:New drawing": false,
+      "obsidian-git:Open Git source control": false
     }
   },
   "active": "a6ef650ef52c673f",
   "lastOpenFiles": [
-    "_quick_score.py",
-    "04-选股/筛选结果/筛选结果_核心_20260409_080544.md",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_cd40c3a7_description.txt",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_cd40c3a7.csv",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_375a9413_description.txt",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_375a9413.csv",
-    "04-选股/筛选结果/筛选结果_核心_20260409_074654.md",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_e37419fb_description.txt",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_e37419fb.csv",
-    "04-选股/筛选结果/筛选结果_核心_20260409_074335.md",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_70b21d1b_description.txt",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_70b21d1b.csv",
-    "04-选股/筛选结果/筛选结果_核心_20260409_074100.md",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_5517b72d_description.txt",
-    "miaoxiang/mx_stocks_screener/mx_stocks_screener_5517b72d.csv",
-    "04-选股/筛选结果/筛选结果_核心_20260409_073705.md",
-    "04-选股/筛选结果/筛选结果_核心_20260409_073255.md",
-    "04-选股/筛选结果/筛选结果_核心_20260409_072947.md",
-    "04-选股/筛选结果/筛选结果_核心_20260409_072813.md",
-    "00-系统/使用指南.md",
-    "00-系统/自动化方案.md",
+    "data/mx_output/mx_search_赛力斯.txt",
+    "data/mx_output/mx_search_赛力斯.json",
+    "data/mx_output/mx_search_浪潮信息.txt",
+    "data/mx_output/mx_search_浪潮信息.json",
+    "data/mx_output/mx_search_东方财富_近期新闻.txt",
+    "data/mx_output/mx_search_东方财富_近期新闻.json",
+    "data/mx_output",
+    "scripts/mx/__pycache__/mx_zixuan.cpython-311.pyc",
+    "scripts/mx/__pycache__/mx_xuangu.cpython-311.pyc",
+    "scripts/mx/__pycache__/mx_search.cpython-311.pyc",
+    "scripts/mx/__pycache__/mx_data.cpython-311.pyc",
+    "docs/ROADMAP_P4_EVOLUTION.md",
+    "docs/TASK_TRACKER.md",
+    "04-选股/筛选结果/核心池_评分报告_20260410_154106.md",
+    "02-日志/2026-04-13.md",
+    "03-复盘/模拟盘/模拟盘_20260410.md",
+    "02-日志/2026-04-10.md",
+    "docs/ROADMAP_P1_P3.md",
+    "docs/选股评分逻辑.md",
+    "docs/OPENCLAW_INTEGRATION.md",
+    "docs/HERMES_AGENT_PROMPT.md",
+    "docs/AGENT_PLAYBOOK.md",
+    "03-复盘/模拟盘/模拟盘_20260409.md",
+    "03-复盘/模拟盘/交易记录.md",
+    "03-复盘/周/2026-W15.md",
+    "00-系统/交易系统v1.4.md",
+    "00-系统/SKILL.md",
+    "data/每日快照/2026-04-09.md",
     "00-系统/仪表盘.md",
-    "00-系统/模板/周复盘模板.md",
-    "00-系统/模板/选股打分模板.md",
-    "00-系统/模板/每日日志模板.md",
-    "03-复盘/月/2026-04.md",
-    "03-复盘/周/2026-W14.md",
-    "02-日志/2026-04-09.md",
-    "02-日志/2026-04-08.md",
-    "02-日志/2026-04-07.md",
-    "02-日志/2026-04-03.md",
-    "02-日志/2026-04-02.md",
-    "01-持仓/portfolio.md",
-    "data/03-复盘/月/2026-04.md",
-    "data/03-复盘/周/2026-W14.md",
-    "data/00-系统/模板/选股打分模板.md",
+    "04-选股/观察池.md",
+    "docs/ARCHITECTURE.md",
+    "04-选股/筛选结果/池子调整建议_20260409_185243.md",
+    "04-选股/筛选结果/筛选结果_核心_20260409_185243.md",
+    "docs/trading-system-logo.png",
+    "04-选股/筛选结果/市场扫描候选_20260409_130355.md",
+    "04-选股/筛选结果/筛选结果_市场扫描_20260409_130355.md",
+    "04-选股/筛选结果/市场扫描候选_20260409_125945.md",
     "data/00-系统/每日流程图.svg"
   ]
 }

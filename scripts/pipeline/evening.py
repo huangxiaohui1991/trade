@@ -3,12 +3,13 @@
 pipeline/evening.py — 收盘流程（15:35 执行）
 
 职责：
-  1. 更新持仓最新价格（写 portfolio.md）
-  2. 重算止损/止盈价（写 portfolio.md）
-  3. 检查是否触发止损/止盈
-  4. 跑 core_pool_scoring.py（批量评分 → 写 Obsidian）
-  5. 生成明日计划（写明天的日志 MD）
-  6. 格式化收盘摘要 → Discord 推送
+  6  1. 更新持仓最新价格（写 portfolio.md）
+  7  2. 重算止损/止盈价（写 portfolio.md）
+  8  3. 检查是否触发止损/止盈
+  9  4. 跑 core_pool_scoring.py（批量评分 → 写 Obsidian）
+ 10  5. 生成明日计划（写明天的日志 MD）
+ 11  6. 格式化收盘摘要 → Discord 推送
+ 12  7. 收盘 Enrichment → 追加到今日日志（持仓逻辑、明日关注点、教训洞察）
 
 用法（CLI）：
   python -m scripts.pipeline.evening
@@ -149,6 +150,7 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
             "shares": shares,
             "old_price": old_price,
             "new_price": new_price,
+            "cost_price": cost,
             "chg_pct": chg_pct,
             "new_value": new_value,
             "stop_loss": stops["stop_loss"],
@@ -192,7 +194,116 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
     vault.sync_portfolio_state()
     return changes
 
+# ─────────────────────────────────────────────────────────────────────────────
+def _enrich_today_journal(vault: ObsidianVault, today_str: str,
+                           market_data: dict, position_changes: list,
+                           shadow_results: list) -> None:
+    """收盘后追加 enrichment 内容到今日日志"""
+    vault_path = Path(vault.vault_path)
 
+    # 构造路径：vault/交易日志/YYYY-MM-DD.md
+    journal_path = vault_path / "交易日志" / f"{today_str}.md"
+    if not journal_path.exists():
+        _logger.warning(f"  今日日志不存在，跳过 enrichment: {journal_path.name}")
+        return
+
+    # ── A. 持仓逻辑复盘 ─────────────────────────────────────────────────────
+    position_lines = []
+    for chg in position_changes:
+        name = chg.get("name", "")
+        shares = chg.get("shares", 0)
+        new_price = chg.get("new_price", 0)
+        cost = chg.get("cost_price", 0)
+        pnl_pct = ((new_price - cost) / cost * 100) if cost > 0 else 0
+        triggered = chg.get("triggered", [])
+        position_lines.append(
+            f"- **{name}** {shares}股 @{new_price:.2f}（成本{cost:.2f}, {pnl_pct:+.2f}%）"
+            + (f" → 触发: {'/'.join(triggered)}" if triggered else "")
+        )
+
+    # ── B. 影子交易摘要 ─────────────────────────────────────────────────────
+    shadow_lines = []
+    for r in shadow_results:
+        line = f"- **{r['name']}**({r['code']}): {r['action']} — {r.get('reason', '')}"
+        if r.get("advisory_signals") and r.get("action") == "持有":
+            line += f" | 提示: {r.get('advisory_summary', '')}"
+        shadow_lines.append(line)
+
+    # ── C. 大盘信号 ──────────────────────────────────────────────────────────
+    market_indices = market_data.get("indices") or market_data.get("market") or {}
+    market_lines = []
+    for name, info in market_indices.items():
+        if not isinstance(info, dict) or info.get("error"):
+            continue
+        close = info.get("close", info.get("price", 0))
+        chg = info.get("change_pct", info.get("chg_pct", 0))
+        sig = info.get("signal", "")
+        market_lines.append(f"- {name}: {close:.2f} ({chg:+.2f}%) [{sig}]")
+
+    signal = market_data.get("signal", market_data.get("market_signal", "CLEAR"))
+    signal_map = {"GREEN": "🟢 偏强", "YELLOW": "🟡 震荡", "RED": "🔴 转弱", "CLEAR": "⚪ 观望"}
+    signal_text = signal_map.get(signal, signal)
+
+    # ── D. 组装 enrichment block ─────────────────────────────────────────────
+    enrichment = f"""
+---
+
+## 🧠 收盘 Enrichment（系统自动追加）
+
+### 大盘收盘
+{signal_text}
+
+""" + "\n".join(market_lines) + """
+
+### 持仓状态
+"""
+    if position_lines:
+        enrichment += "\n".join(position_lines) + "\n"
+    else:
+        enrichment += "（今日无持仓变化）\n"
+
+    enrichment += """
+### 影子池表现
+"""
+    if shadow_lines:
+        enrichment += "\n".join(shadow_lines) + "\n"
+    else:
+        enrichment += "（今日无影子交易信号）\n"
+
+    enrichment += """
+### 今日教训/洞察
+
+> 记录今日执行中的问题或发现（例如：追高了、止损执行慢了、条件单价格有误）
+
+- [ ]
+
+---
+"""
+
+    # ── E. 追加写入（插在 `---` 之前，不要重复追加）────────────────────────
+    with open(journal_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    marker = "## 🧠 收盘 Enrichment（系统自动追加）"
+    if marker in content:
+        # 已追加过，更新整个 block
+        import re
+        pattern = re.escape(marker) + r".*?(?=\n---\n|$)"
+        content = re.sub(pattern, enrichment.strip(), content, flags=re.DOTALL)
+        _logger.info(f"  已更新 enrichment: {journal_path.name}")
+    else:
+        # 插在文件末尾（最后一个 --- 之后）
+        if content.rstrip().endswith("---"):
+            content = content.rstrip() + "\n" + enrichment.lstrip()
+        else:
+            content += "\n" + enrichment
+        _logger.info(f"  已追加 enrichment: {journal_path.name}")
+
+    with open(journal_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
                              market_data: dict, position_changes: list) -> str:
     """生成明日计划 markdown 内容"""
@@ -597,6 +708,9 @@ def run() -> dict:
                 _logger.warning(f">> 模拟盘报告生成失败: {re}")
         except Exception as e:
             _logger.warning(f">> 影子交易检查失败: {e}")
+
+        # ── 7. 收盘 Enrichment → 追加到今日日志 ──────────────────────────────
+        _enrich_today_journal(vault, today_str, market_data, position_changes, shadow_results)
 
         update_pipeline_state(
             "evening",
