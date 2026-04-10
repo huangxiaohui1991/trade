@@ -40,31 +40,75 @@ WARNING_ONLY_SIGNALS = {"consecutive_outflow_warn"}
 
 def _score_technical(code: str, tech_data: dict) -> dict:
     """
-    技术面评分（满分 2 分）
-    均线(0.5) + 成交量(0.5) + 动量(0.5) + 均线排列(0.5)
+    技术面评分（满分 3 分）— V1.0 策略
+    金叉信号(1) + 量比(0.5) + RSI(0.5) + 均线排列(0.5) + 动量(0.5)
     """
     if "error" in tech_data:
-        return {"score": 0, "detail": f"数据错误: {tech_data['error']}"}
+        return {"score": 0, "detail": f"数据错误: {tech_data['error']}", "entry_signal": False}
+
+    strategy = get_strategy()
+    entry_cfg = strategy.get("entry_signal", {})
+    rsi_max = entry_cfg.get("rsi_max", 70)
+    vol_ratio_min = entry_cfg.get("volume_ratio_min", 1.5)
 
     price = tech_data.get("current_price", 0)
     ma = tech_data.get("ma", {})
+    ma5 = ma.get("MA5", 0)
+    ma10 = ma.get("MA10", 0)
     ma20 = ma.get("MA20", 0)
     ma60 = ma.get("MA60", 0)
-    ma5 = ma.get("MA5", 0)
     above_ma20 = tech_data.get("above_ma20", False)
+    vol_ratio = tech_data.get("volume_ratio", 1.0)
 
-    # 均线得分 (0.5)
-    if above_ma20 and price >= ma60:
-        ma_score = 0.5
-    elif above_ma20:
-        ma_score = 0.3
+    # RSI 计算
+    hist = tech_data.get("hist")
+    rsi = 50.0
+    if hist is not None and len(hist) >= 15:
+        from scripts.engine.stock_classifier import calc_rsi
+        closes = [float(c) for c in hist["收盘"].tolist()]
+        rsi = calc_rsi(closes, entry_cfg.get("rsi_period", 14))
+
+    # ── 金叉信号检测 (1分) ──
+    cross_score = 0
+    has_golden_cross = False
+    if hist is not None and len(hist) >= 2:
+        prev_ma10 = float(hist.iloc[-2]["MA10"]) if "MA10" in hist.columns and not hist.iloc[-2].isna().get("MA10", True) else 0
+        prev_ma20 = float(hist.iloc[-2]["MA20"]) if "MA20" in hist.columns and not hist.iloc[-2].isna().get("MA20", True) else 0
+        if ma10 and ma20 and prev_ma10 and prev_ma20:
+            if prev_ma10 <= prev_ma20 and ma10 > ma20:
+                has_golden_cross = True
+                cross_score = 1.0
+            elif ma10 > ma20:
+                # 已在金叉状态（多头排列），给 0.5
+                cross_score = 0.5
+    elif ma10 and ma20 and ma10 > ma20:
+        cross_score = 0.5
+
+    # ── 量比 (0.5分) ──
+    if vol_ratio >= vol_ratio_min:
+        vol_score = 0.5
+    elif vol_ratio >= 1.0:
+        vol_score = 0.2
     else:
-        ma_score = 0
+        vol_score = 0
 
-    # 成交量得分 (0.5)
-    vol_score = tech_data.get("volume_analysis", {}).get("score", 0)
+    # ── RSI (0.5分) ──
+    if rsi < rsi_max and rsi >= 30:
+        rsi_score = 0.5
+    elif rsi < 30:
+        rsi_score = 0.3  # 超卖区，谨慎
+    else:
+        rsi_score = 0  # RSI >= 70，过热
 
-    # 动量得分 (0.5)
+    # ── 均线排列 (0.5分) ──
+    arr_score = 0
+    if ma5 and ma20 and ma60:
+        if ma5 > ma20 > ma60:
+            arr_score = 0.5
+        elif ma20 > ma60:
+            arr_score = 0.3
+
+    # ── 动量 (0.5分) ──
     momentum = tech_data.get("momentum_5d", 0)
     if momentum >= 5:
         mom_score = 0.5
@@ -75,18 +119,25 @@ def _score_technical(code: str, tech_data: dict) -> dict:
     else:
         mom_score = 0
 
-    # 均线排列 (0.5)
-    arr_score = 0
-    if ma5 and ma20 and ma60:
-        if ma5 > ma20 > ma60:
-            arr_score = 0.5
-        elif ma20 > ma60:
-            arr_score = 0.3
+    total = round(min(cross_score + vol_score + rsi_score + arr_score + mom_score, 3.0), 1)
 
-    total = round(min(ma_score + vol_score + mom_score + arr_score, 2.0), 1)
+    # 入场信号：金叉 + 量比 + RSI 三条件同时满足
+    entry_signal = has_golden_cross and vol_ratio >= vol_ratio_min and rsi < rsi_max
+
+    detail = (
+        f"金叉:{cross_score}/1{'✓' if has_golden_cross else ''} "
+        f"量比:{vol_score}/0.5({vol_ratio:.1f}) "
+        f"RSI:{rsi_score}/0.5({rsi:.0f}) "
+        f"排列:{arr_score}/0.5 动量:{mom_score}/0.5"
+    )
+
     return {
         "score": total,
-        "detail": f"均线:{ma_score}/0.5 量:{vol_score}/0.5 动量:{mom_score}/0.5 排列:{arr_score}/0.5",
+        "detail": detail,
+        "entry_signal": entry_signal,
+        "rsi": round(rsi, 1),
+        "golden_cross": has_golden_cross,
+        "volume_ratio": vol_ratio,
     }
 
 
@@ -287,6 +338,15 @@ def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
         if get_signal() == "RED":
             veto_signals.append("red_market")
 
+    if "ma20_trend_down" in veto_rules:
+        hist = tech_data.get("hist")
+        if hist is not None and len(hist) >= 30:
+            closes = [float(c) for c in hist["收盘"].tolist()]
+            from scripts.engine.stock_classifier import calc_ma20_slope
+            slope = calc_ma20_slope(closes, 10)
+            if slope < -0.002:  # MA20 连续下行
+                veto_signals.append("ma20_trend_down")
+
     return veto_signals
 
 
@@ -411,8 +471,8 @@ def score(code: str, name: Optional[str] = None) -> dict:
 
     # 加权总分（满分 10）
     raw = (
-        tech_s["score"] * weights.get("technical", 2) / 2 +
-        fin_s["score"] * weights.get("fundamental", 3) / 3 +
+        tech_s["score"] * weights.get("technical", 3) / 3 +
+        fin_s["score"] * weights.get("fundamental", 2) / 2 +
         flow_s["score"] * weights.get("flow", 2) / 2 +
         sentiment["score"] * weights.get("sentiment", 3) / 3
     )
@@ -424,6 +484,14 @@ def score(code: str, name: Optional[str] = None) -> dict:
         # consecutive_outflow_warn: 洗盘嫌疑，减 2 分但不归零
         if "consecutive_outflow_warn" in veto_signals:
             total = max(0, round(total - 2.0, 1))
+
+    # 风格判定
+    style_info = {"style": "unknown", "confidence": 0, "metrics": {}, "reason": ""}
+    hist = tech.get("hist")
+    if hist is not None and len(hist) >= 30:
+        from scripts.engine.stock_classifier import classify_style
+        closes = [float(c) for c in hist["收盘"].tolist()]
+        style_info = classify_style(closes, rsi=tech_s.get("rsi"), strategy=strategy)
 
     return {
         "name": name or tech.get("name", code),
@@ -437,6 +505,12 @@ def score(code: str, name: Optional[str] = None) -> dict:
         "fundamental_detail": fin_s["detail"],
         "flow_detail": flow_s["detail"],
         "sentiment_detail": sentiment["detail"],
+        "entry_signal": tech_s.get("entry_signal", False),
+        "golden_cross": tech_s.get("golden_cross", False),
+        "rsi": tech_s.get("rsi", 50),
+        "style": style_info.get("style", "unknown"),
+        "style_confidence": style_info.get("confidence", 0),
+        "style_reason": style_info.get("reason", ""),
         "veto_signals": veto_signals,
         "warning_signals": warning_signals,
         "hard_veto_signals": hard_veto,
@@ -444,7 +518,6 @@ def score(code: str, name: Optional[str] = None) -> dict:
         "weights": weights,
         "data_quality": fin_s.get("data_quality", "ok"),
         "data_missing_fields": fin_s.get("missing_fields", []),
-        # 原始数据
         "_raw": {"technical": tech, "fundamental": fin, "fund_flow": flow},
     }
 

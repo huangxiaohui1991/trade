@@ -160,80 +160,109 @@ def _event_risks_for_today(portfolio_cfg: dict, today: date) -> list[dict]:
 # 止损止盈计算
 # ---------------------------------------------------------------------------
 
-def calc_stop_loss(cost: float, ma20: float = 0) -> dict:
+def calc_stop_loss(cost: float, ma20: float = 0, style: str = "momentum",
+                   entry_day_low: float = 0, ma60: float = 0) -> dict:
     """
-    计算动态止损价
+    计算动态止损价（V1.0 双轨策略）
 
-    规则（从 strategy.yaml 读取）：
-      - 正常：成本价 × (1 - stop_loss_pct)
-      - MA20 支撑：如果 ma20 > 成本×0.96，以 ma20 为动态止损（更宽松）
-      - 绝对止损：成本价 × (1 - absolute_stop_pct)（不可跌破）
+    慢牛：-8% 或跌破 MA60
+    题材：-5% 或跌破买入日最低价
 
     Args:
         cost: 持仓成本
-        ma20: 20日均线（可选）
+        ma20: 20日均线
+        style: "slow_bull" | "momentum"
+        entry_day_low: 买入日最低价（题材股用）
+        ma60: 60日均线（慢牛股用）
 
     Returns:
         {
-            "stop_loss": float,       # 动态止损价
-            "absolute_stop": float,   # 绝对止损价（-7%）
-            "method": str,            # "ma20_anchor" | "cost_based"
+            "stop_loss": float,
+            "absolute_stop": float,
+            "method": str,
+            "style": str,
         }
     """
-    strategy = get_strategy()
-    risk = strategy.get("risk", {})
-    stop_loss_pct = risk.get("stop_loss", 0.04)
-    absolute_stop_pct = risk.get("absolute_stop", 0.07)
+    from scripts.engine.stock_classifier import get_risk_params, STYLE_SLOW_BULL
+    params = get_risk_params(style)
+    stop_loss_pct = params["stop_loss"]
 
-    stop_loss = round(cost * (1 - stop_loss_pct), 2)
-    absolute_stop = round(cost * (1 - absolute_stop_pct), 2)
+    cost_stop = round(cost * (1 - stop_loss_pct), 2)
 
-    # 如果 MA20 在成本的 96% 以上，以 MA20 为动态止损
-    method = "cost_based"
-    if ma20 and ma20 > cost * 0.96:
-        stop_loss = round(min(stop_loss, ma20), 2)
-        method = "ma20_anchor"
+    if style == STYLE_SLOW_BULL:
+        # 慢牛：成本 -8% 或 MA60，取更宽松的（更低的）
+        absolute_stop = round(cost * (1 - stop_loss_pct), 2)
+        if ma60 and ma60 > 0:
+            # MA60 作为绝对止损线
+            absolute_stop = min(absolute_stop, round(ma60 * 0.98, 2))
+        method = "slow_bull_ma60" if ma60 else "slow_bull_cost"
+        return {
+            "stop_loss": cost_stop,
+            "absolute_stop": absolute_stop,
+            "method": method,
+            "style": style,
+        }
+    else:
+        # 题材：成本 -5% 或买入日最低价，取更严格的（更高的）
+        stop_loss = cost_stop
+        if entry_day_low and entry_day_low > 0:
+            stop_loss = max(stop_loss, round(entry_day_low * 0.99, 2))
+        absolute_stop = round(cost * (1 - stop_loss_pct - 0.02), 2)  # 额外 2% 绝对线
+        method = "momentum_entry_low" if entry_day_low else "momentum_cost"
+        return {
+            "stop_loss": stop_loss,
+            "absolute_stop": absolute_stop,
+            "method": method,
+            "style": style,
+        }
 
-    return {
-        "stop_loss": stop_loss,
-        "absolute_stop": absolute_stop,
-        "method": method,
-    }
 
-
-def calc_take_profit(cost: float, first_buy_price: float = 0) -> dict:
+def calc_take_profit(cost: float, first_buy_price: float = 0,
+                     style: str = "momentum", highest_price: float = 0) -> dict:
     """
-    计算止盈目标价（从 strategy.yaml 读取参数）
+    计算止盈规则（V1.0 双轨策略）
+
+    慢牛：不主动止盈，跌破 MA20 离场
+    题材：移动止盈（最高点回撤 -8%）或 MA5 死叉 MA10
 
     Args:
         cost: 平均成本
-        first_buy_price: 首次买入价（用于计算真实盈亏）
+        first_buy_price: 首次买入价
+        style: "slow_bull" | "momentum"
+        highest_price: 持仓期间最高价（题材股移动止盈用）
 
     Returns:
         {
-            "batch_1_price": float,   # 第一批止盈价（+15%）
-            "batch_1_pct": float,     # 第一批止盈比例
-            "batch_2_drawdown": float, # 第二批回撤触发（-5%）
-            "batch_3_drawdown": float, # 第三批清仓回撤（-8%）
+            "mode": str,
+            "trailing_stop_price": float | None,
+            "trailing_stop_pct": float | None,
+            "exit_ma": int,
         }
     """
-    strategy = get_strategy()
-    risk = strategy.get("risk", {})
-    tp = risk.get("take_profit", {})
+    from scripts.engine.stock_classifier import get_risk_params, STYLE_SLOW_BULL
+    params = get_risk_params(style)
 
-    t1_pct = tp.get("t1_pct", 0.15)
-    t1_drawdown = tp.get("t1_drawdown", 0.05)
-    t2_drawdown = tp.get("t2_drawdown", 0.08)
-
-    base = first_buy_price if first_buy_price > 0 else cost
-    batch_1_price = round(base * (1 + t1_pct), 2)
-
-    return {
-        "batch_1_price": batch_1_price,
-        "batch_1_pct": t1_pct,
-        "batch_2_drawdown": t1_drawdown,
-        "batch_3_drawdown": t2_drawdown,
-    }
+    if style == STYLE_SLOW_BULL:
+        return {
+            "mode": "ma_exit_only",
+            "trailing_stop_price": None,
+            "trailing_stop_pct": None,
+            "exit_ma": params.get("exit_ma", 20),
+            "style": style,
+        }
+    else:
+        trailing_pct = params.get("trailing_stop", 0.08)
+        trailing_price = None
+        if highest_price and highest_price > 0:
+            trailing_price = round(highest_price * (1 - trailing_pct), 2)
+        return {
+            "mode": "trailing_stop",
+            "trailing_stop_price": trailing_price,
+            "trailing_stop_pct": trailing_pct,
+            "exit_ma": params.get("exit_ma", 20),
+            "trailing_ma_cross": params.get("trailing_ma_cross", {"fast": 5, "slow": 10}),
+            "style": style,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -472,37 +501,71 @@ def check_portfolio_risk(trade_events: list[dict], positions: list[dict],
     }
 
 
-def should_exit(position: dict, current_price: float) -> Tuple[bool, str]:
+def should_exit(position: dict, current_price: float,
+                ma20: float = 0, ma60: float = 0,
+                highest_price: float = 0,
+                ma5: float = 0, ma10: float = 0) -> Tuple[bool, str]:
     """
-    判断是否应该止损/卖出
+    判断是否应该止损/卖出（V1.0 双轨策略）
 
     Args:
-        position: dict with keys cost, shares, first_buy_price, ...
+        position: dict with keys cost, shares, style, entry_day_low, ...
         current_price: 最新价格
+        ma20: 当前 MA20
+        ma60: 当前 MA60
+        highest_price: 持仓期间最高价
+        ma5: 当前 MA5
+        ma10: 当前 MA10
 
     Returns:
         (should_exit: bool, reason: str)
     """
-    cost = float(position.get("平均成本", 0))
+    cost = _safe_float(position.get("平均成本", position.get("cost", 0)))
     if cost <= 0:
         return False, ""
 
+    style = str(position.get("style", position.get("stock_style", "momentum")))
+    hold_days = int(position.get("持有天数", position.get("hold_days", 0)))
+    entry_day_low = _safe_float(position.get("entry_day_low", 0))
     change_pct = (current_price - cost) / cost
-    stops = calc_stop_loss(cost)
 
-    # 绝对止损
-    if current_price <= stops["absolute_stop"]:
-        return True, f"绝对止损（{current_price} <= {stops['absolute_stop']}）"
+    from scripts.engine.stock_classifier import get_risk_params, STYLE_SLOW_BULL
+    params = get_risk_params(style)
 
-    # 动态止损
-    if current_price <= stops["stop_loss"]:
-        return True, f"动态止损（{current_price} <= {stops['stop_loss']}）"
+    # ── 通用：收盘价跌破 MA20 ──
+    exit_ma = params.get("exit_ma", 20)
+    if exit_ma == 20 and ma20 and ma20 > 0 and current_price < ma20:
+        return True, f"跌破MA20（{current_price} < {ma20:.2f}）"
 
-    # 时间止损（15个交易日）
-    hold_days = int(position.get("持有天数", 0))
-    time_stop_days = get_strategy().get("risk", {}).get("time_stop_days", 15)
-    if hold_days >= time_stop_days > 0 and change_pct < 0.02:
-        return True, f"时间止损（已持有{hold_days}日，涨幅不足2%）"
+    if style == STYLE_SLOW_BULL:
+        # 慢牛止损：-8% 或跌破 MA60
+        stop_pct = params["stop_loss"]
+        if change_pct <= -stop_pct:
+            return True, f"慢牛止损（{change_pct:.1%} <= -{stop_pct:.0%}）"
+        if ma60 and ma60 > 0 and current_price < ma60:
+            return True, f"慢牛跌破MA60（{current_price} < {ma60:.2f}）"
+        # 时间止损：30天不涨
+        time_stop = params.get("time_stop_days", 30)
+        if hold_days >= time_stop > 0 and change_pct < 0.02:
+            return True, f"慢牛时间止损（{hold_days}日，涨幅{change_pct:.1%}）"
+    else:
+        # 题材止损：-5% 或跌破买入日最低价
+        stop_pct = params["stop_loss"]
+        if change_pct <= -stop_pct:
+            return True, f"题材止损（{change_pct:.1%} <= -{stop_pct:.0%}）"
+        if entry_day_low and entry_day_low > 0 and current_price < entry_day_low:
+            return True, f"题材跌破买入日低点（{current_price} < {entry_day_low:.2f}）"
+        # 移动止盈：最高点回撤 -8%
+        trailing_pct = params.get("trailing_stop", 0.08)
+        if highest_price and highest_price > cost and current_price < highest_price * (1 - trailing_pct):
+            return True, f"题材移动止盈（最高{highest_price:.2f}回撤{trailing_pct:.0%}）"
+        # MA5 死叉 MA10
+        if ma5 and ma10 and ma5 < ma10 and highest_price and highest_price > cost * 1.03:
+            return True, f"题材MA5死叉MA10（MA5={ma5:.2f} < MA10={ma10:.2f}）"
+        # 时间止损：10天不创新高
+        time_stop = params.get("time_stop_days", 10)
+        if hold_days >= time_stop > 0 and change_pct < 0.02:
+            return True, f"题材时间止损（{hold_days}日，涨幅{change_pct:.1%}）"
 
     return False, ""
 
