@@ -29,10 +29,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VAULT_PATH="${AStockVault:-$REPO_ROOT}"
-PYTHON="${HOME}/.venv/akshare/bin/python"
+PYTHON="${HOME}/.venv/akshare314/bin/python"
 
 # 确保 vault 的 scripts 在 PYTHONPATH
-export PYTHONPATH="${VAULT_PATH}:${HOME}/.venv/akshare/lib/python3.9/site-packages"
+export PYTHONPATH="${VAULT_PATH}:${HOME}/.venv/akshare314/lib/python3.14/site-packages"
 export PATH="${HOME}/.local/bin:$PATH"
 export AStockVault="$VAULT_PATH"
 
