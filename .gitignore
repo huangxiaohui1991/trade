@@ -17,3 +17,5 @@ data/ledger/
 data/backtest/
 交易记录/
 每日快照/
+venv312/
+venv/
