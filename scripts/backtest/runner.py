@@ -86,6 +86,25 @@ def _extract_entry_score(trade: dict[str, Any]) -> float | None:
     return None
 
 
+def _recompute_weighted_score(trade: dict[str, Any], params: dict[str, float]) -> float | None:
+    components = [
+        ("technical_score", "technical_weight", 2.0),
+        ("fundamental_score", "fundamental_weight", 3.0),
+        ("flow_score", "flow_weight", 2.0),
+        ("sentiment_score", "sentiment_weight", 3.0),
+    ]
+    if not any(trade.get(score_key) not in (None, "") for score_key, _, _ in components):
+        return None
+
+    total = 0.0
+    for score_key, weight_key, denom in components:
+        score_value = trade.get(score_key)
+        if score_value in (None, ""):
+            continue
+        total += _safe_float(score_value, 0.0) * _safe_float(params.get(weight_key, denom), denom) / denom
+    return round(total, 2)
+
+
 def _baseline_parameters() -> dict[str, float]:
     strategy = get_strategy()
     scoring_cfg = strategy.get("scoring", {})
@@ -117,8 +136,14 @@ def _parameter_grid(
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
+    technical_weights: str | list[float] | None = None,
+    fundamental_weights: str | list[float] | None = None,
+    flow_weights: str | list[float] | None = None,
+    sentiment_weights: str | list[float] | None = None,
 ) -> list[dict[str, float]]:
     baseline = _baseline_parameters()
+    strategy = get_strategy()
+    scoring_weights = strategy.get("scoring", {}).get("weights", {})
     buy_grid = _coerce_grid(
         buy_thresholds,
         sorted({baseline["buy_threshold"] - 1.0, baseline["buy_threshold"], baseline["buy_threshold"] + 1.0}),
@@ -139,15 +164,39 @@ def _parameter_grid(
             round(baseline["take_profit"] + 0.05, 3),
         }),
     )
+    technical_grid = _coerce_grid(
+        technical_weights,
+        [round(_safe_float(scoring_weights.get("technical", 2), 2), 2)],
+    )
+    fundamental_grid = _coerce_grid(
+        fundamental_weights,
+        [round(_safe_float(scoring_weights.get("fundamental", 3), 2), 2)],
+    )
+    flow_grid = _coerce_grid(
+        flow_weights,
+        [round(_safe_float(scoring_weights.get("flow", 2), 2), 2)],
+    )
+    sentiment_grid = _coerce_grid(
+        sentiment_weights,
+        [round(_safe_float(scoring_weights.get("sentiment", 3), 2), 2)],
+    )
     grid: list[dict[str, float]] = []
     for buy_threshold in buy_grid:
         for stop_loss in stop_grid:
             for take_profit in take_profit_grid:
-                grid.append({
-                    "buy_threshold": round(_safe_float(buy_threshold), 3),
-                    "stop_loss": round(_safe_float(stop_loss), 3),
-                    "take_profit": round(_safe_float(take_profit), 3),
-                })
+                for technical_weight in technical_grid:
+                    for fundamental_weight in fundamental_grid:
+                        for flow_weight in flow_grid:
+                            for sentiment_weight in sentiment_grid:
+                                grid.append({
+                                    "buy_threshold": round(_safe_float(buy_threshold), 3),
+                                    "stop_loss": round(_safe_float(stop_loss), 3),
+                                    "take_profit": round(_safe_float(take_profit), 3),
+                                    "technical_weight": round(_safe_float(technical_weight), 3),
+                                    "fundamental_weight": round(_safe_float(fundamental_weight), 3),
+                                    "flow_weight": round(_safe_float(flow_weight), 3),
+                                    "sentiment_weight": round(_safe_float(sentiment_weight), 3),
+                                })
     return grid
 
 
@@ -484,7 +533,9 @@ def _apply_parameter_set(
 ) -> list[dict[str, Any]]:
     evaluated: list[dict[str, Any]] = []
     for trade in trades:
-        entry_score = _extract_entry_score(trade)
+        entry_score = _recompute_weighted_score(trade, params)
+        if entry_score is None:
+            entry_score = _extract_entry_score(trade)
         if entry_score is not None and entry_score < params["buy_threshold"]:
             continue
 
@@ -685,6 +736,10 @@ def run_backtest(
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
+    technical_weights: str | list[float] | None = None,
+    fundamental_weights: str | list[float] | None = None,
+    flow_weights: str | list[float] | None = None,
+    sentiment_weights: str | list[float] | None = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -694,6 +749,10 @@ def run_backtest(
         buy_thresholds=buy_thresholds,
         stop_losses=stop_losses,
         take_profits=take_profits,
+        technical_weights=technical_weights,
+        fundamental_weights=fundamental_weights,
+        flow_weights=flow_weights,
+        sentiment_weights=sentiment_weights,
     )
     source_trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(source_trades, params_grid, baseline)
@@ -764,6 +823,10 @@ def run_parameter_sweep(
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
+    technical_weights: str | list[float] | None = None,
+    fundamental_weights: str | list[float] | None = None,
+    flow_weights: str | list[float] | None = None,
+    sentiment_weights: str | list[float] | None = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -773,6 +836,10 @@ def run_parameter_sweep(
         buy_thresholds=buy_thresholds,
         stop_losses=stop_losses,
         take_profits=take_profits,
+        technical_weights=technical_weights,
+        fundamental_weights=fundamental_weights,
+        flow_weights=flow_weights,
+        sentiment_weights=sentiment_weights,
     )
     trades = _filter_closed_trades(inputs.get("trade_review", {}), start_date, end_date)
     selected_params, rankings, selected_summary = _select_best_parameter_set(trades, params_grid, baseline)
@@ -852,6 +919,10 @@ def run_walk_forward(
     buy_thresholds: str | list[float] | None = None,
     stop_losses: str | list[float] | None = None,
     take_profits: str | list[float] | None = None,
+    technical_weights: str | list[float] | None = None,
+    fundamental_weights: str | list[float] | None = None,
+    flow_weights: str | list[float] | None = None,
+    sentiment_weights: str | list[float] | None = None,
 ) -> dict[str, Any]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)
@@ -865,6 +936,10 @@ def run_walk_forward(
         buy_thresholds=buy_thresholds,
         stop_losses=stop_losses,
         take_profits=take_profits,
+        technical_weights=technical_weights,
+        fundamental_weights=fundamental_weights,
+        flow_weights=flow_weights,
+        sentiment_weights=sentiment_weights,
     )
     windows = _walk_forward_windows(start_date, end_date, folds)
     fold_reports = []

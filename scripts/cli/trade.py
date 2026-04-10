@@ -1160,6 +1160,10 @@ def main():
     backtest_run.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
     backtest_run.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
     backtest_run.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_run.add_argument("--technical-weights", default=None, help="Comma-separated technical weight values")
+    backtest_run.add_argument("--fundamental-weights", default=None, help="Comma-separated fundamental weight values")
+    backtest_run.add_argument("--flow-weights", default=None, help="Comma-separated flow weight values")
+    backtest_run.add_argument("--sentiment-weights", default=None, help="Comma-separated sentiment weight values")
     backtest_sweep = backtest_sub.add_parser("sweep")
     backtest_sweep.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     backtest_sweep.add_argument("--end", required=True, help="End date YYYY-MM-DD")
@@ -1168,6 +1172,10 @@ def main():
     backtest_sweep.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
     backtest_sweep.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
     backtest_sweep.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_sweep.add_argument("--technical-weights", default=None, help="Comma-separated technical weight values")
+    backtest_sweep.add_argument("--fundamental-weights", default=None, help="Comma-separated fundamental weight values")
+    backtest_sweep.add_argument("--flow-weights", default=None, help="Comma-separated flow weight values")
+    backtest_sweep.add_argument("--sentiment-weights", default=None, help="Comma-separated sentiment weight values")
     backtest_walk = backtest_sub.add_parser("walk-forward")
     backtest_walk.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     backtest_walk.add_argument("--end", required=True, help="End date YYYY-MM-DD")
@@ -1177,6 +1185,10 @@ def main():
     backtest_walk.add_argument("--buy-thresholds", default=None, help="Comma-separated buy thresholds")
     backtest_walk.add_argument("--stop-losses", default=None, help="Comma-separated stop loss values")
     backtest_walk.add_argument("--take-profits", default=None, help="Comma-separated take profit values")
+    backtest_walk.add_argument("--technical-weights", default=None, help="Comma-separated technical weight values")
+    backtest_walk.add_argument("--fundamental-weights", default=None, help="Comma-separated fundamental weight values")
+    backtest_walk.add_argument("--flow-weights", default=None, help="Comma-separated flow weight values")
+    backtest_walk.add_argument("--sentiment-weights", default=None, help="Comma-separated sentiment weight values")
     backtest_history = backtest_sub.add_parser("history")
     backtest_history.add_argument("--limit", type=int, default=10, help="Number of historical backtest entries")
     backtest_compare = backtest_sub.add_parser("compare")
@@ -1234,6 +1246,10 @@ def main():
                             buy_thresholds=args.buy_thresholds,
                             stop_losses=args.stop_losses,
                             take_profits=args.take_profits,
+                            technical_weights=args.technical_weights,
+                            fundamental_weights=args.fundamental_weights,
+                            flow_weights=args.flow_weights,
+                            sentiment_weights=args.sentiment_weights,
                         )
                     elif args.action == "sweep":
                         result = run_parameter_sweep(
@@ -1244,6 +1260,10 @@ def main():
                             buy_thresholds=args.buy_thresholds,
                             stop_losses=args.stop_losses,
                             take_profits=args.take_profits,
+                            technical_weights=args.technical_weights,
+                            fundamental_weights=args.fundamental_weights,
+                            flow_weights=args.flow_weights,
+                            sentiment_weights=args.sentiment_weights,
                         )
                     elif args.action == "history":
                         result = list_backtest_history(limit=args.limit)
@@ -1259,6 +1279,10 @@ def main():
                             buy_thresholds=args.buy_thresholds,
                             stop_losses=args.stop_losses,
                             take_profits=args.take_profits,
+                            technical_weights=args.technical_weights,
+                            fundamental_weights=args.fundamental_weights,
+                            flow_weights=args.flow_weights,
+                            sentiment_weights=args.sentiment_weights,
                         )
                 else:
                     result = status_today()
@@ -1297,6 +1321,10 @@ def main():
                     buy_thresholds=args.buy_thresholds,
                     stop_losses=args.stop_losses,
                     take_profits=args.take_profits,
+                    technical_weights=args.technical_weights,
+                    fundamental_weights=args.fundamental_weights,
+                    flow_weights=args.flow_weights,
+                    sentiment_weights=args.sentiment_weights,
                 )
             elif args.action == "sweep":
                 result = run_parameter_sweep(
@@ -1307,6 +1335,10 @@ def main():
                     buy_thresholds=args.buy_thresholds,
                     stop_losses=args.stop_losses,
                     take_profits=args.take_profits,
+                    technical_weights=args.technical_weights,
+                    fundamental_weights=args.fundamental_weights,
+                    flow_weights=args.flow_weights,
+                    sentiment_weights=args.sentiment_weights,
                 )
             elif args.action == "history":
                 result = list_backtest_history(limit=args.limit)
@@ -1322,6 +1354,10 @@ def main():
                     buy_thresholds=args.buy_thresholds,
                     stop_losses=args.stop_losses,
                     take_profits=args.take_profits,
+                    technical_weights=args.technical_weights,
+                    fundamental_weights=args.fundamental_weights,
+                    flow_weights=args.flow_weights,
+                    sentiment_weights=args.sentiment_weights,
                 )
         else:
             result = status_today()
