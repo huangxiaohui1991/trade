@@ -67,7 +67,7 @@ def _build_report_content(scores: list, date_str: str) -> str:
         total = s.get("total_score", 0)
         suggestion = get_recommendation(s)
         dq = s.get("data_quality", "ok")
-        dq_mark = "✅" if dq == "ok" else "⚠️降级"
+        dq_mark = "✅" if dq == "ok" else "⛔错误" if dq == "error" else "⚠️降级"
 
         lines.append(
             f"| {name} | {code} | {tech:.1f} | {fin:.1f} | {flow:.1f} | "

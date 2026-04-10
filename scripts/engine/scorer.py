@@ -312,12 +312,60 @@ def describe_risk_flags(score_result: dict) -> str:
     return ""
 
 
+def normalize_data_quality(value) -> str:
+    """归一化评分数据质量状态。"""
+    quality = str(value or "ok").strip().lower()
+    if quality in {"ok", "degraded", "error"}:
+        return quality
+    return "ok" if not quality else quality
+
+
+def _normalize_missing_fields(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def data_quality_blocks_auto_buy(score_result: dict) -> bool:
+    """数据质量非 ok 时，不允许作为自动新增买入依据。"""
+    return normalize_data_quality(score_result.get("data_quality", "ok")) != "ok"
+
+
+def data_quality_review_reason(score_result: dict) -> str:
+    """生成数据质量门禁的人类可读原因。"""
+    quality = normalize_data_quality(score_result.get("data_quality", "ok"))
+    missing = _normalize_missing_fields(
+        score_result.get("data_missing_fields", score_result.get("missing_fields", []))
+    )
+    if quality == "error":
+        return "数据错误，暂停买入"
+    if quality == "degraded":
+        suffix = f"缺失:{','.join(missing)}" if missing else "字段不完整"
+        return f"数据降级（{suffix}），人工复核"
+    if quality == "ok":
+        return ""
+    return f"数据质量异常:{quality}，人工复核"
+
+
 def get_recommendation(score_result: dict) -> str:
     """根据统一评分结果生成建议文案。"""
     total = float(score_result.get("total_score", 0) or 0)
     hard_veto, warnings = split_veto_signals(score_result.get("veto_signals", []))
     if score_result.get("veto_triggered") or hard_veto:
         return "❌ 一票否决"
+    if data_quality_blocks_auto_buy(score_result):
+        reason = data_quality_review_reason(score_result)
+        if normalize_data_quality(score_result.get("data_quality", "ok")) == "error":
+            return f"⛔ {reason}"
+        if total >= 7:
+            return f"🟠 人工复核（{reason}）"
+        if total >= 5:
+            return f"🟡 观察（{reason}）"
+        return f"❌ 规避（{reason}）"
     if total >= 7:
         return "✅ 可买入" + ("（流出预警）" if warnings else "")
     if total >= 5:

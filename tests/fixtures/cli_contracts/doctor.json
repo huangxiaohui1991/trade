@@ -32,6 +32,22 @@
       "status": "drift",
       "snapshot_date": "2026-04-09"
     },
+    "data_source_health": {
+      "status": "ok",
+      "warning": [],
+      "recent_runs": {
+        "run_count": 2,
+        "usable_rate": 1.0
+      },
+      "cache_summary": {
+        "file_count": 4,
+        "warning_namespace_count": 0
+      },
+      "score_data_quality": {
+        "entry_count": 2,
+        "missing_field_rate": 0.0
+      }
+    },
     "mx_connectivity": {
       "ok": true
     },

@@ -104,6 +104,24 @@ PIPELINE_ALIASES = {
     "stock_screener": "screener",
 }
 
+DATA_HEALTH_CACHE_TTL_SECONDS = {
+    "financial": 7 * 24 * 3600,
+    "flow": 24 * 3600,
+    "market_timer": 24 * 3600,
+    "screening_candidates": 2 * 24 * 3600,
+    "trading_calendar": 7 * 24 * 3600,
+}
+
+DATA_HEALTH_PIPELINES = {
+    "morning",
+    "noon",
+    "evening",
+    "scoring",
+    "screener",
+    "sentiment",
+    "hk_monitor",
+}
+
 WORKFLOWS = {
     "morning_brief": {
         "steps": ["status", "morning"],
@@ -554,6 +572,271 @@ def _requests_ok(url: str, timeout: int = 8) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _parse_health_ts(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for candidate in (text, text[:19]):
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def _load_json_file(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _financial_missing_fields(data) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    missing = []
+    if data.get("roe") is None and not data.get("roe_recent"):
+        missing.append("ROE")
+    if data.get("revenue_growth") is None:
+        missing.append("营收")
+    if data.get("operating_cash_flow") is None and data.get("cash_flow_positive") is None:
+        missing.append("现金流")
+    return missing
+
+
+def _cache_namespace_health(namespace: str, max_age_seconds: int, *, cache_dir: Path, now: datetime) -> dict:
+    ns_dir = cache_dir / namespace
+    files = sorted(ns_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True) if ns_dir.exists() else []
+    summary = {
+        "status": "unknown",
+        "file_count": len(files),
+        "fresh_count": 0,
+        "stale_count": 0,
+        "error_count": 0,
+        "missing_field_count": 0,
+        "missing_field_rate": 0.0,
+        "stale_rate": 0.0,
+        "last_success_at": "",
+        "max_age_seconds": max_age_seconds,
+        "sample": [],
+    }
+    if not files:
+        return summary
+
+    newest_success: datetime | None = None
+    for path in files[:50]:
+        payload = _load_json_file(path)
+        if not isinstance(payload, dict):
+            summary["error_count"] += 1
+            continue
+        data = payload.get("data")
+        cached_at = _parse_health_ts(payload.get("cached_at"))
+        age_seconds = round((now - cached_at).total_seconds(), 1) if cached_at else None
+        data_error = isinstance(data, dict) and bool(data.get("error"))
+        data_stale = isinstance(data, dict) and bool(data.get("stale"))
+        cache_stale = age_seconds is None or age_seconds > max_age_seconds or data_stale
+        missing_fields = _financial_missing_fields(data) if namespace == "financial" else []
+
+        if data_error:
+            summary["error_count"] += 1
+        if cache_stale:
+            summary["stale_count"] += 1
+        else:
+            summary["fresh_count"] += 1
+        if missing_fields:
+            summary["missing_field_count"] += 1
+        if cached_at and not data_error:
+            if newest_success is None or cached_at > newest_success:
+                newest_success = cached_at
+        if len(summary["sample"]) < 5:
+            summary["sample"].append({
+                "key": path.stem,
+                "cached_at": payload.get("cached_at", ""),
+                "age_seconds": age_seconds,
+                "stale": bool(cache_stale),
+                "error": bool(data_error),
+                "missing_fields": missing_fields,
+                "source": (payload.get("meta", {}) or {}).get("source", "") if isinstance(payload.get("meta", {}), dict) else "",
+            })
+
+    if newest_success:
+        summary["last_success_at"] = newest_success.strftime("%Y-%m-%dT%H:%M:%S")
+    if files:
+        summary["missing_field_rate"] = round(summary["missing_field_count"] / len(files), 4)
+        summary["stale_rate"] = round(summary["stale_count"] / len(files), 4)
+
+    if summary["error_count"] > 0 or summary["stale_rate"] > 0.5:
+        summary["status"] = "warning"
+    elif summary["missing_field_count"] > 0:
+        summary["status"] = "warning"
+    else:
+        summary["status"] = "ok"
+    return summary
+
+
+def _recent_run_health(*, runs_dir: Path, recent_limit: int) -> dict:
+    files = []
+    if runs_dir.exists():
+        files = sorted(runs_dir.glob("*/*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    runs = []
+    for path in files:
+        payload = _load_json_file(path)
+        if not isinstance(payload, dict):
+            continue
+        pipeline = str(payload.get("pipeline", "")).strip()
+        if pipeline not in DATA_HEALTH_PIPELINES:
+            continue
+        result = payload.get("result", {})
+        result_status = str(result.get("status", "")).strip().lower() if isinstance(result, dict) else ""
+        status = result_status or str(payload.get("status", "")).strip().lower()
+        normalized_status = "success" if status in {"ok", "success"} else status
+        runs.append({
+            "pipeline": pipeline,
+            "run_id": payload.get("run_id", ""),
+            "status": normalized_status,
+            "started_at": payload.get("started_at", ""),
+            "finished_at": payload.get("finished_at", ""),
+            "result_path": str(path),
+        })
+        if len(runs) >= recent_limit:
+            break
+
+    counted = [item for item in runs if item["status"] not in {"skipped"}]
+    success_count = sum(1 for item in counted if item["status"] == "success")
+    warning_count = sum(1 for item in counted if item["status"] == "warning")
+    failure_count = sum(1 for item in counted if item["status"] in {"error", "blocked"})
+    usable_count = success_count + warning_count
+    denominator = len(counted)
+    usable_rate = round(usable_count / denominator, 4) if denominator else 0.0
+    success_rate = round(success_count / denominator, 4) if denominator else 0.0
+    last_success_at = ""
+    for item in runs:
+        if item["status"] == "success":
+            last_success_at = str(item.get("finished_at") or item.get("started_at") or "")
+            break
+
+    if not runs:
+        status = "unknown"
+    elif failure_count > 0 or usable_rate < 0.8:
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "recent_limit": recent_limit,
+        "run_count": len(runs),
+        "counted_run_count": denominator,
+        "success_count": success_count,
+        "warning_count": warning_count,
+        "failure_count": failure_count,
+        "usable_rate": usable_rate,
+        "success_rate": success_rate,
+        "last_success_at": last_success_at,
+        "sample": runs[:5],
+    }
+
+
+def _score_data_quality_health(pool_snapshot: dict | None = None) -> dict:
+    try:
+        snapshot = pool_snapshot if pool_snapshot is not None else load_pool_snapshot()
+        entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
+    except Exception as exc:
+        return {"status": "warning", "entry_count": 0, "error": str(exc)}
+
+    counts = {"ok": 0, "degraded": 0, "error": 0, "unknown": 0}
+    missing_field_count = 0
+    for entry in entries:
+        quality = str(entry.get("data_quality", "ok") or "ok").strip().lower()
+        if quality not in counts:
+            quality = "unknown"
+        counts[quality] += 1
+        missing = entry.get("data_missing_fields", [])
+        if isinstance(missing, str):
+            has_missing = bool(missing.strip())
+        else:
+            has_missing = bool(missing)
+        if has_missing:
+            missing_field_count += 1
+
+    entry_count = len(entries)
+    status = "unknown"
+    if entry_count:
+        status = "warning" if counts["degraded"] or counts["error"] or counts["unknown"] else "ok"
+    return {
+        "status": status,
+        "entry_count": entry_count,
+        "quality_counts": counts,
+        "missing_field_count": missing_field_count,
+        "missing_field_rate": round(missing_field_count / entry_count, 4) if entry_count else 0.0,
+    }
+
+
+def _data_source_health_snapshot(
+    *,
+    cache_dir: Path | None = None,
+    runs_dir: Path | None = None,
+    recent_limit: int = 20,
+    now: datetime | None = None,
+    pool_snapshot: dict | None = None,
+) -> dict:
+    cache_root = Path(cache_dir or CACHE_DIR)
+    runs_root = Path(runs_dir or RUNS_DIR)
+    current_time = now or datetime.now()
+
+    cache_namespaces = {
+        name: _cache_namespace_health(name, ttl, cache_dir=cache_root, now=current_time)
+        for name, ttl in DATA_HEALTH_CACHE_TTL_SECONDS.items()
+    }
+    recent_runs = _recent_run_health(runs_dir=runs_root, recent_limit=recent_limit)
+    score_quality = _score_data_quality_health(pool_snapshot=pool_snapshot)
+
+    cache_file_count = sum(item.get("file_count", 0) for item in cache_namespaces.values())
+    cache_warning_count = sum(1 for item in cache_namespaces.values() if item.get("status") == "warning")
+    cache_unknown_count = sum(1 for item in cache_namespaces.values() if item.get("status") == "unknown")
+    warnings = []
+    if recent_runs.get("status") == "warning":
+        warnings.append("recent_pipeline_runs")
+    if cache_warning_count:
+        warnings.append("cache_freshness")
+    if score_quality.get("status") == "warning":
+        warnings.append("score_data_quality")
+
+    has_observation = bool(cache_file_count or recent_runs.get("run_count") or score_quality.get("entry_count"))
+    if warnings:
+        status = "warning"
+    elif has_observation:
+        status = "ok"
+    else:
+        status = "unknown"
+
+    latest_success_values = [
+        recent_runs.get("last_success_at", ""),
+        *[item.get("last_success_at", "") for item in cache_namespaces.values()],
+    ]
+    latest_success_values = [item for item in latest_success_values if item]
+    latest_success_at = max(latest_success_values) if latest_success_values else ""
+    return {
+        "ok": status == "ok",
+        "status": status,
+        "warning": warnings,
+        "source": "runs+cache+pool_snapshot",
+        "recent_runs": recent_runs,
+        "cache_summary": {
+            "namespace_count": len(cache_namespaces),
+            "warning_namespace_count": cache_warning_count,
+            "unknown_namespace_count": cache_unknown_count,
+            "file_count": cache_file_count,
+        },
+        "cache_namespaces": cache_namespaces,
+        "score_data_quality": score_quality,
+        "last_success_at": latest_success_at,
+    }
+
+
 def _mx_health_snapshot(include_unavailable: bool = False) -> dict:
     items = list_mx_command_metadata(include_unavailable=include_unavailable)
     groups = mx_command_groups(include_unavailable=include_unavailable)
@@ -921,6 +1204,16 @@ def doctor() -> dict:
     except Exception as e:
         checks["state_audit"] = {"ok": False, "error": str(e)}
 
+    try:
+        checks["data_source_health"] = _data_source_health_snapshot()
+    except Exception as e:
+        checks["data_source_health"] = {
+            "ok": False,
+            "status": "warning",
+            "warning": ["data_source_health_check_failed"],
+            "error": str(e),
+        }
+
     checks["mx_connectivity"] = _requests_ok("https://mkapi2.dfcfs.com/")
     checks["akshare_connectivity"] = _requests_ok("https://push2.eastmoney.com/")
 
@@ -944,6 +1237,8 @@ def doctor() -> dict:
         warning.append("akshare_connectivity")
     if not checks["state_audit"]["ok"]:
         warning.append("state_audit")
+    if checks["data_source_health"].get("status") in {"warning", "error"}:
+        warning.append("data_source_health")
 
     status = "success"
     if hard_fail:
@@ -1261,6 +1556,8 @@ def _normalize_pipeline_result(name: str, result):
                 "fundamental_detail": row.get("fundamental_detail", ""),
                 "flow_detail": row.get("flow_detail", ""),
                 "sentiment_detail": row.get("sentiment_detail", ""),
+                "data_quality": row.get("data_quality", "ok"),
+                "data_missing_fields": row.get("data_missing_fields", []),
             })
         return normalized
     if name == "screener" and isinstance(result, list):
@@ -1276,6 +1573,8 @@ def _normalize_pipeline_result(name: str, result):
                 "sentiment_score": row.get("sentiment_score", 0),
                 "veto_triggered": row.get("veto_triggered", False),
                 "veto_signals": row.get("veto_signals", []),
+                "data_quality": row.get("data_quality", "ok"),
+                "data_missing_fields": row.get("data_missing_fields", []),
             })
         return normalized
     if name in {"morning", "noon", "evening", "weekly"} and isinstance(result, dict):

@@ -44,6 +44,8 @@
 - [x] 交易日历 gating 收窄到 A 股日内 pipeline：`morning / noon / evening / scoring / sentiment`；`weekly / monthly / hk_monitor` 不再被 A 股交易日历误跳过。
 - [x] 核心池 snapshot 保留 `data_quality / data_missing_fields`，供下游报告和状态读取。
 - [x] 盘前/收盘 Discord 核心池评分增加数据质量提示：`⚠️ 数据降级（缺失:...）`。
+- [x] `doctor` 增加数据源健康度检查：聚合最近 pipeline 运行、缓存新鲜度、评分数据质量。
+- [x] 数据质量门禁：`data_quality != ok` 的新增买入信号降级为人工复核/blocked，影子交易不自动查价下单。
 
 ---
 
@@ -58,7 +60,7 @@
 **方案**：
 - [ ] 首轮实盘只做人工确认执行，系统不直连券商下单
 - [ ] 首轮实盘单笔仓位采用试运行上限（建议不超过正式单票上限的一半，具体金额人工确认）
-- [ ] `data_quality != ok` 时，新增买入建议必须降级为"人工复核"，不得作为自动买入依据
+- [x] `data_quality != ok` 时，新增买入建议必须降级为"人工复核"，不得作为自动买入依据
 - [ ] 单日异常保护：连续失败 pipeline、关键数据源 error、组合风控 block 时停止新增交易
 - [ ] 每笔实盘交易记录 `decision_id / signal_id / manual_reason`，方便和模拟盘逐笔对账
 
@@ -109,9 +111,9 @@
 - [x] 基本面评分 detail 中标注缺失字段（`⚠️缺失:营收,现金流`）
 - [x] 核心池 snapshot 保留 `data_quality / data_missing_fields`
 - [x] 盘前/收盘 Discord 推送增加数据质量标记
-- [ ] `doctor` 增加数据源健康度检查：最近 N 次调用的成功率
+- [x] `doctor` 增加数据源健康度检查：最近 N 次运行可用率、缓存新鲜度、字段缺失率、最后成功时间
 - [ ] 评分引擎遇到 `data_quality: degraded` 时，显示最近一次有效评分作为参考值，不直接替代当前分数
-- [ ] `data_quality: error` 时新增买入建议降级为 blocked 或 manual_review
+- [x] `data_quality: error` 时新增买入建议降级为 blocked 或 manual_review
 
 ### P4-5 Hermes 交互增强
 
@@ -212,11 +214,11 @@
 ### P0：马上做
 
 1. **逐笔模拟盘 vs 实盘对账** — 先定义 `signal_id/order_id` 和偏离类型，否则月报只能看总数。
-2. **数据源健康度进入 doctor** — 把最近 N 次成功率、缺失字段率、最后成功时间放进健康检查。
-3. **数据降级阻断规则** — 明确 `degraded/error` 时是继续提示、人工复核，还是阻断新增买入。
+2. **单日异常保护** — 连续失败 pipeline、关键数据源 error、组合风控 block 时停止新增交易。
 
 ### P1：本月内做
 
+3. **最近有效评分参考** — `data_quality=degraded` 时展示最近一次有效评分，只作为参考不替代当前评分。
 4. **收盘/周报增加模拟盘独立统计** — 等模拟盘至少跑满一周后接入。
 5. **Hermes 轻量交互命令** — `digest / suggest / explain`，基于现有 `status today` 和评分明细实现。
 

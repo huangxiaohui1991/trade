@@ -14,7 +14,7 @@ from pathlib import Path
 
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.runtime_state import RUNTIME_DIR
-from scripts.engine.scorer import split_veto_signals
+from scripts.engine.scorer import data_quality_review_reason, normalize_data_quality, split_veto_signals
 
 
 POOL_STATE_PATH = RUNTIME_DIR / "pool_state.json"
@@ -104,9 +104,12 @@ def _normalize_bucket(bucket: str | None, score: float, hard_veto: bool,
 
 def _build_note(hard_veto: list, warning_signals: list, bucket: str,
                 fallback: str = "", data_quality: str = "") -> str:
+    data_quality = normalize_data_quality(data_quality)
     if fallback:
         if data_quality == "degraded" and "⚠️数据降级" not in fallback:
             return f"{fallback} ⚠️数据降级"
+        if data_quality == "error" and "⛔数据错误" not in fallback:
+            return f"{fallback} ⛔数据错误"
         return fallback
     parts = []
     if hard_veto:
@@ -115,6 +118,8 @@ def _build_note(hard_veto: list, warning_signals: list, bucket: str,
         parts.append(f"预警:{','.join(warning_signals)}")
     if data_quality == "degraded":
         parts.append("⚠️数据降级")
+    elif data_quality == "error":
+        parts.append("⛔数据错误")
     if parts:
         return " ".join(parts)
     return {"core": "核心池", "watch": "观察池", "avoid": "规避"}.get(bucket, "")
@@ -142,7 +147,7 @@ def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = 
     )
     note = str(entry.get("note", "") or "").strip()
     metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
-    data_quality = str(entry.get("data_quality", metadata.get("data_quality", "ok")) or "ok").strip()
+    data_quality = normalize_data_quality(entry.get("data_quality", metadata.get("data_quality", "ok")))
     missing_fields = _normalize_missing_fields(
         entry.get("data_missing_fields", entry.get("missing_fields", metadata.get("data_missing_fields", [])))
     )
@@ -305,9 +310,9 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
         hard_veto, warning_signals = split_veto_signals(veto_signals)
         previous = merged.get(code, {})
         previous_metadata = previous.get("metadata", {}) if isinstance(previous.get("metadata", {}), dict) else {}
-        data_quality = str(
+        data_quality = normalize_data_quality(
             row.get("data_quality", previous.get("data_quality", previous_metadata.get("data_quality", "ok"))) or "ok"
-        ).strip()
+        )
         missing_fields = _normalize_missing_fields(
             row.get(
                 "data_missing_fields",
@@ -322,9 +327,17 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
             promote_min_score,
         )
         previous_bucket = previous.get("bucket", "")
-        note = _build_note(hard_veto, warning_signals, bucket,
-                          str(row.get("note", "") or "").strip(),
-                          data_quality)
+        blocked_new_core = data_quality != "ok" and bucket == "core" and previous_bucket != "core"
+        if blocked_new_core:
+            bucket = "avoid" if data_quality == "error" else "watch"
+        note_source = str(row.get("note", "") or "").strip()
+        note = _build_note(hard_veto, warning_signals, bucket, note_source, data_quality)
+        if blocked_new_core:
+            reason = data_quality_review_reason({
+                "data_quality": data_quality,
+                "data_missing_fields": missing_fields,
+            })
+            note = f"{note} 人工复核:{reason}".strip()
         entry = {
             "bucket": bucket,
             "code": code,
@@ -410,6 +423,7 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
         "promote_to_core": [],
         "keep_watch": [],
         "add_to_watch": [],
+        "manual_review": [],
         "demote_from_core": [],
         "remove_or_avoid": [],
     }
@@ -424,9 +438,20 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
         veto_signals = row.get("veto_signals", []) or []
         hard_veto, warning_signals = split_veto_signals(veto_signals)
         veto = bool(row.get("veto_triggered", False)) or bool(hard_veto)
+        data_quality = normalize_data_quality(row.get("data_quality", "ok"))
+        missing_fields = _normalize_missing_fields(row.get("data_missing_fields", row.get("missing_fields", [])))
+        quality_reason = data_quality_review_reason({
+            "data_quality": data_quality,
+            "data_missing_fields": missing_fields,
+        })
 
         prev = code_state.get(code, {})
         if prev.get("last_date") == today:
+            high_streak = int(prev.get("high_streak", 0))
+            low_streak = int(prev.get("low_streak", 0))
+            watch_streak = int(prev.get("watch_streak", 0))
+            veto_streak = int(prev.get("veto_streak", 0))
+        elif data_quality != "ok" and not veto:
             high_streak = int(prev.get("high_streak", 0))
             low_streak = int(prev.get("low_streak", 0))
             watch_streak = int(prev.get("watch_streak", 0))
@@ -445,6 +470,8 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
             "last_veto": veto,
             "last_veto_signals": veto_signals,
             "membership": membership,
+            "data_quality": data_quality,
+            "data_missing_fields": missing_fields,
             "high_streak": high_streak,
             "low_streak": low_streak,
             "watch_streak": watch_streak,
@@ -462,6 +489,8 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
                 "low_streak": low_streak,
                 "watch_streak": watch_streak,
                 "veto_streak": veto_streak,
+                "data_quality": data_quality,
+                "data_missing_fields": missing_fields,
             }
 
         if membership == "core":
@@ -475,7 +504,9 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
             else:
                 suggestions["remove_or_avoid"].append(entry("核心池暂不加仓"))
         elif membership == "watch":
-            if not veto and score >= promote_min_score and high_streak >= promote_streak_days:
+            if data_quality != "ok" and not veto and score >= promote_min_score:
+                suggestions["manual_review"].append(entry(quality_reason))
+            elif not veto and score >= promote_min_score and high_streak >= promote_streak_days:
                 suggestions["promote_to_core"].append(entry(f"连续{high_streak}天分数>={promote_min_score:.1f}"))
             elif veto or low_streak >= remove_streak_days or score < remove_max_score:
                 if veto and hard_veto:
@@ -488,7 +519,9 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
             else:
                 suggestions["keep_watch"].append(entry("观察池继续跟踪"))
         else:
-            if not veto and score >= watch_min_score and watch_streak >= add_to_watch_streak_days:
+            if data_quality != "ok" and not veto and score >= promote_min_score:
+                suggestions["manual_review"].append(entry(quality_reason))
+            elif not veto and score >= watch_min_score and watch_streak >= add_to_watch_streak_days:
                 suggestions["add_to_watch"].append(entry(f"连续{watch_streak}天分数>={watch_min_score:.1f}"))
             else:
                 suggestions["remove_or_avoid"].append(entry("暂不纳入池子"))
@@ -526,6 +559,7 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
             "remove_streak_days": remove_streak_days,
             "veto_immediate_demote": veto_immediate_demote,
             "add_to_watch_streak_days": add_to_watch_streak_days,
+            "data_quality_gate": "data_quality!=ok -> manual_review/no_auto_buy",
         },
     }
     return suggestions, metadata

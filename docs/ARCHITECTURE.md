@@ -525,6 +525,8 @@ market 模式：
 - [x] 月度复盘自动生成（monthly_review.py）
 - [x] A 股交易日历感知（非交易日自动 skipped 落盘）
 - [x] 评分数据质量标记（data_quality / data_missing_fields）
+- [x] doctor 数据源健康度检查（recent runs / cache freshness / score data quality）
+- [x] 数据质量买入门禁（degraded/error → manual_review/blocked，不自动新增买入）
 
 ### 待继续优化
 
@@ -536,7 +538,7 @@ market 模式：
 
 - Discord 未配置 webhook 时，pipeline 会继续执行，但 `daily_state` 会记为 `warning`
 - 全市场扫描已有缓存回退，但评分阶段仍依赖外部接口稳定性
-- `data_quality=degraded` 目前会提示风险，但还没有进入买入阻断规则
+- `data_quality=degraded/error` 已进入新增买入门禁；仍需补“最近一次有效评分”参考展示
 - 目前自动化定位仍是“辅助决策 + 影子交易验证”，不是直连实盘下单
 - `openclaw/hermes` 应消费 CLI JSON，不直接依赖内部 Python 模块
 

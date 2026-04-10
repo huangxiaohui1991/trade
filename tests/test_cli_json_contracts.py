@@ -110,6 +110,22 @@ class CLIJsonContractTests(unittest.TestCase):
                     "status": checks["state_audit"]["status"],
                     "snapshot_date": checks["state_audit"]["snapshot_date"],
                 },
+                "data_source_health": {
+                    "status": checks["data_source_health"]["status"],
+                    "warning": checks["data_source_health"]["warning"],
+                    "recent_runs": {
+                        "run_count": checks["data_source_health"]["recent_runs"]["run_count"],
+                        "usable_rate": checks["data_source_health"]["recent_runs"]["usable_rate"],
+                    },
+                    "cache_summary": {
+                        "file_count": checks["data_source_health"]["cache_summary"]["file_count"],
+                        "warning_namespace_count": checks["data_source_health"]["cache_summary"]["warning_namespace_count"],
+                    },
+                    "score_data_quality": {
+                        "entry_count": checks["data_source_health"]["score_data_quality"]["entry_count"],
+                        "missing_field_rate": checks["data_source_health"]["score_data_quality"]["missing_field_rate"],
+                    },
+                },
                 "mx_connectivity": {
                     "ok": checks["mx_connectivity"]["ok"],
                 },
@@ -455,6 +471,14 @@ class CLIJsonContractTests(unittest.TestCase):
                 "status": "drift",
                 "snapshot_date": "2026-04-09",
                 "checks": {"structured_ledger": {"ok": True}},
+            }),
+            mock.patch.object(trade, "_data_source_health_snapshot", return_value={
+                "ok": True,
+                "status": "ok",
+                "warning": [],
+                "recent_runs": {"run_count": 2, "usable_rate": 1.0},
+                "cache_summary": {"file_count": 4, "warning_namespace_count": 0},
+                "score_data_quality": {"entry_count": 2, "missing_field_rate": 0.0},
             }),
             mock.patch.object(trade, "_requests_ok", side_effect=lambda *_args, **_kwargs: {"ok": True}),
         ]

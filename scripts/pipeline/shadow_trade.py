@@ -28,7 +28,12 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
-from scripts.engine.scorer import score as score_stock
+from scripts.engine.scorer import (
+    data_quality_blocks_auto_buy,
+    data_quality_review_reason,
+    normalize_data_quality,
+    score as score_stock,
+)
 from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
@@ -1125,6 +1130,27 @@ def buy_new_picks(dry_run: bool = False) -> list:
             continue
 
         total_score = float(score_result.get("total_score", 0) or 0)
+        if data_quality_blocks_auto_buy(score_result):
+            data_quality = normalize_data_quality(score_result.get("data_quality", "ok"))
+            missing_fields = score_result.get("data_missing_fields", score_result.get("missing_fields", []))
+            reason = data_quality_review_reason(score_result)
+            reason_code = "DATA_QUALITY_BLOCKED" if data_quality == "error" else "DATA_QUALITY_MANUAL_REVIEW"
+            status = "blocked" if data_quality == "error" else "人工复核"
+            _logger.info(f"[shadow] {name}({code}) {reason}，跳过自动买入")
+            results.append(
+                _trade_result(
+                    code,
+                    name,
+                    0,
+                    status,
+                    reason,
+                    reason_code,
+                    score=total_score,
+                    data_quality=data_quality,
+                    data_missing_fields=missing_fields,
+                )
+            )
+            continue
         veto_signals = score_result.get("veto_signals", [])
         if veto_signals:
             reason_code = "POOL_VETO"

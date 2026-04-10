@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 
 import akshare as ak
 
-from scripts.engine.scorer import batch_score, get_recommendation
+from scripts.engine.scorer import batch_score, data_quality_blocks_auto_buy, get_recommendation
 from scripts.engine.composite import build_today_decision
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.utils.obsidian import ObsidianVault
@@ -327,7 +327,7 @@ def _write_market_scan_watchlist(results: list) -> str:
         "|---|------|------|------|------|",
     ]
     for i, row in enumerate(actionable, 1):
-        suggestion = "可买入" if row.get("total_score", 0) >= 7 else "观察"
+        suggestion = get_recommendation(row)
         lines.append(f"| {i} | {row.get('name','')} | {row.get('code','')} | {row.get('total_score',0):.1f} | {suggestion} |")
     if not actionable:
         lines.append("| — | — | — | — | 本次无满足条件候选 |")
@@ -349,6 +349,7 @@ def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
         ("建议晋级核心池", suggestions.get("promote_to_core", [])),
         ("建议保留观察", suggestions.get("keep_watch", [])),
         ("建议加入观察池", suggestions.get("add_to_watch", [])),
+        ("需要人工复核", suggestions.get("manual_review", [])),
         ("建议降级移出核心池", suggestions.get("demote_from_core", [])),
         ("建议规避", suggestions.get("remove_or_avoid", [])),
     ]
@@ -382,6 +383,9 @@ def _sync_to_zixuan(actionable: list) -> None:
     将可操作的股票同步到东方财富自选股列表。
     新入池的添加，不在池子里的删除，保持自选和池子一致。
     """
+    if not actionable:
+        return
+    actionable = [item for item in actionable if not data_quality_blocks_auto_buy(item)]
     if not actionable:
         return
     try:
@@ -643,7 +647,10 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
 
         _logger.info(f">> 四维评分（来源: {source}）...")
         scored = batch_score(candidates)
-        actionable = [r for r in scored if not r.get("veto_triggered", False)]
+        actionable = [
+            r for r in scored
+            if not r.get("veto_triggered", False) and not data_quality_blocks_auto_buy(r)
+        ]
         today_decision = build_today_decision(strategy_cfg)
         pool_suggestions, pool_meta = evaluate_pool_actions(
             scored,

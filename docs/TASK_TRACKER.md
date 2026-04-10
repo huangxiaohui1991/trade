@@ -128,6 +128,10 @@
 备注：`hermes_cron.sh` 对 A 股日内 pipeline 写入 `skipped_reason=non_trading_day`，周报/月报/港股检查不受 A 股交易日历限制。
 - [x] 评分数据质量传播到 snapshot 和 Discord
 备注：核心池 snapshot 保留 `data_quality / data_missing_fields`，盘前/收盘核心池评分展示数据降级提示。
+- [x] doctor 数据源健康度检查
+备注：`doctor` now 输出 `data_source_health`，聚合最近 pipeline 运行、缓存新鲜度、字段缺失率、评分数据质量和最后成功时间。
+- [x] 数据质量买入门禁
+备注：`data_quality=degraded/error` 的新增买入建议降级为人工复核/blocked；池子晋级、筛选建议和影子交易自动买入不再把降级数据当作自动买入依据。
 
 ---
 
