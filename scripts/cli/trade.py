@@ -763,13 +763,21 @@ def mx_command(action: str, args) -> dict:
             "health": health,
         })
 
+    # 构建 kwargs，只包含当前命令 spec 定义的参数
+    from scripts.mx.cli_tools import build_mx_command_registry, get_mx_command_spec
+    cmd_name = getattr(args, "mx_command")
+    spec = get_mx_command_spec(cmd_name, include_unavailable=True)
+    spec_arg_names = {arg.name for arg in spec.args}
+
     kwargs = {}
     for field in ("query", "stock_code", "quantity", "price", "use_market_price", "order_id", "cancel_all"):
+        if field not in spec_arg_names:
+            continue
         value = getattr(args, field, None)
         if value is not None:
             kwargs[field] = value
     try:
-        result = dispatch_mx_command(getattr(args, "mx_command"), **kwargs)
+        result = dispatch_mx_command(cmd_name, **kwargs)
         return sanitize_for_json({
             "command": "mx",
             "action": "run",
