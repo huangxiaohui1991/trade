@@ -278,9 +278,45 @@ class MarketTimer:
 
         return normalized
 
+    # ------------------------------------------------------------------
+    # 实时行情（腾讯接口，作为涨跌副补充）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fetch_realtime(symbol: str) -> dict | None:
+        """
+        通过腾讯行情接口获取实时价格和涨跌幅。
+        symbol: sh000001 / sz399001 等
+        Returns: {"price": float, "chg_pct": float} or None
+        """
+        try:
+            import urllib.request
+            url = f"https://qt.gtimg.cn/q={symbol}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("gbk", errors="replace")
+            fields = raw.strip().split("~")
+            if len(fields) < 33:
+                return None
+            price_str = fields[3]
+            pct_str = fields[32]
+            if not price_str or not pct_str:
+                return None
+            return {
+                "price": float(price_str),
+                "chg_pct": float(pct_str),
+            }
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # 历史数据（MX → akshare） + 实时补充
+    # ------------------------------------------------------------------
+
     def _fetch_index_data(self, symbol: str) -> dict:
         """
         获取单个指数的技术数据（MX优先 → akshare fallback）
+        盘中/收盘时段补充实时涨跌幅（腾讯接口）
         """
         cache_key = symbol.replace("/", "_")
         index_name = _INDEX_NAME_BY_SYMBOL.get(symbol, symbol)
@@ -379,6 +415,11 @@ class MarketTimer:
                     "stale": False,
                 }
                 save_json_cache("market_timer", cache_key, payload, meta={"source": "mx_data"})
+                # 补充实时涨跌幅
+                rt = self._fetch_realtime(symbol)
+                if rt:
+                    payload["close"] = rt["price"]
+                    payload["change_pct"] = rt["chg_pct"]
                 return payload
         except Exception as e:
             _logger.info(f"[market_timer] MX 失败 {symbol}: {e}")
@@ -467,6 +508,11 @@ class MarketTimer:
             "stale": False,
         }
         save_json_cache("market_timer", cache_key, payload, meta={"source": "akshare"})
+        # 补充实时涨跌幅
+        rt = self._fetch_realtime(symbol)
+        if rt:
+            payload["close"] = rt["price"]
+            payload["change_pct"] = rt["chg_pct"]
         return payload
 
 
