@@ -30,5 +30,14 @@ PYTHON_HOME="/Users/hxh/.venv/akshare"
 # 核心池评分 — 周一到周五 15:40
 40 15 * * 1-5 /bin/bash $HERMES_SCRIPT scoring >> $LOG_DIR/cron_scoring.log 2>&1
 
+# 舆情监控 — 周一到周五 每30分钟（9:00-15:30）
+0,30 9-15 * * 1-5 /bin/bash $HERMES_SCRIPT sentiment >> $LOG_DIR/cron_sentiment.log 2>&1
+
+# 港股遗留仓位检查 — 周一到周五 16:30（港股收盘后）
+30 16 * * 1-5 /bin/bash $HERMES_SCRIPT hk_monitor >> $LOG_DIR/cron_hk_monitor.log 2>&1
+
+# 超时未确认订单检查 — 周一到周五 9:15
+15 9 * * 1-5 $PYTHON_HOME/bin/python -m scripts.cli.trade order overdue-check --send --json >> $LOG_DIR/cron_overdue.log 2>&1
+
 # 周报 — 周日 20:00
 0 20 * * 0 /bin/bash $HERMES_SCRIPT weekly >> $LOG_DIR/cron_weekly.log 2>&1

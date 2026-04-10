@@ -51,6 +51,7 @@ from scripts.state import (
     load_portfolio_snapshot,
     load_trade_review,
     pending_condition_order_items,
+    upsert_order_state,
     sync_activity_state,
     sync_portfolio_state,
 )
@@ -79,7 +80,19 @@ PIPELINES = {
     "scoring": lambda args: run_scoring(),
     "weekly": lambda args: run_weekly(),
     "screener": lambda args: run_screener(pool=args.pool, universe=args.universe),
+    "sentiment": lambda args: _run_sentiment(args),
+    "hk_monitor": lambda args: _run_hk_monitor(args),
 }
+
+
+def _run_sentiment(args):
+    from scripts.pipeline.sentiment_monitor import run as run_sentiment
+    return run_sentiment(dry_run=getattr(args, "dry_run", False))
+
+
+def _run_hk_monitor(args):
+    from scripts.pipeline.hk_monitor import run as run_hk_monitor
+    return run_hk_monitor(dry_run=getattr(args, "dry_run", False))
 
 PIPELINE_ALIASES = {
     "stock_screener": "screener",
@@ -160,6 +173,302 @@ AGENT_TEMPLATES = {
 
 def _json_print(payload: dict):
     print(json.dumps(sanitize_for_json(payload), ensure_ascii=False, indent=2))
+
+
+def order_command(action: str, args) -> dict:
+    """Handle `trade order <action>` subcommands for Hermes-Agent."""
+    if action == "confirm":
+        result = apply_order_reply(
+            reply_text=getattr(args, "reply", ""),
+            scope=getattr(args, "scope", "paper_mx"),
+        )
+        return sanitize_for_json({
+            "command": "order",
+            "action": "confirm",
+            **result,
+        })
+
+    if action == "pending":
+        scope = getattr(args, "scope", "paper_mx")
+        pending = pending_condition_order_items(scope=scope)
+        return sanitize_for_json({
+            "command": "order",
+            "action": "pending",
+            "status": "ok",
+            "scope": scope,
+            "pending_count": len(pending),
+            "items": pending,
+        })
+
+    if action == "remind":
+        scope = getattr(args, "scope", "paper_mx")
+        pending = pending_condition_order_items(scope=scope)
+        content = render_condition_order_reminder(pending)
+        send = bool(getattr(args, "send", False))
+        discord_ok = False
+        discord_error = ""
+        if send:
+            discord_ok, discord_error = send_condition_order_reminder(pending)
+        return sanitize_for_json({
+            "command": "order",
+            "action": "remind",
+            "status": "ok" if (not send or discord_ok) else "warning",
+            "scope": scope,
+            "pending_count": len(pending),
+            "items": pending,
+            "send": send,
+            "discord_ok": discord_ok,
+            "discord_error": discord_error,
+            "content": content,
+        })
+
+    if action == "overdue-check":
+        scope = getattr(args, "scope", "paper_mx")
+        send = bool(getattr(args, "send", False))
+        result = _check_overdue_orders(scope=scope, send=send)
+        return sanitize_for_json({
+            "command": "order",
+            "action": "overdue-check",
+            **result,
+        })
+
+    if action == "place":
+        now_ts_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        scope = getattr(args, "scope", "paper_mx")
+        code = getattr(args, "code", "")
+        name = getattr(args, "name", "")
+        side = getattr(args, "side", "sell")
+        condition_type = getattr(args, "condition_type", "manual_stop")
+        price = getattr(args, "price", 0.0)
+        shares = getattr(args, "shares", 0)
+        reason = getattr(args, "reason", "")
+
+        order = upsert_order_state({
+            "external_id": f"{scope}:agent:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{code}:{condition_type}",
+            "scope": scope,
+            "broker": "hermes_agent",
+            "code": code,
+            "name": name,
+            "side": side,
+            "order_class": "condition",
+            "order_type": "conditional",
+            "condition_type": condition_type,
+            "requested_shares": shares,
+            "filled_shares": 0,
+            "trigger_price": price,
+            "status": "placed",
+            "confirm_status": "not_required",
+            "reason_code": f"AGENT_{condition_type.upper()}",
+            "reason_text": reason or f"Hermes-Agent placed {condition_type}",
+            "source": "hermes_agent",
+            "placed_at": now_ts_str,
+            "updated_at": now_ts_str,
+            "metadata": {"placed_by": "hermes_agent"},
+        })
+        return sanitize_for_json({
+            "command": "order",
+            "action": "place",
+            "status": "ok",
+            "order": order,
+        })
+
+    if action == "cancel":
+        scope = getattr(args, "scope", "paper_mx")
+        code = getattr(args, "code", "")
+        name = getattr(args, "name", "")
+        condition_type = getattr(args, "condition_type", "")
+        now_ts_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Find matching open orders
+        snapshot = load_order_snapshot(scope=scope)
+        candidates = []
+        for order in snapshot.get("orders", []):
+            if str(order.get("code", "")).strip() != code:
+                continue
+            if order.get("status") in {"filled", "cancelled", "reviewed", "exception"}:
+                continue
+            if condition_type and str(order.get("condition_type", "")).strip() != condition_type:
+                continue
+            candidates.append(order)
+
+        cancelled = []
+        for order in candidates:
+            updated = upsert_order_state({
+                "external_id": order["external_id"],
+                "status": "cancelled",
+                "cancelled_at": now_ts_str,
+                "updated_at": now_ts_str,
+                "source": "hermes_agent",
+                "metadata": {
+                    **(order.get("metadata", {}) if isinstance(order.get("metadata", {}), dict) else {}),
+                    "cancelled_by": "hermes_agent",
+                },
+            })
+            cancelled.append(updated)
+
+        return sanitize_for_json({
+            "command": "order",
+            "action": "cancel",
+            "status": "ok",
+            "code": code,
+            "cancelled_count": len(cancelled),
+            "cancelled_orders": cancelled,
+        })
+
+    if action == "modify":
+        scope = getattr(args, "scope", "paper_mx")
+        code = getattr(args, "code", "")
+        new_price = getattr(args, "price", 0.0)
+        condition_type = getattr(args, "condition_type", "")
+        now_ts_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        snapshot = load_order_snapshot(scope=scope)
+        candidates = []
+        for order in snapshot.get("orders", []):
+            if str(order.get("code", "")).strip() != code:
+                continue
+            if order.get("status") in {"filled", "cancelled", "reviewed", "exception"}:
+                continue
+            if condition_type and str(order.get("condition_type", "")).strip() != condition_type:
+                continue
+            candidates.append(order)
+
+        modified = []
+        for order in candidates:
+            old_price = float(order.get("trigger_price", 0) or 0)
+            updated = upsert_order_state({
+                "external_id": order["external_id"],
+                "trigger_price": new_price,
+                "status": "placed",
+                "updated_at": now_ts_str,
+                "source": "hermes_agent",
+                "metadata": {
+                    **(order.get("metadata", {}) if isinstance(order.get("metadata", {}), dict) else {}),
+                    "modified_by": "hermes_agent",
+                    "old_trigger_price": old_price,
+                },
+            })
+            modified.append(updated)
+
+        return sanitize_for_json({
+            "command": "order",
+            "action": "modify",
+            "status": "ok",
+            "code": code,
+            "new_price": new_price,
+            "modified_count": len(modified),
+            "modified_orders": modified,
+        })
+
+    if action == "list":
+        snapshot = load_order_snapshot(
+            scope=getattr(args, "scope", None),
+            status=getattr(args, "status", None),
+        )
+        limit = getattr(args, "limit", 20)
+        orders = snapshot.get("orders", [])[:limit]
+        return sanitize_for_json({
+            "command": "order",
+            "action": "list",
+            "status": "ok",
+            "order_count": len(orders),
+            "summary": snapshot.get("summary", {}),
+            "orders": orders,
+        })
+
+    return {"command": "order", "action": action, "status": "error", "error": f"unknown action: {action}"}
+
+
+def _check_overdue_orders(scope: str = "paper_mx", send: bool = False) -> dict:
+    """
+    检查超时未确认的条件单。
+
+    规则：
+      - T+1 9:15 未确认 → 再提醒一次
+      - T+2 15:00 未确认 → 标记异常
+    """
+    now = datetime.now()
+    snapshot = load_order_snapshot(scope=scope)
+    orders = snapshot.get("orders", [])
+
+    t1_remind = []   # 需要再提醒
+    t2_exception = []  # 需要标记异常
+
+    for order in orders:
+        status = str(order.get("status", "")).strip()
+        confirm_status = str(order.get("confirm_status", "")).strip()
+
+        # 只检查 placed/partially_filled 且需要确认的
+        if status not in {"placed", "partially_filled", "triggered"}:
+            continue
+        if confirm_status in {"confirmed", "not_required"}:
+            continue
+
+        placed_at = str(order.get("placed_at", "")).strip()
+        if not placed_at:
+            continue
+
+        try:
+            placed_time = datetime.strptime(placed_at[:19], "%Y-%m-%dT%H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+
+        hours_since = (now - placed_time).total_seconds() / 3600
+
+        if hours_since >= 48:  # T+2
+            t2_exception.append(order)
+        elif hours_since >= 24:  # T+1
+            t1_remind.append(order)
+
+    # 处理 T+2 异常标记
+    for order in t2_exception:
+        upsert_order_state({
+            "external_id": order["external_id"],
+            "status": "exception",
+            "confirm_status": "overdue_exception",
+            "updated_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source": "overdue_check",
+            "metadata": {
+                **(order.get("metadata", {}) if isinstance(order.get("metadata", {}), dict) else {}),
+                "overdue_marked_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                "overdue_reason": "T+2 未确认",
+            },
+        })
+
+    # 处理 T+1 提醒
+    discord_ok = False
+    discord_error = ""
+    if t1_remind and send:
+        pending_items = []
+        for order in t1_remind:
+            condition_type = str(order.get("condition_type", "")).strip()
+            order_type = "止盈" if "profit" in condition_type or condition_type.endswith("_tp") else "止损"
+            pending_items.append({
+                "name": order.get("name", ""),
+                "type": f"{order_type}（超时提醒）",
+                "price": float(order.get("trigger_price", 0) or 0),
+                "currency": "¥",
+                "status": "T+1 未确认",
+            })
+        discord_ok, discord_error = send_condition_order_reminder(pending_items)
+
+    return {
+        "status": "ok" if not t2_exception else "warning",
+        "scope": scope,
+        "t1_remind_count": len(t1_remind),
+        "t2_exception_count": len(t2_exception),
+        "t1_remind_orders": [
+            {"external_id": o.get("external_id", ""), "code": o.get("code", ""), "name": o.get("name", "")}
+            for o in t1_remind
+        ],
+        "t2_exception_orders": [
+            {"external_id": o.get("external_id", ""), "code": o.get("code", ""), "name": o.get("name", "")}
+            for o in t2_exception
+        ],
+        "send": send,
+        "discord_ok": discord_ok,
+        "discord_error": discord_error,
+    }
 
 
 def list_workflows() -> dict:
@@ -1371,6 +1680,57 @@ def main():
     backtest_replay.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     backtest_replay.add_argument("--fixture", required=True, help="JSON fixture with daily_data for strategy replay")
 
+    # --- order subcommand (for Hermes-Agent) ---
+    order_parser = sub.add_parser("order", help="Order management for Hermes-Agent")
+    order_sub = order_parser.add_subparsers(dest="action", required=True)
+
+    order_confirm = order_sub.add_parser("confirm", help="Confirm condition order via parsed reply text")
+    order_confirm.add_argument("reply", help="User reply text, e.g. '止损触发了 艾比森 成交¥19.00'")
+    order_confirm.add_argument("--scope", default="paper_mx", help="Order scope")
+
+    order_pending = order_sub.add_parser("pending", help="List pending condition orders")
+    order_pending.add_argument("--scope", default="paper_mx", help="Order scope")
+
+    order_remind = order_sub.add_parser("remind", help="Send pending order reminders to Discord")
+    order_remind.add_argument("--scope", default="paper_mx", help="Order scope")
+    order_remind.add_argument("--send", action="store_true", help="Actually send to Discord")
+
+    order_overdue = order_sub.add_parser("overdue-check", help="Check overdue unconfirmed orders and send reminders")
+    order_overdue.add_argument("--scope", default="paper_mx", help="Order scope")
+    order_overdue.add_argument("--send", action="store_true", help="Actually send reminders to Discord")
+
+    order_place = order_sub.add_parser("place", help="Place a new condition order")
+    order_place.add_argument("--code", required=True, help="Stock code")
+    order_place.add_argument("--name", required=True, help="Stock name")
+    order_place.add_argument("--side", choices=["buy", "sell"], default="sell", help="Order side")
+    order_place.add_argument("--type", dest="condition_type", required=True,
+                             choices=["dynamic_stop", "absolute_stop", "take_profit_t1", "manual_stop", "manual_tp"],
+                             help="Condition type")
+    order_place.add_argument("--price", type=float, required=True, help="Trigger price")
+    order_place.add_argument("--shares", type=int, default=0, help="Share quantity (0 = all)")
+    order_place.add_argument("--scope", default="paper_mx", help="Order scope")
+    order_place.add_argument("--reason", default="", help="Reason text")
+
+    order_cancel = order_sub.add_parser("cancel", help="Cancel a condition order")
+    order_cancel.add_argument("--code", required=True, help="Stock code")
+    order_cancel.add_argument("--name", default="", help="Stock name (for matching)")
+    order_cancel.add_argument("--type", dest="condition_type", default="",
+                              help="Condition type filter (optional)")
+    order_cancel.add_argument("--scope", default="paper_mx", help="Order scope")
+
+    order_modify = order_sub.add_parser("modify", help="Modify trigger price of a condition order")
+    order_modify.add_argument("--code", required=True, help="Stock code")
+    order_modify.add_argument("--name", default="", help="Stock name (for matching)")
+    order_modify.add_argument("--price", type=float, required=True, help="New trigger price")
+    order_modify.add_argument("--type", dest="condition_type", default="",
+                              help="Condition type filter (optional)")
+    order_modify.add_argument("--scope", default="paper_mx", help="Order scope")
+
+    order_list = order_sub.add_parser("list", help="List all orders with optional filters")
+    order_list.add_argument("--scope", default=None, help="Scope filter")
+    order_list.add_argument("--status", default=None, help="Status filter")
+    order_list.add_argument("--limit", type=int, default=20, help="Max results")
+
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)
     for name in ["morning", "noon", "evening", "scoring", "weekly"]:
@@ -1378,6 +1738,10 @@ def main():
     screener = run_sub.add_parser("screener")
     screener.add_argument("--pool", choices=["core", "watch", "all"], default="watch")
     screener.add_argument("--universe", choices=["tracked", "market"], default="tracked")
+    sentiment_parser = run_sub.add_parser("sentiment")
+    sentiment_parser.add_argument("--dry-run", action="store_true", help="Scan only, no Discord push")
+    hk_parser = run_sub.add_parser("hk_monitor")
+    hk_parser.add_argument("--dry-run", action="store_true", help="Check only, no Discord push")
 
     status_parser = sub.add_parser("status", help="Show current status")
     status_parser.add_argument("target", choices=["today"])
@@ -1409,6 +1773,8 @@ def main():
                     result = list_workflows()
                 elif args.command == "templates":
                     result = list_agent_templates()
+                elif args.command == "order":
+                    result = order_command(args.action, args)
                 elif args.command == "run":
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
@@ -1496,6 +1862,8 @@ def main():
             result = list_workflows()
         elif args.command == "templates":
             result = list_agent_templates()
+        elif args.command == "order":
+            result = order_command(args.action, args)
         elif args.command == "run":
             result = run_pipeline(args.pipeline, args)
         elif args.command == "orchestrate":
@@ -1650,6 +2018,31 @@ def main():
         elif result.get("command") == "orchestrate":
             print(f"workflow {result['workflow']}: {result['status']}")
             print(f"steps: {', '.join(step['step'] for step in result.get('steps', []))}")
+        elif result.get("command") == "order":
+            action = result.get("action", "")
+            print(f"order {action}: {result.get('status', 'ok')}")
+            if action == "pending":
+                print(f"pending_count: {result.get('pending_count', 0)}")
+                for item in result.get("items", []):
+                    print(f"  {item.get('name', '')} {item.get('type', '')} @ {item.get('currency', '¥')}{item.get('price', 0):.2f}")
+            elif action == "confirm":
+                print(f"reply: {result.get('reply', {}).get('raw', '')}")
+                print(f"matched_order_count: {result.get('matched_order_count', 0)}")
+                print(f"trade_event_recorded: {result.get('trade_event_recorded', False)}")
+            elif action == "remind":
+                print(f"pending_count: {result.get('pending_count', 0)}")
+                print(f"send: {result.get('send', False)} discord_ok={result.get('discord_ok', False)}")
+            elif action == "overdue-check":
+                print(f"t1_remind: {result.get('t1_remind_count', 0)} t2_exception: {result.get('t2_exception_count', 0)}")
+            elif action == "place":
+                order = result.get("order", {})
+                print(f"placed: {order.get('code', '')} {order.get('name', '')} {order.get('condition_type', '')} @ ¥{order.get('trigger_price', 0):.2f}")
+            elif action == "cancel":
+                print(f"cancelled: {result.get('cancelled_count', 0)} orders for {result.get('code', '')}")
+            elif action == "modify":
+                print(f"modified: {result.get('modified_count', 0)} orders for {result.get('code', '')} → ¥{result.get('new_price', 0):.2f}")
+            elif action == "list":
+                print(f"orders: {result.get('order_count', 0)}")
         else:
             print(f"run {result['pipeline']}: {result['status']}")
             print(f"run_id: {result['run_id']}")

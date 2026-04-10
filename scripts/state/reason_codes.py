@@ -20,7 +20,7 @@ REASON_CODE_REGISTRY: dict[str, dict[str, str]] = {
     "MARKET_GREEN": {"category": "market", "label": "大盘偏强", "state": "GREEN"},
     "MARKET_YELLOW": {"category": "market", "label": "大盘震荡", "state": "YELLOW"},
     "MARKET_RED": {"category": "market", "label": "大盘转弱", "state": "RED"},
-    "MARKET_CLEAR": {"category": "market", "label": "清仓/不抄底", "state": "CLEAR"},
+    "MARKET_CLEAR": {"category": "market", "label": "大盘观望", "state": "CLEAR"},
     "POOL_OK": {"category": "pool", "label": "池子正常", "state": "ok"},
     "POOL_EMPTY": {"category": "pool", "label": "池子为空", "state": "ok"},
     "POOL_WARNING": {"category": "pool", "label": "池子预警", "state": "warning"},

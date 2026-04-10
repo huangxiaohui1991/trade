@@ -69,3 +69,11 @@ pool_management:
   add_to_watch_streak_days: 1
 
 capital: 450286
+
+# 舆情监控
+sentiment:
+  scan_interval_minutes: 30
+  dedup_hours: 24
+  # 负面关键词在 pipeline/sentiment_monitor.py 中维护
+  # 此处可覆盖默认配置
+  enabled: true

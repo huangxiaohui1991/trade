@@ -109,6 +109,17 @@
 - [x] `morning` 资讯搜索完全切到 MX capability layer
 备注：盘前资讯已统一经 `dispatch_mx_command("news", ...)` 走 capability layer，并补了可用/降级测试。
 
+### 自动化闭环
+
+- [x] 舆情独立监控定时任务
+备注：`pipeline/sentiment_monitor.py` 实现核心池+持仓舆情扫描，关键词匹配（高/中两级），告警去重（24h），Discord 推送。crontab 每30分钟执行。
+- [x] 港股遗留仓位自动监控
+备注：`pipeline/hk_monitor.py` 自动拉取港股价格（MX → akshare），检查绝对止损（-15%）和反弹止损上调规则，触发时 Discord 告警，更新结构化账本。crontab 16:30 执行。
+- [x] 订单管理 CLI（Hermes-Agent 专用）
+备注：`trade order` 子命令组，支持 `pending / confirm / place / cancel / modify / remind / overdue-check / list`，Hermes-Agent 通过 CLI 直接管理条件单，无需 Discord Bot。
+- [x] 超时未确认提醒
+备注：`trade order overdue-check` 实现 T+1 再提醒 / T+2 异常标记，crontab 每日 9:15 自动执行。
+
 ---
 
 ## 完成定义

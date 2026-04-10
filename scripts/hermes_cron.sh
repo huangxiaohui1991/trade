@@ -103,10 +103,12 @@ case "$MODE" in
         "$PYTHON" -m scripts.cli.trade orchestrate weekly_review --json 2>&1
         ;;
     sentiment)
-        echo ">> 舆情监控（TrendRadar）"
-        # TODO: 调用 TrendRadar API，匹配关键词后推送
-        # 目前为 placeholder，后续接入 TrendRadar MCP
-        echo "[sentiment] Placeholder - TrendRadar 待接入"
+        echo ">> 舆情监控"
+        "$PYTHON" -m scripts.cli.trade run sentiment --json 2>&1
+        ;;
+    hk_monitor)
+        echo ">> 港股遗留仓位检查"
+        "$PYTHON" -m scripts.cli.trade run hk_monitor --json 2>&1
         ;;
     *)
         echo "未知模式: $MODE"

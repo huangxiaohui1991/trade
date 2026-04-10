@@ -35,6 +35,43 @@ bin/trade backtest history --json
 bin/trade backtest compare --json
 ```
 
+### 订单管理（Hermes-Agent 专用）
+
+```bash
+# 查看待确认条件单
+bin/trade order pending --json
+
+# 确认条件单（解析用户回复）
+bin/trade order confirm "止损触发了 艾比森 成交¥19.00" --json
+
+# 挂条件单
+bin/trade order place --code 300389 --name 艾比森 --type dynamic_stop --price 18.50 --json
+
+# 取消条件单
+bin/trade order cancel --code 300389 --json
+
+# 修改条件单价格
+bin/trade order modify --code 300389 --price 18.20 --json
+
+# 发送待确认提醒到 Discord
+bin/trade order remind --send --json
+
+# 检查超时未确认订单
+bin/trade order overdue-check --send --json
+
+# 查看所有订单
+bin/trade order list --json
+```
+
+### 舆情监控 & 港股监控
+
+```bash
+bin/trade run sentiment --json
+bin/trade run sentiment --dry-run --json
+bin/trade run hk_monitor --json
+bin/trade run hk_monitor --dry-run --json
+```
+
 如果不使用 `bin/trade`，也可以直接：
 
 ```bash

@@ -49,7 +49,7 @@ def run() -> dict:
         engine = DataEngine()
 
         _logger.info(">> 大盘数据")
-        market_snapshot = load_market_snapshot()
+        market_snapshot = load_market_snapshot(refresh=True)
         indices = market_snapshot.get("indices") or market_snapshot.get("market") or {}
         market_info = {}
         for name, info in indices.items():

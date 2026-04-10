@@ -161,17 +161,17 @@ class CompositeDecider:
         # 2. 大盘信号判断
         if market_signal == "CLEAR":
             action = "CLEAR"
-            market_notes = ["MA60下方15日+，清仓观望"]
+            market_notes = ["MA60下方15日+，观望不抄底"]
             pos_pct = 0.0
         elif market_signal == "RED":
             action = "SELL"
-            market_notes = ["RED信号，清仓"]
+            market_notes = ["大盘转弱，清仓"]
             pos_pct = 0.0
         elif market_signal == "YELLOW":
-            market_notes = ["YELLOW信号，半仓操作"]
+            market_notes = ["大盘震荡，半仓操作"]
             pos_pct = market_multiplier
         else:
-            market_notes = ["GREEN信号，正常仓位"]
+            market_notes = ["大盘偏强，正常仓位"]
             pos_pct = market_multiplier
 
         # 3. 评分判断

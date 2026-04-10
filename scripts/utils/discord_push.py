@@ -101,6 +101,32 @@ def _market_signal_emoji(signal: str) -> str:
     return {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}.get(signal, signal)
 
 
+# 大盘信号中文映射（面向用户展示）
+SIGNAL_CN = {
+    "GREEN": "偏强",
+    "YELLOW": "震荡",
+    "RED": "转弱",
+    "CLEAR": "观望",
+}
+
+SIGNAL_EMOJI_CN = {
+    "GREEN": "🟢 偏强",
+    "YELLOW": "🟡 震荡",
+    "RED": "🔴 转弱",
+    "CLEAR": "⚪ 观望",
+}
+
+
+def _signal_cn(signal: str) -> str:
+    """大盘信号 → 中文标签"""
+    return SIGNAL_CN.get(signal, signal)
+
+
+def _signal_emoji_cn(signal: str) -> str:
+    """大盘信号 → emoji + 中文标签"""
+    return SIGNAL_EMOJI_CN.get(signal, signal)
+
+
 def _score_emoji(score: float) -> str:
     """评分 → emoji（≥7 ✅ / ≥5 🟡 / <5 ❌）"""
     if score >= 7:
@@ -159,7 +185,7 @@ def _build_morning_summary(data: dict) -> str:
 
     signal = data.get("market_signal", "")
     if signal:
-        lines.append(f"  🔔 {signal}")
+        lines.append(f"  🔔 {_signal_emoji_cn(signal)}")
 
     lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "💼 持仓", "━━━━━━━━━━━━━━━━━━━━"])
     for pos in data.get("positions", []):
@@ -258,7 +284,7 @@ def _build_evening_report(data: dict) -> str:
         price = info.get("price", 0)
         chg = info.get("chg_pct", 0)
         signal = info.get("signal", "")
-        signal_mark = f"🔔 {signal}" if signal else ""
+        signal_mark = f"🔔 {_signal_cn(signal)}" if signal else ""
         lines.append(f"  {name}: {price:.2f} ({_fmt_pct(chg)}) {signal_mark}")
 
     lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "💰 持仓", "━━━━━━━━━━━━━━━━━━━━"])

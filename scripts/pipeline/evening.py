@@ -234,8 +234,9 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
         f"MA60 {_f(cy_info.get('ma60_pct', 0), '+.2f')}%）"
     )
     emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}.get(signal, signal)
-    lines.append(f"- **判定：{emoji} {signal}**（连续{green_days}日站上MA20→GREEN / "
-                 f"连续{red_days}日跌破MA20→RED）")
+    signal_cn = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}.get(signal, signal)
+    lines.append(f"- **判定：{emoji} {signal_cn}**（连续{green_days}日站上MA20→偏强 / "
+                 f"连续{red_days}日跌破MA20→转弱）")
     lines.append("")
 
     # 条件单清单
@@ -265,11 +266,13 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
     # 明日重点
     lines.append("### 明日重点")
     if signal == "RED":
-        lines.append("1. 🔴 大盘清仓信号，不买入，只观察")
+        lines.append("1. 🔴 大盘转弱，不买入，只观察")
     elif signal == "YELLOW":
-        lines.append("1. 🟡 大盘谨慎状态，如买入需减半金额")
+        lines.append("1. 🟡 大盘震荡，如买入需减半金额")
+    elif signal == "CLEAR":
+        lines.append("1. ⚪ 大盘观望，不抄底")
     else:
-        lines.append("1. 🟢 大盘可操作，关注核心池买入机会")
+        lines.append("1. 🟢 大盘偏强，关注核心池买入机会")
     lines.append("2. 盘前照条件单清单挂单，确认后打勾")
     lines.append("3. 买入后更新 portfolio.md")
 
@@ -460,7 +463,7 @@ def run() -> dict:
         strategy_cfg = get_strategy()
 
         _logger.info(">> 大盘数据")
-        market_data = load_market_snapshot()
+        market_data = load_market_snapshot(refresh=True)
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
             if not isinstance(info, dict):
@@ -474,7 +477,9 @@ def run() -> dict:
                 f"({info.get('change_pct', info.get('chg_pct', 0)):+.2f}%) "
                 f"[{info.get('signal', '')}]"
             )
-        _logger.info(f"  → 信号: {market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))}")
+        _signal = market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))
+        _signal_map = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
+        _logger.info(f"  → 信号: {_signal_map.get(_signal, _signal)}")
 
         _logger.info(">> 更新持仓价格...")
         position_changes = _update_portfolio_prices(vault, engine)
@@ -530,11 +535,13 @@ def run() -> dict:
         tomorrow_plan = []
         signal = market_data.get("signal", market_data.get("market_signal", ""))
         if signal == "GREEN":
-            tomorrow_plan.append("🟢 GREEN信号，可正常买入")
+            tomorrow_plan.append("🟢 偏强，可正常买入")
         elif signal == "YELLOW":
-            tomorrow_plan.append("🟡 YELLOW信号，如买入需减半金额")
+            tomorrow_plan.append("🟡 震荡，如买入需减半金额")
+        elif signal == "CLEAR":
+            tomorrow_plan.append("⚪ 观望，不抄底")
         else:
-            tomorrow_plan.append("🔴 RED/CLEAR信号，不买入，只观察")
+            tomorrow_plan.append("🔴 转弱，不买入，只观察")
         tomorrow_plan.append(f"本周买入: {weekly_bought}/{weekly_limit}")
 
         discord_data = {

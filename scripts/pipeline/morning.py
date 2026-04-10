@@ -278,7 +278,7 @@ def run() -> dict:
         get_strategy()
 
         _logger.info(">> 大盘数据")
-        market_data = load_market_snapshot()
+        market_data = load_market_snapshot(refresh=True)
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
             if not isinstance(info, dict):
@@ -294,7 +294,9 @@ def run() -> dict:
                 f"MA60:{info.get('ma60_pct'):+.2f}% "
                 f"[{info.get('signal', '')}]"
             )
-        _logger.info(f"  → 信号: {market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))}")
+        _signal = market_data.get('signal', market_data.get('market_signal', 'UNKNOWN'))
+        _signal_map = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
+        _logger.info(f"  → 信号: {_signal_map.get(_signal, _signal)}")
 
         _logger.info(">> 持仓状态")
         positions = _get_portfolio_positions()

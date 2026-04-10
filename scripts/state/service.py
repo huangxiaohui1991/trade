@@ -1719,9 +1719,13 @@ def load_market_snapshot(refresh: bool = False) -> dict:
                     "source_chain": _json_loads(row["source_chain_json"], []),
                     "indices": _json_loads(row["detail_json"], {}),
                 }
-    from scripts.engine.market_timer import load_market_snapshot as load_engine_market_snapshot
+    from scripts.engine import market_timer as _mt_mod
 
-    snapshot = dict(load_engine_market_snapshot())
+    # 强制刷新时重置全局单例，确保重新拉取实时数据
+    if refresh:
+        _mt_mod._timer_instance = None
+
+    snapshot = dict(_mt_mod.load_market_snapshot())
     snapshot.setdefault("updated_at", _now_ts())
     snapshot.setdefault("as_of_date", _today_str())
     snapshot.setdefault("signal", snapshot.get("market_signal", "CLEAR"))
