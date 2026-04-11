@@ -305,7 +305,7 @@ def _enrich_today_journal(vault: ObsidianVault, today_str: str,
 
 # ─────────────────────────────────────────────────────────────────────────────
 def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
-                             market_data: dict, position_changes: list) -> str:
+                            market_data: dict, position_changes: list) -> str:
     """生成明日计划 markdown 内容"""
     strategy = get_strategy()
     market_timer_cfg = strategy.get("market_timer", {})
@@ -388,6 +388,45 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
     lines.append("3. 买入后更新 portfolio.md")
 
     return "\n".join(lines)
+
+
+def _build_condition_order_suggestions(position_changes: list[dict]) -> list[dict]:
+    """从收盘持仓变化构造次日挂单建议。"""
+    suggestions = []
+    for change in position_changes:
+        if not change.get("new_price"):
+            continue
+        name = str(change.get("name", "")).strip()
+        shares = int(change.get("shares", 0) or 0)
+        if not name or shares <= 0:
+            continue
+        suggestions.extend([
+            {
+                "name": name,
+                "type": "止损",
+                "price": change.get("stop_loss", 0),
+                "currency": "¥",
+                "quantity": f"{shares}股",
+                "note": "动态止损",
+            },
+            {
+                "name": name,
+                "type": "绝对止损",
+                "price": change.get("absolute_stop", 0),
+                "currency": "¥",
+                "quantity": f"{shares}股",
+                "note": "-7%无条件",
+            },
+            {
+                "name": name,
+                "type": "止盈(第一批)",
+                "price": change.get("t1_price", 0),
+                "currency": "¥",
+                "quantity": "1/3仓",
+                "note": "+15%卖1/3",
+            },
+        ])
+    return suggestions
 
 
 def _backfill_today_trades(vault: ObsidianVault, today_str: str) -> int:
@@ -682,6 +721,7 @@ def run() -> dict:
             "alerts": alerts,
             "core_pool": discord_core,
             "tomorrow_plan": tomorrow_plan,
+            "condition_orders": _build_condition_order_suggestions(position_changes),
         }
 
         ok, err = send_evening_report(discord_data)

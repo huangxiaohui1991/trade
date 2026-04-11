@@ -42,6 +42,61 @@ _logger = get_logger("pipeline.morning")
 
 
 # ---------------------------------------------------------------------------
+def _build_condition_orders(avg_cost: float, shares: int, currency: str = "¥") -> list[dict]:
+    """根据持仓成本构造盘前条件单预览。"""
+    if avg_cost <= 0 or shares <= 0:
+        return []
+
+    strategy = get_strategy()
+    risk = strategy.get("risk", {})
+    stop_loss_pct = float(risk.get("stop_loss", 0.04) or 0.04)
+    absolute_stop_pct = float(risk.get("absolute_stop", 0.07) or 0.07)
+    tp = risk.get("take_profit", {}) if isinstance(risk.get("take_profit", {}), dict) else {}
+    t1_pct = float(tp.get("t1_pct", 0.15) or 0.15)
+
+    return [
+        {
+            "type": "止损",
+            "price": round(avg_cost * (1 - stop_loss_pct), 2),
+            "currency": currency,
+            "quantity": f"{shares}股",
+            "note": "动态止损",
+        },
+        {
+            "type": "绝对止损",
+            "price": round(avg_cost * (1 - absolute_stop_pct), 2),
+            "currency": currency,
+            "quantity": f"{shares}股",
+            "note": "-7%无条件",
+        },
+        {
+            "type": "止盈(第一批)",
+            "price": round(avg_cost * (1 + t1_pct), 2),
+            "currency": currency,
+            "quantity": "1/3仓",
+            "note": f"+{t1_pct:.0%}卖1/3",
+        },
+    ]
+
+
+def _build_position_condition_previews(positions: list[dict]) -> list[dict]:
+    """从持仓快照构造盘前挂单建议。"""
+    previews = []
+    for pos in positions:
+        name = str(pos.get("name", "")).strip()
+        avg_cost = float(pos.get("avg_cost", 0) or 0)
+        shares = int(pos.get("shares", 0) or 0)
+        if not name or avg_cost <= 0 or shares <= 0:
+            continue
+        for item in _build_condition_orders(avg_cost, shares):
+            previews.append({
+                "name": name,
+                **item,
+            })
+    return previews
+
+
+# ---------------------------------------------------------------------------
 def _get_portfolio_positions() -> list:
     """从结构化账本读取有效持仓。"""
     positions = []
@@ -55,6 +110,7 @@ def _get_portfolio_positions() -> list:
                 "name": str(row.get("name", "")).strip(),
                 "code": str(row.get("code", "")).strip(),
                 "shares": shares,
+                "avg_cost": float(row.get("avg_cost", 0) or 0),
                 "price": float(row.get("current_price", row.get("avg_cost", 0)) or 0),
                 "note": str(row.get("note", "")).strip(),
             })
@@ -222,6 +278,7 @@ def _build_discord_data(market_data: dict, positions: list, core_items: list,
                         weekly_bought: int, weekday: str) -> dict:
     """构造 Discord 推送所需的 data 字典"""
     market_indices = market_data.get("indices") or market_data.get("market") or {}
+    condition_orders = _build_position_condition_previews(positions)
 
     # 格式化 positions for Discord
     discord_positions = []
@@ -275,6 +332,7 @@ def _build_discord_data(market_data: dict, positions: list, core_items: list,
         "core_pool": discord_core,
         "weekly_bought": weekly_bought,
         "weekly_limit": 2,
+        "condition_orders": condition_orders,
     }
 
 
