@@ -1649,6 +1649,23 @@ def _validation_data_fidelity(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    def _group_timepoint(history_group_id: str, pipeline: str, metadata: dict[str, Any]) -> str:
+        timepoint = str(metadata.get("timepoint", "") if isinstance(metadata, dict) else "").strip()
+        if timepoint:
+            return timepoint
+        parts = [part.strip() for part in str(history_group_id or "").split(":") if part.strip()]
+        if len(parts) >= 4 and parts[0] in {"morning", "noon", "evening"}:
+            return parts[2]
+        if pipeline in {"morning", "noon", "evening", "stock_screener", "core_pool_scoring"}:
+            return {
+                "morning": "preopen",
+                "noon": "midday",
+                "evening": "close",
+                "stock_screener": "screener",
+                "core_pool_scoring": "core_pool_scoring",
+            }.get(pipeline, pipeline)
+        return parts[0] if parts else ""
+
     group_rows: dict[str, dict[str, Any]] = {}
     sources = [
         ("market_snapshot", load_market_snapshot_history(snapshot_date, limit=max(1, int(limit or 20)))),
@@ -1661,6 +1678,7 @@ def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> 
             history_group_id = str(item.get("history_group_id", "")).strip()
             if not history_group_id:
                 continue
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
             row = group_rows.setdefault(
                 history_group_id,
                 {
@@ -1669,6 +1687,7 @@ def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> 
                     "updated_at": str(item.get("updated_at", "") or ""),
                     "pipeline": str(item.get("pipeline", "") or ""),
                     "source": str(item.get("source", "") or ""),
+                    "timepoint": _group_timepoint(history_group_id, str(item.get("pipeline", "") or ""), metadata),
                     "components": set(),
                 },
             )
@@ -1680,6 +1699,8 @@ def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> 
                 row["pipeline"] = str(item.get("pipeline", "") or "")
             if not row.get("source") and item.get("source"):
                 row["source"] = str(item.get("source", "") or "")
+            if not row.get("timepoint"):
+                row["timepoint"] = _group_timepoint(history_group_id, str(item.get("pipeline", "") or ""), metadata)
 
     items = []
     for row in group_rows.values():
@@ -1690,6 +1711,8 @@ def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> 
                 "updated_at": row.get("updated_at", ""),
                 "pipeline": row.get("pipeline", ""),
                 "source": row.get("source", ""),
+                "timepoint": row.get("timepoint", ""),
+                "component_count": len(row.get("components", set())),
                 "components": sorted(row.get("components", set())),
             }
         )
@@ -1737,7 +1760,7 @@ def _diagnose_signal_snapshot_code(stock_code: str, bundle: dict[str, Any]) -> d
         else:
             status = "scored_but_not_in_pool"
             reason = "candidate was scored in this run but not projected into pool snapshot"
-    elif "candidate_snapshot" in missing_components:
+    elif "candidate_snapshot" in missing_components or "scored_candidates" in missing_components:
         status = "candidate_snapshot_missing"
         reason = "candidate snapshot missing for this history group"
     else:
@@ -1757,6 +1780,41 @@ def _diagnose_signal_snapshot_code(stock_code: str, bundle: dict[str, Any]) -> d
         "candidate": candidate,
         "pool_entry": pool_entry,
     }
+
+
+def _build_market_timepoint_timeline(snapshot_date: str, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest_market = load_market_snapshot_history(snapshot_date, limit=100).get("items", [])
+    latest_by_group: dict[str, dict[str, Any]] = {}
+    for item in latest_market:
+        history_group_id = str(item.get("history_group_id", "")).strip()
+        if history_group_id and history_group_id not in latest_by_group:
+            latest_by_group[history_group_id] = item
+
+    timeline = []
+    for group in groups:
+        history_group_id = str(group.get("history_group_id", "")).strip()
+        market_item = latest_by_group.get(history_group_id, {})
+        timeline.append(
+            {
+                "history_group_id": history_group_id,
+                "timepoint": str(group.get("timepoint", "") or ""),
+                "pipeline": str(group.get("pipeline", "") or ""),
+                "updated_at": str(group.get("updated_at", "") or ""),
+                "signal": str(market_item.get("signal", "") or ""),
+                "source": str(market_item.get("source", group.get("source", "")) or group.get("source", "")),
+                "components": list(group.get("components", []) or []),
+            }
+        )
+
+    order = {"preopen": 0, "midday": 1, "screener": 2, "core_pool_scoring": 3, "close": 4}
+    timeline.sort(
+        key=lambda item: (
+            order.get(str(item.get("timepoint", "") or ""), 99),
+            str(item.get("updated_at", "") or ""),
+            str(item.get("history_group_id", "") or ""),
+        )
+    )
+    return timeline
 
 
 def diagnose_signal_snapshot(
@@ -1785,6 +1843,7 @@ def diagnose_signal_snapshot(
     candidate_snapshot["candidates_truncated"] = len(candidates) > len(candidate_snapshot["candidates"])
     pool_snapshot["entries"] = pool_entries[: max(1, int(candidate_limit or 20))]
     pool_snapshot["entries_truncated"] = len(pool_entries) > len(pool_snapshot["entries"])
+    market_timeline = _build_market_timepoint_timeline(resolved_date, available_groups)
 
     result = {
         "command": "backtest",
@@ -1796,6 +1855,7 @@ def diagnose_signal_snapshot(
         "resolved_from_latest": bool(not requested_group_id and str(bundle.get("history_group_id", "") or "")),
         "missing_components": list(bundle.get("missing_components", []) or []),
         "available_history_groups": available_groups,
+        "market_timeline": market_timeline,
         "market_snapshot": bundle.get("market_snapshot", {}),
         "today_decision": bundle.get("today_decision", {}),
         "decision_snapshot": bundle.get("decision_snapshot", {}),
@@ -1806,6 +1866,30 @@ def diagnose_signal_snapshot(
     }
     if stock_code:
         result["code_diagnosis"] = _diagnose_signal_snapshot_code(stock_code, bundle)
+        across_groups = []
+        for group in available_groups[:20]:
+            group_id = str(group.get("history_group_id", "")).strip()
+            if not group_id:
+                continue
+            group_bundle = bundle if group_id == str(result.get("history_group_id", "") or "") else load_daily_signal_snapshot_bundle(
+                resolved_date, history_group_id=group_id
+            )
+            diagnosis = _diagnose_signal_snapshot_code(stock_code, group_bundle)
+            across_groups.append(
+                {
+                    "history_group_id": group_id,
+                    "timepoint": str(group.get("timepoint", "") or ""),
+                    "pipeline": str(group.get("pipeline", "") or ""),
+                    "updated_at": str(group.get("updated_at", "") or ""),
+                    "status": diagnosis.get("status", ""),
+                    "reason": diagnosis.get("reason", ""),
+                    "market_signal": diagnosis.get("market_signal", ""),
+                    "candidate_present": bool(diagnosis.get("candidate_present", False)),
+                    "pool_present": bool(diagnosis.get("pool_present", False)),
+                    "pool_bucket": str(diagnosis.get("pool_bucket", "") or ""),
+                }
+            )
+        result["code_diagnosis_across_groups"] = across_groups
     return result
 
 
@@ -2019,13 +2103,38 @@ def render_signal_snapshot_diagnosis_report(report: dict[str, Any]) -> str:
         lines.append("")
 
     available_groups = report.get("available_history_groups", []) or []
+    timeline = report.get("market_timeline", []) if isinstance(report.get("market_timeline", []), list) else []
+    if timeline:
+        lines.append("  时点摘要:")
+        for item in timeline[:8]:
+            lines.append(
+                f"    - {item.get('timepoint', '') or '-'} "
+                f"{item.get('pipeline', '') or '-'} "
+                f"signal={item.get('signal', '') or '-'} "
+                f"{item.get('updated_at', '')}"
+            )
+        lines.append("")
+
     if available_groups:
         lines.append("  当日可选运行:")
         for item in available_groups[:5]:
             lines.append(
                 f"    - {item.get('history_group_id', '')} "
+                f"({item.get('timepoint', '') or '-'}) "
                 f"[{','.join(item.get('components', []) or [])}] "
                 f"{item.get('updated_at', '')}"
+            )
+        lines.append("")
+
+    across_groups = report.get("code_diagnosis_across_groups", []) if isinstance(report.get("code_diagnosis_across_groups", []), list) else []
+    if across_groups:
+        lines.append("  单股跨组对比:")
+        for item in across_groups[:8]:
+            lines.append(
+                f"    - {item.get('timepoint', '') or '-'} "
+                f"{item.get('status', '')} "
+                f"signal={item.get('market_signal', '') or '-'} "
+                f"bucket={item.get('pool_bucket', '') or '-'}"
             )
         lines.append("")
 

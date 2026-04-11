@@ -149,12 +149,47 @@ class SignalSnapshotDiagnosisTests(unittest.TestCase):
         self.assertEqual(report["market_snapshot"]["signal"], "GREEN")
         self.assertEqual(report["candidate_count"], 2)
         self.assertGreaterEqual(len(report["available_history_groups"]), 1)
+        self.assertGreaterEqual(len(report["market_timeline"]), 1)
+        self.assertEqual(report["available_history_groups"][0]["timepoint"], "screener")
         self.assertEqual(report["code_diagnosis"]["status"], "selected_core")
         self.assertEqual(report["code_diagnosis"]["pool_bucket"], "core")
         self.assertTrue(report["code_diagnosis"]["candidate_present"])
+        self.assertEqual(report["code_diagnosis_across_groups"][0]["status"], "selected_core")
         text = render_signal_snapshot_diagnosis_report(report)
         self.assertIn("历史信号镜像诊断", text)
         self.assertIn("selected_core", text)
+        self.assertIn("时点摘要", text)
+
+    def test_diagnose_signal_snapshot_compares_code_across_groups(self):
+        from scripts.backtest.historical_pipeline import diagnose_signal_snapshot
+        from scripts.state import save_market_snapshot_history
+
+        self._seed_history_bundle()
+        save_market_snapshot_history(
+            {
+                "as_of_date": "2026-04-11",
+                "updated_at": "2026-04-11T12:00:00",
+                "signal": "YELLOW",
+                "source": "midday_market",
+                "source_chain": ["midday_market"],
+                "indices": {"上证指数": {"signal": "YELLOW"}},
+            },
+            pipeline="noon",
+            history_group_id="noon:2026-04-11:midday:120000",
+            metadata={"snapshot_date": "2026-04-11", "timepoint": "midday"},
+        )
+
+        report = diagnose_signal_snapshot("2026-04-11", stock_code="601869")
+
+        statuses = {
+            item["timepoint"]: item["status"]
+            for item in report["code_diagnosis_across_groups"]
+        }
+        self.assertEqual(statuses["screener"], "selected_core")
+        self.assertEqual(statuses["midday"], "candidate_snapshot_missing")
+        timeline_timepoints = [item["timepoint"] for item in report["market_timeline"]]
+        self.assertIn("midday", timeline_timepoints)
+        self.assertIn("screener", timeline_timepoints)
 
     def test_diagnose_signal_snapshot_reports_missed_stock(self):
         from scripts.backtest.historical_pipeline import diagnose_signal_snapshot
