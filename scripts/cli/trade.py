@@ -35,6 +35,9 @@ from scripts.backtest import (
     run_backtest,
     run_drawdown_analysis,
     run_parameter_sweep,
+    run_pool_entry_performance_analysis,
+    run_strategy_health_report,
+    run_veto_rule_analysis,
     run_walk_forward,
 )
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
@@ -620,6 +623,18 @@ def _parse_codes_arg(value: str | None) -> list[str]:
     for sep in ("/", "，", "、", " "):
         normalized = normalized.replace(sep, ",")
     return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+def _parse_positive_int_list_arg(value: str | None) -> list[int]:
+    values = []
+    for item in _parse_codes_arg(value):
+        try:
+            number = int(item)
+        except Exception:
+            continue
+        if number > 0:
+            values.append(number)
+    return values
 
 
 def _financial_missing_fields(data) -> list[str]:
@@ -2033,6 +2048,45 @@ def main():
     backtest_validate.add_argument("--opportunity-min-gain-pct", type=float, default=0.15, help="Minimum gain threshold for opportunity windows")
     backtest_validate.add_argument("--premature-exit-min-gain-pct", type=float, default=0.08, help="Minimum post-exit gain to flag premature exits")
     backtest_validate.add_argument("--output", default=None, help="Optional JSON output path")
+    backtest_pool = backtest_sub.add_parser("pool-performance", help="Analyze N-day forward performance after a stock newly enters the pool")
+    backtest_pool.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_pool.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_pool.add_argument("--bucket", choices=["core", "watch", "all"], default="core", help="Which pool bucket to analyze")
+    backtest_pool.add_argument("--codes", default=None, help="Optional comma-separated stock codes")
+    backtest_pool.add_argument("--pipeline", default="stock_screener", help="Pool snapshot pipeline filter")
+    backtest_pool.add_argument("--windows", default="5,10,20", help="Comma-separated holding windows, e.g. 5,10,20")
+    backtest_pool.add_argument("--sample-limit", type=int, default=5, help="How many top/bottom samples to keep")
+    backtest_pool.add_argument("--output", default=None, help="Optional JSON output path")
+    backtest_health = backtest_sub.add_parser("strategy-health", help="Aggregate batch replay, veto analysis, and pool forward performance into one report")
+    backtest_health.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_health.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_health.add_argument("--bucket", choices=["core", "watch", "all"], default="core", help="Which pool bucket to derive codes/performance from")
+    backtest_health.add_argument("--codes", default=None, help="Optional comma-separated stock codes; omit to derive from pool history")
+    backtest_health.add_argument("--pipeline", default="stock_screener", help="Pool snapshot pipeline filter")
+    backtest_health.add_argument("--windows", default="5,10,20", help="Comma-separated holding windows for pool-performance")
+    backtest_health.add_argument("--code-limit", type=int, default=30, help="Max number of derived pool codes to include")
+    backtest_health.add_argument("--capital", type=float, default=None, help="Optional capital override for batch replay/veto analysis")
+    backtest_health.add_argument("--preset", default=None, help="Backtest preset, e.g. aggressive_high_return")
+    backtest_health.add_argument("--params-json", default=None, help="JSON string or file path for parameter overrides")
+    backtest_health.add_argument("--lookahead-days", type=int, default=20, help="Lookahead days for veto analysis")
+    backtest_health.add_argument("--opportunity-gain-pct", type=float, default=0.15, help="Opportunity threshold for veto analysis")
+    backtest_health.add_argument("--risk-drawdown-pct", type=float, default=0.08, help="Risk threshold for veto analysis")
+    backtest_health.add_argument("--sample-limit", type=int, default=5, help="How many top/bottom samples to keep")
+    backtest_health.add_argument("--output", default=None, help="Optional JSON output path")
+    backtest_veto = backtest_sub.add_parser("veto-analysis", help="Analyze which veto rules block risk and which ones kill opportunities")
+    backtest_veto.add_argument("--code", default=None, help="Optional single stock code, e.g. 601869")
+    backtest_veto.add_argument("--codes", default=None, help="Comma-separated stock codes, e.g. 601869,603803")
+    backtest_veto.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_veto.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_veto.add_argument("--index", default="system", help="Index code; default system composite voting")
+    backtest_veto.add_argument("--capital", type=float, default=None, help="Optional capital override")
+    backtest_veto.add_argument("--preset", default=None, help="Backtest preset, e.g. aggressive_high_return")
+    backtest_veto.add_argument("--params-json", default=None, help="JSON string or file path for parameter overrides")
+    backtest_veto.add_argument("--lookahead-days", type=int, default=20, help="Forward window in trading days after veto trigger")
+    backtest_veto.add_argument("--opportunity-gain-pct", type=float, default=0.15, help="Future peak gain threshold counted as missed opportunity")
+    backtest_veto.add_argument("--risk-drawdown-pct", type=float, default=0.08, help="Future drawdown threshold counted as risk blocked")
+    backtest_veto.add_argument("--sample-limit", type=int, default=5, help="How many example samples to keep in report")
+    backtest_veto.add_argument("--output", default=None, help="Optional JSON output path")
     backtest_signal_diagnose = backtest_sub.add_parser("signal-diagnose", help="Inspect one persisted daily signal snapshot bundle")
     backtest_signal_diagnose.add_argument("--date", dest="snapshot_date", required=True, help="Snapshot date YYYY-MM-DD")
     backtest_signal_diagnose.add_argument("--history-group-id", default=None, help="Optional history_group_id to inspect")
@@ -2221,6 +2275,78 @@ def main():
                             out_path.parent.mkdir(parents=True, exist_ok=True)
                             out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                             result["report_path"] = str(out_path)
+                    elif args.action == "pool-performance":
+                        codes = _parse_codes_arg(getattr(args, "codes", None))
+                        result = run_pool_entry_performance_analysis(
+                            start=args.start,
+                            end=args.end,
+                            bucket=args.bucket,
+                            holding_windows=_parse_positive_int_list_arg(args.windows),
+                            stock_codes=codes,
+                            pipeline=args.pipeline,
+                            sample_limit=args.sample_limit,
+                        )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
+                    elif args.action == "strategy-health":
+                        params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                        if getattr(args, "preset", None):
+                            params_override["preset"] = args.preset
+                        result = run_strategy_health_report(
+                            start=args.start,
+                            end=args.end,
+                            bucket=args.bucket,
+                            holding_windows=_parse_positive_int_list_arg(args.windows),
+                            stock_codes=_parse_codes_arg(getattr(args, "codes", None)),
+                            pipeline=args.pipeline,
+                            code_limit=args.code_limit,
+                            total_capital=args.capital,
+                            strategy_params=params_override,
+                            veto_lookahead_days=args.lookahead_days,
+                            veto_opportunity_gain_pct=args.opportunity_gain_pct,
+                            veto_risk_drawdown_pct=args.risk_drawdown_pct,
+                            sample_limit=args.sample_limit,
+                        )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
+                    elif args.action == "veto-analysis":
+                        params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                        if getattr(args, "preset", None):
+                            params_override["preset"] = args.preset
+                        codes = _parse_codes_arg(getattr(args, "codes", None))
+                        if getattr(args, "code", None):
+                            codes = [args.code] + [code for code in codes if code != args.code]
+                        if not codes:
+                            result = {
+                                "command": "backtest",
+                                "action": "veto_rule_analysis",
+                                "status": "error",
+                                "error": "请提供 --code 或 --codes 参数",
+                            }
+                        else:
+                            result = run_veto_rule_analysis(
+                                stock_codes=codes,
+                                start=args.start,
+                                end=args.end,
+                                index_code=args.index,
+                                total_capital=args.capital,
+                                strategy_params=params_override,
+                                lookahead_days=args.lookahead_days,
+                                opportunity_gain_pct=args.opportunity_gain_pct,
+                                risk_drawdown_pct=args.risk_drawdown_pct,
+                                sample_limit=args.sample_limit,
+                            )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
                     elif args.action == "signal-diagnose":
                         stock_codes = _parse_codes_arg(getattr(args, "codes", None))
                         result = diagnose_signal_snapshot(
@@ -2364,6 +2490,78 @@ def main():
                     opportunity_min_gain_pct=args.opportunity_min_gain_pct,
                     premature_exit_min_gain_pct=args.premature_exit_min_gain_pct,
                 )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
+            elif args.action == "pool-performance":
+                codes = _parse_codes_arg(getattr(args, "codes", None))
+                result = run_pool_entry_performance_analysis(
+                    start=args.start,
+                    end=args.end,
+                    bucket=args.bucket,
+                    holding_windows=_parse_positive_int_list_arg(args.windows),
+                    stock_codes=codes,
+                    pipeline=args.pipeline,
+                    sample_limit=args.sample_limit,
+                )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
+            elif args.action == "strategy-health":
+                params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                if getattr(args, "preset", None):
+                    params_override["preset"] = args.preset
+                result = run_strategy_health_report(
+                    start=args.start,
+                    end=args.end,
+                    bucket=args.bucket,
+                    holding_windows=_parse_positive_int_list_arg(args.windows),
+                    stock_codes=_parse_codes_arg(getattr(args, "codes", None)),
+                    pipeline=args.pipeline,
+                    code_limit=args.code_limit,
+                    total_capital=args.capital,
+                    strategy_params=params_override,
+                    veto_lookahead_days=args.lookahead_days,
+                    veto_opportunity_gain_pct=args.opportunity_gain_pct,
+                    veto_risk_drawdown_pct=args.risk_drawdown_pct,
+                    sample_limit=args.sample_limit,
+                )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
+            elif args.action == "veto-analysis":
+                params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                if getattr(args, "preset", None):
+                    params_override["preset"] = args.preset
+                codes = _parse_codes_arg(getattr(args, "codes", None))
+                if getattr(args, "code", None):
+                    codes = [args.code] + [code for code in codes if code != args.code]
+                if not codes:
+                    result = {
+                        "command": "backtest",
+                        "action": "veto_rule_analysis",
+                        "status": "error",
+                        "error": "请提供 --code 或 --codes 参数",
+                    }
+                else:
+                    result = run_veto_rule_analysis(
+                        stock_codes=codes,
+                        start=args.start,
+                        end=args.end,
+                        index_code=args.index,
+                        total_capital=args.capital,
+                        strategy_params=params_override,
+                        lookahead_days=args.lookahead_days,
+                        opportunity_gain_pct=args.opportunity_gain_pct,
+                        risk_drawdown_pct=args.risk_drawdown_pct,
+                        sample_limit=args.sample_limit,
+                    )
                 if args.output:
                     out_path = Path(args.output)
                     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2555,6 +2753,24 @@ def main():
                 from scripts.backtest.historical_pipeline import render_single_stock_validation_report
 
                 print(render_single_stock_validation_report(result))
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
+            elif result.get("action") == "pool_entry_performance":
+                from scripts.backtest.historical_pipeline import render_pool_entry_performance_report
+
+                print(render_pool_entry_performance_report(result))
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
+            elif result.get("action") == "strategy_health_report":
+                from scripts.backtest.historical_pipeline import render_strategy_health_report
+
+                print(render_strategy_health_report(result))
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
+            elif result.get("action") == "veto_rule_analysis":
+                from scripts.backtest.historical_pipeline import render_veto_rule_analysis_report
+
+                print(render_veto_rule_analysis_report(result))
                 if result.get("report_path"):
                     print(f"report_path: {result.get('report_path')}")
             elif result.get("action") == "signal_snapshot_diagnosis":

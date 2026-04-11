@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import atexit
 from collections import Counter, defaultdict
+import contextlib
+import io
 import json
 import math
 import re
+import statistics
 import sys
 from datetime import datetime, timedelta, date
 from pathlib import Path
@@ -61,7 +64,8 @@ def _ensure_bs_session() -> None:
     global _BS_SESSION_OPEN
     if _BS_SESSION_OPEN:
         return
-    lg = bs.login()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        lg = bs.login()
     assert lg.error_code == "0", lg.error_msg
     _BS_SESSION_OPEN = True
 
@@ -71,7 +75,8 @@ def _close_bs_session() -> None:
     if not _BS_SESSION_OPEN:
         return
     try:
-        bs.logout()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            bs.logout()
     finally:
         _BS_SESSION_OPEN = False
 
@@ -2250,6 +2255,1175 @@ def render_signal_snapshot_diagnosis_report(report: dict[str, Any]) -> str:
         if candidate_snapshot.get("candidates_truncated", False):
             lines.append("    - ...")
         lines.append("")
+    return "\n".join(lines)
+
+
+def _safe_pct(numerator: int | float, denominator: int | float) -> float:
+    if float(denominator or 0) <= 0:
+        return 0.0
+    return round(float(numerator or 0) / float(denominator or 0) * 100, 1)
+
+
+def _dedupe_text_list(items: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    values: list[str] = []
+    for item in items or []:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _active_hard_veto_signals(row: dict[str, Any], params: dict[str, Any]) -> list[str]:
+    active_rules = {
+        str(item).strip()
+        for item in params.get("veto_rules", []) or []
+        if str(item).strip()
+    }
+    return [
+        signal
+        for signal in _dedupe_text_list(row.get("veto_signals", []) if isinstance(row, dict) else [])
+        if signal in active_rules and signal != "consecutive_outflow_warn"
+    ]
+
+
+def _evaluate_future_path(
+    rows: list[dict[str, Any]],
+    anchor_idx: int,
+    *,
+    lookahead_days: int,
+) -> dict[str, Any]:
+    anchor = rows[anchor_idx]
+    anchor_close = float(anchor.get("close", 0) or 0)
+    if anchor_close <= 0:
+        return {}
+    end_idx = min(len(rows) - 1, anchor_idx + max(1, int(lookahead_days or 1)))
+    if end_idx <= anchor_idx:
+        return {}
+
+    peak_gain_ratio = -math.inf
+    peak_date = ""
+    trough_drawdown_ratio = math.inf
+    trough_date = ""
+
+    for row in rows[anchor_idx + 1:end_idx + 1]:
+        high = float(row.get("high", row.get("close", 0)) or 0)
+        low = float(row.get("low", row.get("close", 0)) or 0)
+        if high > 0:
+            gain_ratio = high / anchor_close - 1
+            if gain_ratio > peak_gain_ratio:
+                peak_gain_ratio = gain_ratio
+                peak_date = str(row.get("date", "") or "")
+        if low > 0:
+            drawdown_ratio = low / anchor_close - 1
+            if drawdown_ratio < trough_drawdown_ratio:
+                trough_drawdown_ratio = drawdown_ratio
+                trough_date = str(row.get("date", "") or "")
+
+    if math.isinf(peak_gain_ratio) and peak_gain_ratio < 0:
+        peak_gain_ratio = 0.0
+    if math.isinf(trough_drawdown_ratio) and trough_drawdown_ratio > 0:
+        trough_drawdown_ratio = 0.0
+
+    end_close = float(rows[end_idx].get("close", anchor_close) or anchor_close)
+    end_close_ratio = end_close / anchor_close - 1 if anchor_close > 0 else 0.0
+    return {
+        "window_end_date": str(rows[end_idx].get("date", "") or ""),
+        "peak_date": peak_date,
+        "trough_date": trough_date,
+        "peak_gain_ratio": float(peak_gain_ratio),
+        "worst_drawdown_ratio": float(trough_drawdown_ratio),
+        "end_close_ratio": float(end_close_ratio),
+        "peak_gain_pct": round(float(peak_gain_ratio) * 100, 2),
+        "worst_drawdown_pct": round(float(trough_drawdown_ratio) * 100, 2),
+        "end_close_return_pct": round(float(end_close_ratio) * 100, 2),
+    }
+
+
+def _categorize_veto_outcome(*, opportunity_hit: bool, risk_hit: bool) -> str:
+    if opportunity_hit and risk_hit:
+        return "mixed"
+    if opportunity_hit:
+        return "missed_opportunity"
+    if risk_hit:
+        return "risk_blocked"
+    return "neutral"
+
+
+def _summarize_veto_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    trigger_count = len(samples)
+    opportunity_hit_count = sum(1 for item in samples if item.get("opportunity_hit"))
+    risk_hit_count = sum(1 for item in samples if item.get("risk_hit"))
+    opportunity_only_count = sum(1 for item in samples if item.get("outcome") == "missed_opportunity")
+    risk_only_count = sum(1 for item in samples if item.get("outcome") == "risk_blocked")
+    both_hit_count = sum(1 for item in samples if item.get("outcome") == "mixed")
+    neutral_count = sum(1 for item in samples if item.get("outcome") == "neutral")
+    avg_peak_gain_pct = round(
+        sum(float(item.get("peak_gain_pct", 0) or 0) for item in samples) / trigger_count,
+        2,
+    ) if trigger_count else 0.0
+    avg_worst_drawdown_pct = round(
+        sum(float(item.get("worst_drawdown_pct", 0) or 0) for item in samples) / trigger_count,
+        2,
+    ) if trigger_count else 0.0
+    pure_false_kill_rate_pct = _safe_pct(opportunity_only_count, trigger_count)
+    pure_risk_intercept_rate_pct = _safe_pct(risk_only_count, trigger_count)
+    return {
+        "trigger_count": trigger_count,
+        "opportunity_hit_count": opportunity_hit_count,
+        "risk_hit_count": risk_hit_count,
+        "opportunity_only_count": opportunity_only_count,
+        "risk_only_count": risk_only_count,
+        "both_hit_count": both_hit_count,
+        "neutral_count": neutral_count,
+        "false_kill_rate_pct": _safe_pct(opportunity_hit_count, trigger_count),
+        "pure_false_kill_rate_pct": pure_false_kill_rate_pct,
+        "risk_intercept_rate_pct": _safe_pct(risk_hit_count, trigger_count),
+        "pure_risk_intercept_rate_pct": pure_risk_intercept_rate_pct,
+        "mixed_rate_pct": _safe_pct(both_hit_count, trigger_count),
+        "neutral_rate_pct": _safe_pct(neutral_count, trigger_count),
+        "avg_peak_gain_pct": avg_peak_gain_pct,
+        "avg_worst_drawdown_pct": avg_worst_drawdown_pct,
+        "net_value_pct": round(pure_risk_intercept_rate_pct - pure_false_kill_rate_pct, 1),
+    }
+
+
+def _build_veto_analysis_findings(
+    summary: dict[str, Any],
+    effective_rules: list[dict[str, Any]],
+    too_strict_rules: list[dict[str, Any]],
+) -> list[str]:
+    findings: list[str] = []
+    trigger_count = int(summary.get("trigger_count", 0) or 0)
+    if trigger_count:
+        findings.append(
+            f"共分析 {trigger_count} 次 veto 触发，纯风险拦截 {summary.get('pure_risk_intercept_rate_pct', 0):.1f}% ，"
+            f"纯误杀机会 {summary.get('pure_false_kill_rate_pct', 0):.1f}%"
+        )
+    if effective_rules:
+        top = effective_rules[0]
+        findings.append(
+            f"{top['rule']} 最有效：{top['trigger_count']} 次触发里，纯拦截风险 {top['pure_risk_intercept_rate_pct']:.1f}% ，"
+            f"纯误杀 {top['pure_false_kill_rate_pct']:.1f}%"
+        )
+    if too_strict_rules:
+        top = too_strict_rules[0]
+        findings.append(
+            f"{top['rule']} 偏严：{top['trigger_count']} 次触发里，纯误杀机会 {top['pure_false_kill_rate_pct']:.1f}% ，"
+            f"纯拦截风险 {top['pure_risk_intercept_rate_pct']:.1f}%"
+        )
+    return findings
+
+
+def run_veto_rule_analysis(
+    stock_codes: list[str],
+    start: str,
+    end: str,
+    *,
+    index_code: str = "system",
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+    lookahead_days: int = 20,
+    opportunity_gain_pct: float = 0.15,
+    risk_drawdown_pct: float = 0.08,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    """Analyze how effective each hard veto rule is across one or more stocks."""
+    codes = [str(code).strip() for code in stock_codes if str(code).strip()]
+    if not codes:
+        raise ValueError("stock_codes must not be empty")
+
+    lookahead_days = max(1, int(lookahead_days or 20))
+    opportunity_gain_pct = float(opportunity_gain_pct or 0)
+    risk_drawdown_pct = abs(float(risk_drawdown_pct or 0))
+
+    trigger_samples: list[dict[str, Any]] = []
+    stock_summaries: list[dict[str, Any]] = []
+    mode_counter: Counter[str] = Counter()
+    history_days = 0
+    proxy_days = 0
+    candidate_day_count = 0
+    trading_day_count = 0
+    veto_day_count = 0
+    sample_params: dict[str, Any] | None = None
+
+    for code in codes:
+        fixture = build_replay_fixture(
+            stock_code=code,
+            start=start,
+            end=end,
+            index_code=index_code,
+            total_capital=total_capital if total_capital is not None else float(get_strategy().get("capital", 450286)),
+            strategy_params=strategy_params,
+        )
+        params = dict(fixture.get("params", {}) if isinstance(fixture.get("params", {}), dict) else {})
+        rows = _build_single_stock_daily_rows(code, fixture.get("daily_data", {}))
+        if sample_params is None:
+            sample_params = params
+
+        fidelity = fixture.get("_meta", {}).get("data_fidelity", {}) if isinstance(fixture.get("_meta", {}), dict) else {}
+        mode = str(fidelity.get("mode", "") or "proxy_replay")
+        mode_counter[mode] += 1
+        history_days += int(fidelity.get("history_days", 0) or 0)
+        proxy_days += int(fidelity.get("proxy_days", 0) or 0)
+
+        stock_candidate_days = 0
+        stock_veto_days = 0
+        stock_trigger_count = 0
+        stock_rules: set[str] = set()
+
+        for idx, row in enumerate(rows):
+            if row.get("candidate_present"):
+                stock_candidate_days += 1
+            active_vetoes = _active_hard_veto_signals(row, params)
+            if not active_vetoes:
+                continue
+            future_path = _evaluate_future_path(rows, idx, lookahead_days=lookahead_days)
+            if not future_path:
+                continue
+            stock_veto_days += 1
+            stock_trigger_count += len(active_vetoes)
+            stock_rules.update(active_vetoes)
+
+            opportunity_hit = bool(future_path["peak_gain_ratio"] >= opportunity_gain_pct)
+            risk_hit = bool(future_path["worst_drawdown_ratio"] <= -risk_drawdown_pct)
+            for rule in active_vetoes:
+                trigger_samples.append(
+                    {
+                        "rule": rule,
+                        "code": code,
+                        "date": str(row.get("date", "") or ""),
+                        "market_signal": str(row.get("market_signal", "") or ""),
+                        "score": round(float(row.get("score", 0) or 0), 2),
+                        "entry_signal": bool(row.get("entry_signal", False)),
+                        "triggered_vetoes": list(active_vetoes),
+                        "snapshot_source": str(row.get("snapshot_source", "") or ""),
+                        "history_group_id": str(row.get("history_group_id", "") or ""),
+                        "peak_date": future_path.get("peak_date", ""),
+                        "trough_date": future_path.get("trough_date", ""),
+                        "window_end_date": future_path.get("window_end_date", ""),
+                        "peak_gain_pct": future_path.get("peak_gain_pct", 0.0),
+                        "worst_drawdown_pct": future_path.get("worst_drawdown_pct", 0.0),
+                        "end_close_return_pct": future_path.get("end_close_return_pct", 0.0),
+                        "opportunity_hit": opportunity_hit,
+                        "risk_hit": risk_hit,
+                        "outcome": _categorize_veto_outcome(
+                            opportunity_hit=opportunity_hit,
+                            risk_hit=risk_hit,
+                        ),
+                    }
+                )
+
+        stock_summaries.append(
+            {
+                "code": code,
+                "data_fidelity_mode": mode,
+                "trading_day_count": len(rows),
+                "candidate_day_count": stock_candidate_days,
+                "veto_day_count": stock_veto_days,
+                "trigger_count": stock_trigger_count,
+                "history_days": int(fidelity.get("history_days", 0) or 0),
+                "proxy_days": int(fidelity.get("proxy_days", 0) or 0),
+                "active_veto_rules": sorted(stock_rules),
+            }
+        )
+        trading_day_count += len(rows)
+        candidate_day_count += stock_candidate_days
+        veto_day_count += stock_veto_days
+
+    rule_samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in trigger_samples:
+        rule_samples[str(item.get("rule", "")).strip()].append(item)
+
+    rule_stats: list[dict[str, Any]] = []
+    for rule, items in rule_samples.items():
+        stat = _summarize_veto_samples(items)
+        stat.update(
+            {
+                "rule": rule,
+                "stock_count": len({str(item.get('code', '')).strip() for item in items if str(item.get("code", "")).strip()}),
+                "sample_codes": sorted({str(item.get("code", "")).strip() for item in items if str(item.get("code", "")).strip()})[:10],
+            }
+        )
+        rule_stats.append(stat)
+
+    rule_stats.sort(
+        key=lambda item: (
+            -float(item.get("net_value_pct", 0) or 0),
+            -float(item.get("pure_risk_intercept_rate_pct", 0) or 0),
+            int(item.get("trigger_count", 0) or 0),
+            str(item.get("rule", "") or ""),
+        )
+    )
+
+    effective_rules = sorted(
+        rule_stats,
+        key=lambda item: (
+            -float(item.get("net_value_pct", 0) or 0),
+            -float(item.get("pure_risk_intercept_rate_pct", 0) or 0),
+            -int(item.get("trigger_count", 0) or 0),
+            str(item.get("rule", "") or ""),
+        ),
+    )
+    too_strict_rules = sorted(
+        rule_stats,
+        key=lambda item: (
+            float(item.get("net_value_pct", 0) or 0),
+            -float(item.get("pure_false_kill_rate_pct", 0) or 0),
+            -int(item.get("trigger_count", 0) or 0),
+            str(item.get("rule", "") or ""),
+        ),
+    )
+
+    summary = _summarize_veto_samples(trigger_samples)
+    top_missed_opportunities = sorted(
+        [item for item in trigger_samples if item.get("outcome") == "missed_opportunity"],
+        key=lambda item: (
+            -float(item.get("peak_gain_pct", 0) or 0),
+            float(item.get("worst_drawdown_pct", 0) or 0),
+            str(item.get("date", "") or ""),
+        ),
+    )[: max(1, int(sample_limit or 5))]
+    top_blocked_losses = sorted(
+        [item for item in trigger_samples if item.get("outcome") == "risk_blocked"],
+        key=lambda item: (
+            float(item.get("worst_drawdown_pct", 0) or 0),
+            float(item.get("peak_gain_pct", 0) or 0),
+            str(item.get("date", "") or ""),
+        ),
+    )[: max(1, int(sample_limit or 5))]
+
+    return {
+        "command": "backtest",
+        "action": "veto_rule_analysis",
+        "status": "ok",
+        "codes": codes,
+        "start": start,
+        "end": end,
+        "index_code": index_code,
+        "params": sample_params or {},
+        "analysis_window": {
+            "lookahead_days": lookahead_days,
+            "opportunity_gain_pct": opportunity_gain_pct,
+            "risk_drawdown_pct": risk_drawdown_pct,
+        },
+        "coverage": {
+            "stock_count": len(codes),
+            "trading_day_count": trading_day_count,
+            "candidate_day_count": candidate_day_count,
+            "veto_day_count": veto_day_count,
+            "trigger_count": len(trigger_samples),
+            "history_days": history_days,
+            "proxy_days": proxy_days,
+            "data_fidelity_mode_counts": dict(sorted(mode_counter.items())),
+        },
+        "summary": summary,
+        "rule_stats": rule_stats,
+        "effective_rules": effective_rules[:5],
+        "too_strict_rules": too_strict_rules[:5],
+        "top_missed_opportunities": top_missed_opportunities,
+        "top_blocked_losses": top_blocked_losses,
+        "stock_summaries": stock_summaries,
+        "findings": _build_veto_analysis_findings(summary, effective_rules, too_strict_rules),
+    }
+
+
+def render_veto_rule_analysis_report(report: dict[str, Any]) -> str:
+    """Render a concise text report for veto rule effectiveness."""
+    coverage = report.get("coverage", {}) if isinstance(report.get("coverage", {}), dict) else {}
+    summary = report.get("summary", {}) if isinstance(report.get("summary", {}), dict) else {}
+    analysis_window = report.get("analysis_window", {}) if isinstance(report.get("analysis_window", {}), dict) else {}
+    lines = [
+        "",
+        "=" * 64,
+        f"  Veto 规则分析  {report.get('start', '')} ~ {report.get('end', '')}",
+        "=" * 64,
+        "",
+        f"  股票数: {coverage.get('stock_count', 0)}    veto 触发日: {coverage.get('veto_day_count', 0)}    veto 触发次数: {coverage.get('trigger_count', 0)}",
+        f"  窗口: {analysis_window.get('lookahead_days', 0)} 天    机会阈值: +{float(analysis_window.get('opportunity_gain_pct', 0) or 0) * 100:.1f}%    "
+        f"风险阈值: -{float(analysis_window.get('risk_drawdown_pct', 0) or 0) * 100:.1f}%",
+        f"  数据覆盖: history_days={coverage.get('history_days', 0)} proxy_days={coverage.get('proxy_days', 0)}",
+        "",
+        "  总体结论:",
+        f"    - 纯风险拦截 {summary.get('pure_risk_intercept_rate_pct', 0):.1f}%    纯误杀机会 {summary.get('pure_false_kill_rate_pct', 0):.1f}%    "
+        f"混合 {summary.get('mixed_rate_pct', 0):.1f}%",
+        f"    - 平均未来最高涨幅 {summary.get('avg_peak_gain_pct', 0):+.2f}%    平均未来最大回撤 {summary.get('avg_worst_drawdown_pct', 0):+.2f}%",
+        "",
+        "  主要发现:",
+    ]
+    for item in report.get("findings", [])[:5]:
+        lines.append(f"    - {item}")
+    if not report.get("findings"):
+        lines.append("    - 暂无显著结论")
+
+    lines.append("")
+    lines.append("  最有效规则:")
+    for item in report.get("effective_rules", [])[:5]:
+        lines.append(
+            f"    - {item.get('rule', '')}: 触发 {item.get('trigger_count', 0)} 次, "
+            f"纯拦截 {item.get('pure_risk_intercept_rate_pct', 0):.1f}%, "
+            f"纯误杀 {item.get('pure_false_kill_rate_pct', 0):.1f}%, "
+            f"净值 {item.get('net_value_pct', 0):+.1f}pct"
+        )
+    if not report.get("effective_rules"):
+        lines.append("    - 暂无数据")
+
+    lines.append("")
+    lines.append("  偏严规则:")
+    for item in report.get("too_strict_rules", [])[:5]:
+        lines.append(
+            f"    - {item.get('rule', '')}: 触发 {item.get('trigger_count', 0)} 次, "
+            f"纯误杀 {item.get('pure_false_kill_rate_pct', 0):.1f}%, "
+            f"纯拦截 {item.get('pure_risk_intercept_rate_pct', 0):.1f}%, "
+            f"净值 {item.get('net_value_pct', 0):+.1f}pct"
+        )
+    if not report.get("too_strict_rules"):
+        lines.append("    - 暂无数据")
+
+    lines.append("")
+    lines.append("  误杀样本:")
+    for item in report.get("top_missed_opportunities", [])[:3]:
+        lines.append(
+            f"    - {item.get('code', '')} {item.get('date', '')} "
+            f"rule={item.get('rule', '')} "
+            f"未来最高 {item.get('peak_gain_pct', 0):+.2f}% "
+            f"最大回撤 {item.get('worst_drawdown_pct', 0):+.2f}%"
+        )
+    if not report.get("top_missed_opportunities"):
+        lines.append("    - 暂无样本")
+
+    lines.append("")
+    lines.append("  拦截风险样本:")
+    for item in report.get("top_blocked_losses", [])[:3]:
+        lines.append(
+            f"    - {item.get('code', '')} {item.get('date', '')} "
+            f"rule={item.get('rule', '')} "
+            f"未来最高 {item.get('peak_gain_pct', 0):+.2f}% "
+            f"最大回撤 {item.get('worst_drawdown_pct', 0):+.2f}%"
+        )
+    if not report.get("top_blocked_losses"):
+        lines.append("    - 暂无样本")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _coerce_holding_windows(values: list[int] | tuple[int, ...] | None) -> list[int]:
+    windows: list[int] = []
+    seen: set[int] = set()
+    for item in values or [5, 10, 20]:
+        try:
+            day = int(item)
+        except Exception:
+            continue
+        if day <= 0 or day in seen:
+            continue
+        seen.add(day)
+        windows.append(day)
+    return sorted(windows) or [5, 10, 20]
+
+
+def _bucket_targets(bucket: str) -> set[str]:
+    normalized = str(bucket or "core").strip().lower()
+    if normalized == "all":
+        return {"core", "watch"}
+    if normalized == "other":
+        return {"avoid", "other"}
+    return {normalized or "core"}
+
+
+def _load_pool_snapshots_for_range(
+    start: str,
+    end: str,
+    *,
+    pipeline: str = "stock_screener",
+    history_limit: int | None = None,
+) -> list[dict[str, Any]]:
+    start_date = datetime.strptime(start, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end, "%Y-%m-%d").date()
+    estimated_days = max(1, (end_date - start_date).days + 1)
+    resolved_limit = max(5000, estimated_days * 20) if history_limit is None else max(1, int(history_limit))
+    payload = load_pool_snapshot_history(limit=resolved_limit)
+    latest_per_day: dict[str, dict[str, Any]] = {}
+    for item in payload.get("items", []) or []:
+        snapshot_date = str(item.get("snapshot_date", "") or "").strip()
+        if not snapshot_date or snapshot_date < start or snapshot_date > end:
+            continue
+        if pipeline and str(item.get("pipeline", "") or "").strip() != pipeline:
+            continue
+        latest_per_day.setdefault(snapshot_date, item)
+    return [latest_per_day[day] for day in sorted(latest_per_day)]
+
+
+def _extract_pool_entry_events(
+    snapshots: list[dict[str, Any]],
+    *,
+    bucket: str,
+    stock_codes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    target_buckets = _bucket_targets(bucket)
+    code_filter = {
+        _normalize_replay_code(code)
+        for code in stock_codes or []
+        if _normalize_replay_code(code)
+    }
+    previous_bucket_by_code: dict[str, str] = {}
+    events: list[dict[str, Any]] = []
+
+    for snapshot in snapshots:
+        current_bucket_by_code: dict[str, str] = {}
+        current_entry_by_code: dict[str, dict[str, Any]] = {}
+        for entry in snapshot.get("entries", []) if isinstance(snapshot.get("entries", []), list) else []:
+            code = _normalize_replay_code(entry.get("code", ""))
+            if not code:
+                continue
+            if code_filter and code not in code_filter:
+                continue
+            bucket_name = str(entry.get("bucket", "") or "").strip().lower() or "other"
+            current_bucket_by_code[code] = bucket_name
+            current_entry_by_code[code] = dict(entry)
+
+        for code, bucket_name in current_bucket_by_code.items():
+            if bucket_name not in target_buckets:
+                continue
+            previous_bucket = previous_bucket_by_code.get(code, "")
+            if previous_bucket in target_buckets:
+                continue
+            entry = current_entry_by_code.get(code, {})
+            events.append(
+                {
+                    "code": str(entry.get("code", code) or code).strip(),
+                    "name": str(entry.get("name", code) or code).strip(),
+                    "bucket": bucket_name,
+                    "entry_date": str(snapshot.get("snapshot_date", "") or ""),
+                    "history_group_id": str(snapshot.get("history_group_id", "") or ""),
+                    "pipeline": str(snapshot.get("pipeline", "") or ""),
+                    "updated_at": str(snapshot.get("updated_at", "") or ""),
+                    "entry_score": round(float(entry.get("total_score", 0) or 0), 2),
+                    "technical_score": round(float(entry.get("technical_score", 0) or 0), 2),
+                    "fundamental_score": round(float(entry.get("fundamental_score", 0) or 0), 2),
+                    "flow_score": round(float(entry.get("flow_score", 0) or 0), 2),
+                    "sentiment_score": round(float(entry.get("sentiment_score", 0) or 0), 2),
+                    "note": str(entry.get("note", "") or "").strip(),
+                    "data_quality": str(entry.get("data_quality", "ok") or "ok").strip(),
+                    "veto_signals": _dedupe_text_list(entry.get("veto_signals", [])),
+                }
+            )
+        previous_bucket_by_code = current_bucket_by_code
+    return events
+
+
+def _load_price_frames_for_codes(
+    codes: list[str],
+    *,
+    start: str,
+    end: str,
+    max_window: int,
+) -> dict[str, pd.DataFrame]:
+    end_date = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=max_window * 3 + 30)
+    fetch_end = end_date.strftime("%Y-%m-%d")
+    frames: dict[str, pd.DataFrame] = {}
+    for code in codes:
+        frame = _fetch_daily(_to_bs_code(code), start, fetch_end)
+        if frame.empty:
+            continue
+        frame = frame.copy().sort_values("date").reset_index(drop=True)
+        frame["_date_str"] = frame["date"].dt.strftime("%Y-%m-%d")
+        frame.attrs["date_index"] = {value: idx for idx, value in enumerate(frame["_date_str"].tolist())}
+        frames[code] = frame
+    return frames
+
+
+def _event_window_metrics(
+    price_frame: pd.DataFrame,
+    entry_date: str,
+    *,
+    holding_windows: list[int],
+) -> tuple[float | None, dict[int, dict[str, Any]]]:
+    if price_frame.empty:
+        return None, {}
+    date_index = price_frame.attrs.get("date_index", {})
+    idx = date_index.get(entry_date)
+    if idx is None:
+        return None, {}
+    entry_close = float(price_frame.iloc[idx]["close"] or 0)
+    if entry_close <= 0:
+        return None, {}
+
+    metrics: dict[int, dict[str, Any]] = {}
+    for window_days in holding_windows:
+        target_idx = idx + int(window_days)
+        if target_idx >= len(price_frame):
+            metrics[window_days] = {"available": False, "window_days": window_days}
+            continue
+        future = price_frame.iloc[idx + 1:target_idx + 1]
+        if future.empty:
+            metrics[window_days] = {"available": False, "window_days": window_days}
+            continue
+        target_row = price_frame.iloc[target_idx]
+        target_close = float(target_row["close"] or 0)
+        max_high = float(future["high"].max() or target_close or entry_close)
+        min_low = float(future["low"].min() or target_close or entry_close)
+        metrics[window_days] = {
+            "available": True,
+            "window_days": window_days,
+            "end_date": str(target_row["_date_str"] or ""),
+            "return_pct": round((target_close / entry_close - 1) * 100, 2),
+            "max_gain_pct": round((max_high / entry_close - 1) * 100, 2),
+            "max_drawdown_pct": round((min_low / entry_close - 1) * 100, 2),
+        }
+    return round(entry_close, 4), metrics
+
+
+def _build_pool_window_statistics(events: list[dict[str, Any]], window_days: int) -> dict[str, Any]:
+    window_metrics = [
+        item["metrics_by_window"][window_days]
+        for item in events
+        if window_days in item.get("metrics_by_window", {})
+        and item["metrics_by_window"][window_days].get("available")
+    ]
+    sample_count = len(window_metrics)
+    if not sample_count:
+        return {
+            "window_days": window_days,
+            "sample_count": 0,
+            "positive_count": 0,
+            "positive_rate_pct": 0.0,
+            "avg_return_pct": 0.0,
+            "median_return_pct": 0.0,
+            "avg_max_gain_pct": 0.0,
+            "avg_max_drawdown_pct": 0.0,
+            "gain_10pct_hit_rate_pct": 0.0,
+            "drawdown_8pct_hit_rate_pct": 0.0,
+        }
+
+    returns = [float(item.get("return_pct", 0) or 0) for item in window_metrics]
+    max_gains = [float(item.get("max_gain_pct", 0) or 0) for item in window_metrics]
+    max_drawdowns = [float(item.get("max_drawdown_pct", 0) or 0) for item in window_metrics]
+    positive_count = sum(1 for value in returns if value > 0)
+    gain_10_count = sum(1 for value in max_gains if value >= 10)
+    drawdown_8_count = sum(1 for value in max_drawdowns if value <= -8)
+    return {
+        "window_days": window_days,
+        "sample_count": sample_count,
+        "positive_count": positive_count,
+        "positive_rate_pct": _safe_pct(positive_count, sample_count),
+        "avg_return_pct": round(sum(returns) / sample_count, 2),
+        "median_return_pct": round(float(statistics.median(returns)), 2),
+        "avg_max_gain_pct": round(sum(max_gains) / sample_count, 2),
+        "avg_max_drawdown_pct": round(sum(max_drawdowns) / sample_count, 2),
+        "gain_10pct_hit_rate_pct": _safe_pct(gain_10_count, sample_count),
+        "drawdown_8pct_hit_rate_pct": _safe_pct(drawdown_8_count, sample_count),
+    }
+
+
+def _aggregate_pool_stock_summaries(events: list[dict[str, Any]], primary_window_days: int) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for event in events:
+        metrics = event.get("metrics_by_window", {}).get(primary_window_days, {})
+        if not metrics.get("available"):
+            continue
+        code = str(event.get("code", "") or "").strip()
+        if not code:
+            continue
+        bucket = grouped.setdefault(
+            code,
+            {
+                "code": code,
+                "name": str(event.get("name", code) or code).strip(),
+                "sample_count": 0,
+                "total_return_pct": 0.0,
+                "total_max_gain_pct": 0.0,
+                "total_max_drawdown_pct": 0.0,
+                "positive_count": 0,
+            },
+        )
+        bucket["sample_count"] += 1
+        bucket["total_return_pct"] += float(metrics.get("return_pct", 0) or 0)
+        bucket["total_max_gain_pct"] += float(metrics.get("max_gain_pct", 0) or 0)
+        bucket["total_max_drawdown_pct"] += float(metrics.get("max_drawdown_pct", 0) or 0)
+        if float(metrics.get("return_pct", 0) or 0) > 0:
+            bucket["positive_count"] += 1
+
+    items = []
+    for bucket in grouped.values():
+        count = max(int(bucket["sample_count"] or 0), 1)
+        items.append(
+            {
+                "code": bucket["code"],
+                "name": bucket["name"],
+                "sample_count": bucket["sample_count"],
+                "avg_return_pct": round(bucket["total_return_pct"] / count, 2),
+                "avg_max_gain_pct": round(bucket["total_max_gain_pct"] / count, 2),
+                "avg_max_drawdown_pct": round(bucket["total_max_drawdown_pct"] / count, 2),
+                "positive_rate_pct": _safe_pct(bucket["positive_count"], count),
+            }
+        )
+    return sorted(items, key=lambda item: (-float(item.get("avg_return_pct", 0) or 0), -int(item.get("sample_count", 0) or 0), str(item.get("code", "") or "")))
+
+
+def _build_pool_performance_findings(
+    *,
+    bucket: str,
+    window_stats: list[dict[str, Any]],
+    top_stocks: list[dict[str, Any]],
+    bottom_stocks: list[dict[str, Any]],
+) -> list[str]:
+    label = {"core": "核心池", "watch": "观察池", "all": "入池"}.get(str(bucket or "").strip().lower(), str(bucket or "入池"))
+    findings: list[str] = []
+    if window_stats:
+        primary = max(window_stats, key=lambda item: int(item.get("window_days", 0) or 0))
+        if int(primary.get("sample_count", 0) or 0) > 0:
+            findings.append(
+                f"{label}后 {primary['window_days']} 日平均收益 {primary['avg_return_pct']:+.2f}% ，正收益占比 {primary['positive_rate_pct']:.1f}%"
+            )
+            findings.append(
+                f"{label}后 {primary['window_days']} 日平均最高上冲 {primary['avg_max_gain_pct']:+.2f}% ，平均最大回撤 {primary['avg_max_drawdown_pct']:+.2f}%"
+            )
+    if top_stocks:
+        top = top_stocks[0]
+        findings.append(
+            f"{top['code']} 表现最好，样本 {top['sample_count']} 次，平均收益 {top['avg_return_pct']:+.2f}%"
+        )
+    if bottom_stocks:
+        bottom = bottom_stocks[0]
+        findings.append(
+            f"{bottom['code']} 表现最弱，样本 {bottom['sample_count']} 次，平均收益 {bottom['avg_return_pct']:+.2f}%"
+        )
+    return findings
+
+
+def run_pool_entry_performance_analysis(
+    *,
+    start: str,
+    end: str,
+    bucket: str = "core",
+    holding_windows: list[int] | tuple[int, ...] | None = None,
+    stock_codes: list[str] | None = None,
+    pipeline: str = "stock_screener",
+    history_limit: int | None = None,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    """Analyze forward N-day performance after a stock newly enters the pool."""
+    windows = _coerce_holding_windows(list(holding_windows or [5, 10, 20]))
+    snapshots = _load_pool_snapshots_for_range(
+        start,
+        end,
+        pipeline=str(pipeline or "stock_screener").strip(),
+        history_limit=history_limit,
+    )
+    result = {
+        "command": "backtest",
+        "action": "pool_entry_performance",
+        "status": "ok",
+        "start": start,
+        "end": end,
+        "bucket": str(bucket or "core").strip().lower() or "core",
+        "pipeline": str(pipeline or "stock_screener").strip(),
+        "holding_windows": windows,
+        "stock_codes": [str(code).strip() for code in stock_codes or [] if str(code).strip()],
+        "coverage": {
+            "snapshot_count": len(snapshots),
+            "entry_event_count": 0,
+            "priced_event_count": 0,
+            "missing_price_event_count": 0,
+            "stock_count": 0,
+            "history_limit_used": max(5000, (datetime.strptime(end, "%Y-%m-%d").date() - datetime.strptime(start, "%Y-%m-%d").date()).days * 20 + 20) if history_limit is None else max(1, int(history_limit)),
+        },
+        "window_statistics": [],
+        "findings": [],
+        "top_stocks": [],
+        "bottom_stocks": [],
+        "top_events": [],
+        "bottom_events": [],
+        "events_preview": [],
+    }
+    if not snapshots:
+        result["status"] = "warning"
+        result["error"] = "no_pool_snapshots_in_range"
+        return result
+
+    events = _extract_pool_entry_events(
+        snapshots,
+        bucket=result["bucket"],
+        stock_codes=stock_codes,
+    )
+    result["coverage"]["entry_event_count"] = len(events)
+    result["coverage"]["stock_count"] = len({str(item.get("code", "")).strip() for item in events if str(item.get("code", "")).strip()})
+    if not events:
+        result["status"] = "warning"
+        result["error"] = "no_pool_entry_events"
+        return result
+
+    price_frames = _load_price_frames_for_codes(
+        sorted({str(item.get("code", "")).strip() for item in events if str(item.get("code", "")).strip()}),
+        start=start,
+        end=end,
+        max_window=max(windows),
+    )
+
+    enriched_events: list[dict[str, Any]] = []
+    missing_price_count = 0
+    for event in events:
+        code = str(event.get("code", "")).strip()
+        frame = price_frames.get(code)
+        if frame is None:
+            missing_price_count += 1
+            continue
+        entry_price, metrics_by_window = _event_window_metrics(
+            frame,
+            str(event.get("entry_date", "") or ""),
+            holding_windows=windows,
+        )
+        if entry_price is None:
+            missing_price_count += 1
+            continue
+        enriched = dict(event)
+        enriched["entry_price"] = entry_price
+        enriched["metrics_by_window"] = metrics_by_window
+        enriched_events.append(enriched)
+
+    result["coverage"]["priced_event_count"] = len(enriched_events)
+    result["coverage"]["missing_price_event_count"] = missing_price_count
+    if not enriched_events:
+        result["status"] = "warning"
+        result["error"] = "no_price_samples_for_entry_events"
+        return result
+
+    result["window_statistics"] = [
+        _build_pool_window_statistics(enriched_events, window_days)
+        for window_days in windows
+    ]
+    primary_window = max(windows)
+    stock_summaries = _aggregate_pool_stock_summaries(enriched_events, primary_window)
+    result["top_stocks"] = stock_summaries[: max(1, int(sample_limit or 5))]
+    result["bottom_stocks"] = sorted(
+        stock_summaries,
+        key=lambda item: (
+            float(item.get("avg_return_pct", 0) or 0),
+            -int(item.get("sample_count", 0) or 0),
+            str(item.get("code", "") or ""),
+        ),
+    )[: max(1, int(sample_limit or 5))]
+
+    primary_events = []
+    for event in enriched_events:
+        metrics = event.get("metrics_by_window", {}).get(primary_window, {})
+        if not metrics.get("available"):
+            continue
+        primary_events.append(
+            {
+                "code": event.get("code", ""),
+                "name": event.get("name", ""),
+                "bucket": event.get("bucket", ""),
+                "entry_date": event.get("entry_date", ""),
+                "entry_score": event.get("entry_score", 0),
+                "entry_price": event.get("entry_price", 0),
+                "data_quality": event.get("data_quality", "ok"),
+                **metrics,
+            }
+        )
+    result["top_events"] = sorted(
+        primary_events,
+        key=lambda item: (
+            -float(item.get("return_pct", 0) or 0),
+            -float(item.get("max_gain_pct", 0) or 0),
+            str(item.get("entry_date", "") or ""),
+        ),
+    )[: max(1, int(sample_limit or 5))]
+    result["bottom_events"] = sorted(
+        primary_events,
+        key=lambda item: (
+            float(item.get("return_pct", 0) or 0),
+            float(item.get("max_drawdown_pct", 0) or 0),
+            str(item.get("entry_date", "") or ""),
+        ),
+    )[: max(1, int(sample_limit or 5))]
+    result["events_preview"] = primary_events[: max(1, int(sample_limit or 5))]
+    result["findings"] = _build_pool_performance_findings(
+        bucket=result["bucket"],
+        window_stats=result["window_statistics"],
+        top_stocks=result["top_stocks"],
+        bottom_stocks=result["bottom_stocks"],
+    )
+    return result
+
+
+def render_pool_entry_performance_report(report: dict[str, Any]) -> str:
+    """Render a concise text report for pool entry forward performance."""
+    coverage = report.get("coverage", {}) if isinstance(report.get("coverage", {}), dict) else {}
+    bucket = str(report.get("bucket", "core") or "core")
+    label = {"core": "核心池", "watch": "观察池", "all": "入池"}.get(bucket, bucket)
+    lines = [
+        "",
+        "=" * 64,
+        f"  {label} N日表现  {report.get('start', '')} ~ {report.get('end', '')}",
+        "=" * 64,
+        "",
+        f"  快照数: {coverage.get('snapshot_count', 0)}    入池事件: {coverage.get('entry_event_count', 0)}    有价格样本: {coverage.get('priced_event_count', 0)}",
+        f"  pipeline: {report.get('pipeline', '') or '-'}    窗口: {','.join(str(item) for item in report.get('holding_windows', []) or [])}",
+        "",
+        "  主要发现:",
+    ]
+    for item in report.get("findings", [])[:5]:
+        lines.append(f"    - {item}")
+    if not report.get("findings"):
+        lines.append("    - 暂无显著结论")
+
+    lines.append("")
+    lines.append("  窗口统计:")
+    for item in report.get("window_statistics", [])[:10]:
+        lines.append(
+            f"    - {item.get('window_days', 0)}日: 样本 {item.get('sample_count', 0)} "
+            f"平均收益 {item.get('avg_return_pct', 0):+.2f}% "
+            f"正收益占比 {item.get('positive_rate_pct', 0):.1f}% "
+            f"平均最大回撤 {item.get('avg_max_drawdown_pct', 0):+.2f}%"
+        )
+
+    lines.append("")
+    lines.append("  最强股票:")
+    for item in report.get("top_stocks", [])[:5]:
+        lines.append(
+            f"    - {item.get('code', '')} {item.get('name', '')} "
+            f"样本 {item.get('sample_count', 0)} "
+            f"平均收益 {item.get('avg_return_pct', 0):+.2f}%"
+        )
+    if not report.get("top_stocks"):
+        lines.append("    - 暂无样本")
+
+    lines.append("")
+    lines.append("  最弱股票:")
+    for item in report.get("bottom_stocks", [])[:5]:
+        lines.append(
+            f"    - {item.get('code', '')} {item.get('name', '')} "
+            f"样本 {item.get('sample_count', 0)} "
+            f"平均收益 {item.get('avg_return_pct', 0):+.2f}%"
+        )
+    if not report.get("bottom_stocks"):
+        lines.append("    - 暂无样本")
+
+    lines.append("")
+    lines.append("  最佳样本:")
+    for item in report.get("top_events", [])[:3]:
+        lines.append(
+            f"    - {item.get('entry_date', '')} {item.get('code', '')} "
+            f"收益 {item.get('return_pct', 0):+.2f}% "
+            f"最大上冲 {item.get('max_gain_pct', 0):+.2f}% "
+            f"最大回撤 {item.get('max_drawdown_pct', 0):+.2f}%"
+        )
+    if not report.get("top_events"):
+        lines.append("    - 暂无样本")
+
+    lines.append("")
+    lines.append("  最弱样本:")
+    for item in report.get("bottom_events", [])[:3]:
+        lines.append(
+            f"    - {item.get('entry_date', '')} {item.get('code', '')} "
+            f"收益 {item.get('return_pct', 0):+.2f}% "
+            f"最大上冲 {item.get('max_gain_pct', 0):+.2f}% "
+            f"最大回撤 {item.get('max_drawdown_pct', 0):+.2f}%"
+        )
+    if not report.get("bottom_events"):
+        lines.append("    - 暂无样本")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _collect_pool_codes_from_snapshots(
+    snapshots: list[dict[str, Any]],
+    *,
+    bucket: str,
+) -> list[str]:
+    target_buckets = _bucket_targets(bucket)
+    codes: set[str] = set()
+    for snapshot in snapshots:
+        for entry in snapshot.get("entries", []) if isinstance(snapshot.get("entries", []), list) else []:
+            code = _normalize_replay_code(entry.get("code", ""))
+            if not code:
+                continue
+            bucket_name = str(entry.get("bucket", "") or "").strip().lower() or "other"
+            if bucket_name in target_buckets:
+                codes.add(str(entry.get("code", code) or code).strip())
+    return sorted(codes)
+
+
+def _build_strategy_health_findings(
+    *,
+    batch_result: dict[str, Any],
+    veto_result: dict[str, Any],
+    pool_result: dict[str, Any],
+) -> list[str]:
+    findings: list[str] = []
+    aggregate = batch_result.get("aggregate", {}) if isinstance(batch_result.get("aggregate", {}), dict) else {}
+    if aggregate:
+        findings.append(
+            f"批量回放 {aggregate.get('stock_count', 0)} 只股票，累计收益 {aggregate.get('total_realized_pnl', 0):+.2f}，"
+            f"混合胜率 {aggregate.get('blended_win_rate', 0):.1f}% ，最差回撤 {aggregate.get('worst_max_drawdown_pct', 0):+.2f}%"
+        )
+    findings.extend(pool_result.get("findings", [])[:2] if isinstance(pool_result.get("findings", []), list) else [])
+    findings.extend(veto_result.get("findings", [])[:2] if isinstance(veto_result.get("findings", []), list) else [])
+    return findings[:6]
+
+
+def run_strategy_health_report(
+    *,
+    start: str,
+    end: str,
+    bucket: str = "core",
+    holding_windows: list[int] | tuple[int, ...] | None = None,
+    stock_codes: list[str] | None = None,
+    pipeline: str = "stock_screener",
+    code_limit: int = 30,
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+    veto_lookahead_days: int = 20,
+    veto_opportunity_gain_pct: float = 0.15,
+    veto_risk_drawdown_pct: float = 0.08,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    """Combine pool performance, veto analysis, and batch replay into one health report."""
+    snapshots = _load_pool_snapshots_for_range(start, end, pipeline=str(pipeline or "stock_screener").strip())
+    explicit_codes = [str(code).strip() for code in stock_codes or [] if str(code).strip()]
+    derived_codes = _collect_pool_codes_from_snapshots(snapshots, bucket=bucket) if not explicit_codes else explicit_codes
+    selected_codes = derived_codes[: max(1, int(code_limit or 30))]
+
+    result = {
+        "command": "backtest",
+        "action": "strategy_health_report",
+        "status": "ok",
+        "start": start,
+        "end": end,
+        "bucket": str(bucket or "core").strip().lower() or "core",
+        "pipeline": str(pipeline or "stock_screener").strip(),
+        "holding_windows": _coerce_holding_windows(list(holding_windows or [5, 10, 20])),
+        "selected_codes": selected_codes,
+        "code_source": "explicit_codes" if explicit_codes else "pool_snapshot_history",
+        "code_limit": max(1, int(code_limit or 30)),
+        "coverage": {
+            "snapshot_count": len(snapshots),
+            "available_code_count": len(derived_codes),
+            "selected_code_count": len(selected_codes),
+        },
+    }
+    if not selected_codes:
+        result["status"] = "warning"
+        result["error"] = "no_codes_for_strategy_health_report"
+        result["pool_performance"] = run_pool_entry_performance_analysis(
+            start=start,
+            end=end,
+            bucket=bucket,
+            holding_windows=holding_windows,
+            stock_codes=explicit_codes or None,
+            pipeline=pipeline,
+            sample_limit=sample_limit,
+        )
+        result["veto_analysis"] = {}
+        result["batch_backtest"] = {}
+        result["findings"] = result["pool_performance"].get("findings", [])[:3]
+        return result
+
+    pool_performance = run_pool_entry_performance_analysis(
+        start=start,
+        end=end,
+        bucket=bucket,
+        holding_windows=holding_windows,
+        stock_codes=explicit_codes or None,
+        pipeline=pipeline,
+        sample_limit=sample_limit,
+    )
+    veto_analysis = run_veto_rule_analysis(
+        stock_codes=selected_codes,
+        start=start,
+        end=end,
+        total_capital=total_capital,
+        strategy_params=strategy_params,
+        lookahead_days=veto_lookahead_days,
+        opportunity_gain_pct=veto_opportunity_gain_pct,
+        risk_drawdown_pct=veto_risk_drawdown_pct,
+        sample_limit=sample_limit,
+    )
+    batch_backtest = run_multi_stock_system_backtest(
+        stock_codes=selected_codes,
+        start=start,
+        end=end,
+        total_capital=total_capital,
+        strategy_params=strategy_params,
+    )
+
+    statuses = {
+        str(item.get("status", "ok") or "ok")
+        for item in (pool_performance, veto_analysis, batch_backtest)
+        if isinstance(item, dict)
+    }
+    result["status"] = "warning" if "warning" in statuses else "ok"
+    result["pool_performance"] = pool_performance
+    result["veto_analysis"] = veto_analysis
+    result["batch_backtest"] = batch_backtest
+    result["findings"] = _build_strategy_health_findings(
+        batch_result=batch_backtest,
+        veto_result=veto_analysis,
+        pool_result=pool_performance,
+    )
+    return result
+
+
+def render_strategy_health_report(report: dict[str, Any]) -> str:
+    """Render a concise text report for strategy health."""
+    coverage = report.get("coverage", {}) if isinstance(report.get("coverage", {}), dict) else {}
+    batch_backtest = report.get("batch_backtest", {}) if isinstance(report.get("batch_backtest", {}), dict) else {}
+    aggregate = batch_backtest.get("aggregate", {}) if isinstance(batch_backtest.get("aggregate", {}), dict) else {}
+    pool_report = report.get("pool_performance", {}) if isinstance(report.get("pool_performance", {}), dict) else {}
+    veto_report = report.get("veto_analysis", {}) if isinstance(report.get("veto_analysis", {}), dict) else {}
+    lines = [
+        "",
+        "=" * 64,
+        f"  Strategy Health  {report.get('start', '')} ~ {report.get('end', '')}",
+        "=" * 64,
+        "",
+        f"  代码来源: {report.get('code_source', '')}    可用代码: {coverage.get('available_code_count', 0)}    选中代码: {coverage.get('selected_code_count', 0)}",
+        f"  bucket: {report.get('bucket', '')}    pipeline: {report.get('pipeline', '')}",
+        "",
+        "  核心结论:",
+    ]
+    for item in report.get("findings", [])[:6]:
+        lines.append(f"    - {item}")
+    if not report.get("findings"):
+        lines.append("    - 暂无显著结论")
+
+    lines.append("")
+    lines.append("  Batch Backtest:")
+    lines.append(
+        f"    - 收益 {aggregate.get('total_realized_pnl', 0):+.2f} 交易 {aggregate.get('closed_trade_count', 0)} 笔 "
+        f"胜率 {aggregate.get('blended_win_rate', 0):.1f}% 最差回撤 {aggregate.get('worst_max_drawdown_pct', 0):+.2f}%"
+    )
+
+    pool_window_stats = pool_report.get("window_statistics", []) if isinstance(pool_report.get("window_statistics", []), list) else []
+    lines.append("")
+    lines.append("  Pool Performance:")
+    for item in pool_window_stats[:3]:
+        lines.append(
+            f"    - {item.get('window_days', 0)}日: 平均收益 {item.get('avg_return_pct', 0):+.2f}% "
+            f"正收益占比 {item.get('positive_rate_pct', 0):.1f}%"
+        )
+    if not pool_window_stats:
+        lines.append("    - 暂无样本")
+
+    lines.append("")
+    lines.append("  Veto Analysis:")
+    for item in veto_report.get("effective_rules", [])[:3]:
+        lines.append(
+            f"    - 有效 {item.get('rule', '')}: 纯拦截 {item.get('pure_risk_intercept_rate_pct', 0):.1f}% "
+            f"纯误杀 {item.get('pure_false_kill_rate_pct', 0):.1f}%"
+        )
+    for item in veto_report.get("too_strict_rules", [])[:2]:
+        lines.append(
+            f"    - 偏严 {item.get('rule', '')}: 纯误杀 {item.get('pure_false_kill_rate_pct', 0):.1f}% "
+            f"纯拦截 {item.get('pure_risk_intercept_rate_pct', 0):.1f}%"
+        )
+    if not veto_report.get("effective_rules") and not veto_report.get("too_strict_rules"):
+        lines.append("    - 暂无样本")
+    lines.append("")
     return "\n".join(lines)
 
 

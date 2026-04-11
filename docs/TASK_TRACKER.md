@@ -152,6 +152,12 @@
 备注：历史镜像日里若某只股票根本不在 `scored candidates`，`validate-single` 优先输出 `not_in_scored_candidates`，不再误归因为 `score_below_threshold`。
 - [x] 盘前/午间/收盘市场快照归档补齐
 备注：`morning / noon / evening` 均已写入 `market_snapshot_history`，并记录 `timepoint=preopen/midday/close`；`load_daily_signal_snapshot_bundle()` 会优先选择含 `candidate_snapshot` 的完整组，避免 market-only 快照覆盖 screener 历史回放。
+- [x] veto 规则效果分析
+备注：新增 `bin/trade backtest veto-analysis --code/--codes --start --end`，基于历史回放统计每条 veto 的纯风险拦截率、纯误杀率、mixed/neutral 占比，并输出最有效规则、偏严规则和样本案例，供调整 `scoring.veto` 使用。
+- [x] 核心池入池后 N 日表现分析
+备注：新增 `bin/trade backtest pool-performance --start --end --bucket core/watch/all --windows 5,10,20`，按“首次入池 episode”统计 5/10/20 日 forward return、最大上冲、最大回撤，并输出强弱股票与样本，供优化选股条件使用。
+- [x] 策略体检聚合报告
+备注：新增 `bin/trade backtest strategy-health --start --end`，聚合 batch backtest、veto 规则效果、pool 入池 N 日表现，默认可从历史 pool snapshot 自动派生股票样本，便于先做健康检查再调 `mx_query / veto / 参数`。
 
 ---
 
