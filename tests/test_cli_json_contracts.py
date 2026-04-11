@@ -1091,6 +1091,114 @@ class CLIJsonContractTests(unittest.TestCase):
             "state_alerts.json",
         )
 
+    def test_backtest_validate_single_json_contract(self):
+        params_path = Path(self._tmpdir.name) / "validate_single_params.json"
+        params_path.write_text(
+            json.dumps({
+                "entry_mode": "trend_follow",
+                "score_threshold": 68,
+            }),
+            encoding="utf-8",
+        )
+        output_path = Path(self._tmpdir.name) / "validate_single_report.json"
+        fake_result = {
+            "command": "backtest",
+            "action": "single_stock_strategy_validation",
+            "status": "ok",
+            "stock_code": "601869",
+            "start": "2025-04-11",
+            "end": "2026-04-10",
+            "index_code": "system",
+            "performance": {
+                "closed_trade_count": 8,
+                "total_realized_pnl": 110580.02,
+                "max_drawdown_pct": -3.12,
+            },
+            "diagnostics": {
+                "signal_statistics": {
+                    "market_positive_days": 163,
+                    "score_ready_days": 46,
+                    "buy_ready_days": 12,
+                    "actual_entry_days": 8,
+                },
+                "opportunity_statistics": {
+                    "total_opportunity_windows": 7,
+                    "captured_opportunity_windows": 4,
+                    "missed_opportunity_windows": 3,
+                    "capture_rate_pct": 57.1,
+                    "weighted_capture_rate_pct": 85.1,
+                },
+                "findings": [
+                    "存在 6 次提前离场，最大卖飞发生在 2025-08-08 后少赚 65.8%",
+                ],
+            },
+            "opportunity_windows": [],
+            "premature_exits": [],
+            "closed_trades": [],
+            "open_positions": [],
+            "rejected_entries": [],
+        }
+
+        with mock.patch(
+            "scripts.backtest.historical_pipeline.run_single_stock_strategy_validation",
+            return_value=dict(fake_result),
+        ) as run_validation:
+            payload = self._run_main(
+                [
+                    "trade",
+                    "--json",
+                    "backtest",
+                    "validate-single",
+                    "--code",
+                    "601869",
+                    "--start",
+                    "2025-04-11",
+                    "--end",
+                    "2026-04-10",
+                    "--index",
+                    "system",
+                    "--capital",
+                    "500000",
+                    "--preset",
+                    "aggressive_high_return",
+                    "--params-json",
+                    str(params_path),
+                    "--opportunity-lookahead-days",
+                    "30",
+                    "--opportunity-min-gain-pct",
+                    "0.2",
+                    "--premature-exit-min-gain-pct",
+                    "0.1",
+                    "--output",
+                    str(output_path),
+                ],
+                [],
+            )
+
+        run_validation.assert_called_once_with(
+            stock_code="601869",
+            start="2025-04-11",
+            end="2026-04-10",
+            index_code="system",
+            total_capital=500000.0,
+            strategy_params={
+                "entry_mode": "trend_follow",
+                "score_threshold": 68,
+                "preset": "aggressive_high_return",
+            },
+            opportunity_lookahead_days=30,
+            opportunity_min_gain_pct=0.2,
+            premature_exit_min_gain_pct=0.1,
+        )
+        self.assertEqual(payload["command"], "backtest")
+        self.assertEqual(payload["action"], "single_stock_strategy_validation")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["stock_code"], "601869")
+        self.assertEqual(payload["report_path"], str(output_path))
+        self.assertEqual(payload["performance"]["closed_trade_count"], 8)
+        self.assertEqual(payload["diagnostics"]["opportunity_statistics"]["capture_rate_pct"], 57.1)
+        self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), fake_result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -57,7 +57,7 @@ class _Position:
     __slots__ = (
         "code", "name", "entry_date", "entry_price", "shares", "capital",
         "stop_price", "take_price", "time_stop_date", "entry_score",
-        "veto_warnings",
+        "veto_warnings", "style", "entry_low", "peak_price",
     )
 
     def __init__(
@@ -73,6 +73,9 @@ class _Position:
         time_stop_date: str,
         entry_score: float,
         veto_warnings: list[str] | None = None,
+        style: str = "momentum",
+        entry_low: float = 0.0,
+        peak_price: float = 0.0,
     ):
         self.code = code
         self.name = name
@@ -85,6 +88,9 @@ class _Position:
         self.time_stop_date = time_stop_date
         self.entry_score = entry_score
         self.veto_warnings = veto_warnings or []
+        self.style = style
+        self.entry_low = entry_low
+        self.peak_price = peak_price or entry_price
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +133,8 @@ def run_strategy_replay(
     end_date = _parse_date(end)
 
     # ── 策略参数 ──
+    use_system_strategy = bool(params.get("use_system_strategy", False))
+    require_entry_signal = bool(params.get("require_entry_signal", False))
     buy_threshold = _safe_float(params.get("buy_threshold", 7), 7)
     stop_loss_pct = _safe_float(params.get("stop_loss", 0.04), 0.04)
     take_profit_pct = _safe_float(params.get("take_profit", 0.15), 0.15)
@@ -134,6 +142,7 @@ def run_strategy_replay(
     total_max = max(min(_safe_float(params.get("total_max", 0.60), 0.60), 1.0), 0.0)
     single_max = max(min(_safe_float(params.get("single_max", 0.20), 0.20), 1.0), 0.0)
     weekly_max = int(params.get("weekly_max", 2) or 2)
+    holding_max = int(params.get("holding_max", 0) or 0)
     veto_rules = set(params.get("veto_rules", [
         "below_ma20", "limit_up_today", "consecutive_outflow", "red_market", "earnings_bomb",
     ]))
@@ -146,6 +155,12 @@ def run_strategy_replay(
         "fundamental": _safe_float(params.get("fundamental_weight", 3), 3),
         "flow": _safe_float(params.get("flow_weight", 2), 2),
         "sentiment": _safe_float(params.get("sentiment_weight", 3), 3),
+    }
+    denoms = {
+        "technical": _safe_float(params.get("technical_denom", 2), 2),
+        "fundamental": _safe_float(params.get("fundamental_denom", 3), 3),
+        "flow": _safe_float(params.get("flow_denom", 2), 2),
+        "sentiment": _safe_float(params.get("sentiment_denom", 3), 3),
     }
 
     normalized_capital = max(total_capital, 1.0)
@@ -164,6 +179,10 @@ def run_strategy_replay(
     max_capital_deployed = 0.0
     min_cash = round(normalized_capital, 2)
     cumulative_pnl = 0.0
+    peak_equity = round(normalized_capital, 2)
+    max_drawdown_pct = 0.0
+    max_drawdown_amount = 0.0
+    max_drawdown_date = ""
     constrained_count = 0
     rejected_count = 0
     cooldown_rejected_count = 0
@@ -184,6 +203,7 @@ def run_strategy_replay(
         market_signal = str(snapshot.get("market_signal", "GREEN")).upper()
         candidates = snapshot.get("candidates", [])
         prices = snapshot.get("prices", {})
+        bars = snapshot.get("bars", {}) if isinstance(snapshot.get("bars", {}), dict) else {}
 
         entries_today: list[dict[str, Any]] = []
         exits_today: list[dict[str, Any]] = []
@@ -192,23 +212,44 @@ def run_strategy_replay(
         surviving: list[_Position] = []
         for pos in positions:
             current_price = _safe_float(prices.get(pos.code, 0), 0)
+            bar = bars.get(pos.code, {}) if isinstance(bars.get(pos.code, {}), dict) else {}
+            high_price = _safe_float(bar.get("high", current_price), current_price)
+            low_price = _safe_float(bar.get("low", current_price), current_price)
+            ma20 = _safe_float(bar.get("ma20", 0), 0)
+            ma60 = _safe_float(bar.get("ma60", 0), 0)
+            if high_price > 0:
+                pos.peak_price = max(pos.peak_price, high_price)
             exit_reason = ""
 
             if market_signal in ("RED", "CLEAR"):
                 exit_reason = "market_signal_exit"
                 exit_price = current_price if current_price > 0 else pos.entry_price
-            elif current_price > 0 and current_price <= pos.stop_price:
-                exit_reason = "stop_loss"
-                exit_price = pos.stop_price
-            elif current_price > 0 and current_price >= pos.take_price:
-                exit_reason = "take_profit"
-                exit_price = pos.take_price
-            elif pos.time_stop_date and day_str >= pos.time_stop_date:
-                exit_reason = "time_stop"
-                exit_price = current_price if current_price > 0 else pos.entry_price
+            elif use_system_strategy:
+                exit_price, exit_reason = _system_exit_signal(
+                    pos=pos,
+                    current_price=current_price,
+                    low_price=low_price,
+                    ma20=ma20,
+                    ma60=ma60,
+                    params=params,
+                    day_str=day_str,
+                )
+                if not exit_reason:
+                    surviving.append(pos)
+                    continue
             else:
-                surviving.append(pos)
-                continue
+                if current_price > 0 and current_price <= pos.stop_price:
+                    exit_reason = "stop_loss"
+                    exit_price = pos.stop_price
+                elif current_price > 0 and current_price >= pos.take_price:
+                    exit_reason = "take_profit"
+                    exit_price = pos.take_price
+                elif pos.time_stop_date and day_str >= pos.time_stop_date:
+                    exit_reason = "time_stop"
+                    exit_price = current_price if current_price > 0 else pos.entry_price
+                else:
+                    surviving.append(pos)
+                    continue
 
             # 平仓
             realized_pnl = round((exit_price - pos.entry_price) * pos.shares, 2)
@@ -265,11 +306,20 @@ def run_strategy_replay(
                     continue
 
                 # 重算加权总分
-                score = _recompute_score(cand, weights)
+                score = _recompute_score(cand, weights, denoms)
                 if score is None:
                     score = _safe_float(cand.get("score", 0), 0)
 
                 if score < buy_threshold:
+                    continue
+                if require_entry_signal and not bool(cand.get("entry_signal", False)):
+                    rejected_count += 1
+                    rejected_entries.append({
+                        "code": code,
+                        "date": day_str,
+                        "score": round(score, 2),
+                        "reason": "entry_signal_missing",
+                    })
                     continue
 
                 # veto 检查
@@ -312,6 +362,15 @@ def run_strategy_replay(
                         "reason": "portfolio_cooldown",
                     })
                     continue
+                if holding_max > 0 and len(positions) >= holding_max:
+                    rejected_count += 1
+                    rejected_entries.append({
+                        "code": cand["code"],
+                        "date": day_str,
+                        "score": cand["score"],
+                        "reason": "holding_max_reached",
+                    })
+                    continue
 
                 # 周买入次数限制
                 week_buys = weekly_buy_counts.get(week_key, 0)
@@ -352,9 +411,19 @@ def run_strategy_replay(
                     continue
 
                 # 计算止损/止盈/时间止损价
-                stop_price = round(cand["price"] * (1 - stop_loss_pct), 4)
-                take_price = round(cand["price"] * (1 + take_profit_pct), 4)
-                time_stop_dt = (day + timedelta(days=time_stop_days)).isoformat() if time_stop_days > 0 else ""
+                cand_bar = bars.get(cand["code"], {}) if isinstance(bars.get(cand["code"], {}), dict) else {}
+                entry_low = _safe_float(cand_bar.get("low", cand.get("low", cand["price"])), cand["price"])
+                entry_high = _safe_float(cand_bar.get("high", cand.get("high", cand["price"])), cand["price"])
+                style = str(cand.get("style", params.get("default_style", "momentum")) or "momentum")
+                if use_system_strategy:
+                    stop_price = _system_stop_price(cand["price"], style, entry_low, cand_bar, params)
+                    take_price = 0.0
+                    style_time_stop_days = _style_time_stop_days(style, params)
+                    time_stop_dt = (day + timedelta(days=style_time_stop_days)).isoformat() if style_time_stop_days > 0 else ""
+                else:
+                    stop_price = round(cand["price"] * (1 - stop_loss_pct), 4)
+                    take_price = round(cand["price"] * (1 + take_profit_pct), 4)
+                    time_stop_dt = (day + timedelta(days=time_stop_days)).isoformat() if time_stop_days > 0 else ""
 
                 pos = _Position(
                     code=cand["code"],
@@ -368,6 +437,9 @@ def run_strategy_replay(
                     time_stop_date=time_stop_dt,
                     entry_score=cand["score"],
                     veto_warnings=cand.get("veto_warnings", []),
+                    style=style,
+                    entry_low=entry_low,
+                    peak_price=entry_high,
                 )
                 positions.append(pos)
                 cash = round(cash - actual_capital, 2)
@@ -389,6 +461,19 @@ def run_strategy_replay(
         min_cash = min(min_cash, cash)
 
         realized_today = round(sum(e["realized_pnl"] for e in exits_today), 2)
+        mark_to_market = 0.0
+        for pos in positions:
+            px = _safe_float(prices.get(pos.code, pos.entry_price), pos.entry_price)
+            mark_to_market += px * pos.shares
+        equity = round(cash + mark_to_market, 2)
+        if equity > peak_equity:
+            peak_equity = equity
+        drawdown_amount = round(equity - peak_equity, 2)
+        drawdown_pct = round((equity / peak_equity - 1) * 100, 4) if peak_equity > 0 else 0.0
+        if drawdown_pct < max_drawdown_pct:
+            max_drawdown_pct = drawdown_pct
+            max_drawdown_amount = drawdown_amount
+            max_drawdown_date = day_str
 
         timeline.append({
             "date": day_str,
@@ -401,6 +486,8 @@ def run_strategy_replay(
             "capital_deployed": capital_deployed,
             "exposure_pct": exposure_pct,
             "cash_available": round(cash, 2),
+            "equity": equity,
+            "drawdown_pct": drawdown_pct,
             "realized_pnl_today": realized_today,
             "cumulative_realized_pnl": round(cumulative_pnl, 2),
         })
@@ -416,6 +503,7 @@ def run_strategy_replay(
             "capital": p.capital,
             "entry_score": p.entry_score,
             "holding_days": (end_date - _parse_date(p.entry_date)).days,
+            "style": p.style,
         }
         for p in positions
     ]
@@ -425,6 +513,9 @@ def run_strategy_replay(
     loss_trades = [t for t in closed_trades if t["realized_pnl"] < 0]
 
     return {
+        "command": "backtest",
+        "action": "strategy-replay",
+        "status": "ok",
         "summary": {
             "capital": round(normalized_capital, 2),
             "total_exposure_max": round(total_max, 4),
@@ -437,7 +528,11 @@ def run_strategy_replay(
             "max_capital_deployed": round(max_capital_deployed, 2),
             "ending_realized_pnl": round(cumulative_pnl, 2),
             "ending_cash": round(cash, 2),
+            "ending_equity": timeline[-1]["equity"] if timeline else round(cash, 2),
             "min_cash_available": round(min_cash, 2),
+            "max_drawdown_pct": round(max_drawdown_pct, 4),
+            "max_drawdown_amount": round(max_drawdown_amount, 2),
+            "max_drawdown_date": max_drawdown_date,
             "closed_trade_count": len(closed_trades),
             "win_count": len(win_trades),
             "loss_count": len(loss_trades),
@@ -451,7 +546,7 @@ def run_strategy_replay(
             "consecutive_loss_days_limit": consecutive_loss_days_limit,
             "cooldown_days": cooldown_days_cfg,
             "allocation_rule": "score_desc",
-            "simulation_mode": "signal_driven_strategy_replay",
+            "simulation_mode": "system_strategy_replay" if use_system_strategy else "signal_driven_strategy_replay",
             "intraday_ordering": "exits_before_entries",
         },
         "closed_trades": closed_trades,
@@ -465,8 +560,13 @@ def run_strategy_replay(
 # 辅助
 # ---------------------------------------------------------------------------
 
-def _recompute_score(candidate: dict[str, Any], weights: dict[str, float]) -> float | None:
+def _recompute_score(
+    candidate: dict[str, Any],
+    weights: dict[str, float],
+    denoms: dict[str, float] | None = None,
+) -> float | None:
     """用自定义权重重算四维总分。"""
+    denoms = denoms or {}
     components = [
         ("technical_score", "technical", 2.0),
         ("fundamental_score", "fundamental", 3.0),
@@ -480,8 +580,66 @@ def _recompute_score(candidate: dict[str, Any], weights: dict[str, float]) -> fl
         val = candidate.get(score_key)
         if val in (None, ""):
             continue
-        total += _safe_float(val, 0.0) * _safe_float(weights.get(weight_key, denom), denom) / denom
+        denominator = _safe_float(denoms.get(weight_key, denom), denom)
+        total += _safe_float(val, 0.0) * _safe_float(weights.get(weight_key, denom), denom) / max(denominator, 0.0001)
     return round(total, 2)
+
+
+def _style_time_stop_days(style: str, params: dict[str, Any]) -> int:
+    if style == "slow_bull":
+        return int(params.get("slow_bull_time_stop_days", params.get("time_stop_days", 30)) or 0)
+    return int(params.get("momentum_time_stop_days", params.get("time_stop_days", 10)) or 0)
+
+
+def _system_stop_price(price: float, style: str, entry_low: float, bar: dict[str, Any], params: dict[str, Any]) -> float:
+    if style == "slow_bull":
+        stop_pct = _safe_float(params.get("slow_bull_stop_loss", 0.08), 0.08)
+        stop_price = price * (1 - stop_pct)
+        ma60 = _safe_float(bar.get("ma60", 0), 0)
+        if ma60 > 0:
+            stop_price = min(stop_price, ma60 * 0.98)
+        return round(stop_price, 4)
+
+    stop_pct = _safe_float(params.get("momentum_stop_loss", 0.05), 0.05)
+    stop_price = price * (1 - stop_pct)
+    if entry_low > 0:
+        stop_price = max(stop_price, entry_low * 0.99)
+    return round(stop_price, 4)
+
+
+def _system_exit_signal(
+    *,
+    pos: _Position,
+    current_price: float,
+    low_price: float,
+    ma20: float,
+    ma60: float,
+    params: dict[str, Any],
+    day_str: str,
+) -> tuple[float, str]:
+    if current_price <= 0:
+        return 0.0, ""
+    if current_price <= pos.stop_price or (low_price > 0 and low_price <= pos.stop_price):
+        return pos.stop_price, "system_stop_loss"
+
+    if pos.style == "slow_bull":
+        if ma60 > 0:
+            absolute_stop = min(pos.entry_price * (1 - _safe_float(params.get("slow_bull_stop_loss", 0.08), 0.08)), ma60 * 0.98)
+            if current_price <= absolute_stop or (low_price > 0 and low_price <= absolute_stop):
+                return round(absolute_stop, 4), "system_absolute_stop"
+        if ma20 > 0 and current_price < ma20:
+            return current_price, "system_ma20_exit"
+    else:
+        trailing_pct = _safe_float(params.get("momentum_trailing_stop", 0.08), 0.08)
+        trailing_stop = pos.peak_price * (1 - trailing_pct)
+        if pos.peak_price > pos.entry_price and current_price <= trailing_stop:
+            return round(trailing_stop, 4), "system_trailing_stop"
+        if ma20 > 0 and current_price < ma20:
+            return current_price, "system_ma20_exit"
+
+    if pos.time_stop_date and day_str >= pos.time_stop_date:
+        return current_price, "system_time_stop"
+    return 0.0, ""
 
 
 def _estimate_shares(price: float, max_capital: float) -> int:

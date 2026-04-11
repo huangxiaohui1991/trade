@@ -687,6 +687,60 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(payload["action"], "compare")
         compare_mock.assert_called_once()
 
+    def test_cli_validate_single_renders_report(self):
+        import scripts.cli.trade as trade
+
+        validation_payload = {
+            "command": "backtest",
+            "action": "single_stock_strategy_validation",
+            "status": "ok",
+            "stock_code": "601869",
+            "start": "2025-04-11",
+            "end": "2026-04-10",
+            "performance": {
+                "closed_trade_count": 8,
+                "win_rate": 75.0,
+                "total_realized_pnl": 110580.02,
+            },
+            "diagnostics": {
+                "findings": ["存在 6 次提前离场"],
+            },
+            "report_path": "/tmp/validation.json",
+        }
+
+        stdout = io.StringIO()
+        with mock.patch(
+            "scripts.backtest.historical_pipeline.run_single_stock_strategy_validation",
+            return_value=dict(validation_payload),
+        ) as run_mock, mock.patch(
+            "scripts.backtest.historical_pipeline.render_single_stock_validation_report",
+            return_value="VALIDATION REPORT",
+        ) as render_mock, mock.patch.object(
+            trade.sys,
+            "argv",
+            [
+                "trade",
+                "backtest",
+                "validate-single",
+                "--code",
+                "601869",
+                "--start",
+                "2025-04-11",
+                "--end",
+                "2026-04-10",
+                "--preset",
+                "aggressive_high_return",
+            ],
+        ):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        output = stdout.getvalue()
+        self.assertIn("VALIDATION REPORT", output)
+        self.assertIn("report_path: /tmp/validation.json", output)
+        run_mock.assert_called_once()
+        render_mock.assert_called_once_with(validation_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

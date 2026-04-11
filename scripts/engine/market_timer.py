@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 engine/market_timer.py — 大盘择时引擎
 

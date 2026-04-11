@@ -354,6 +354,84 @@ class StrategyReplayTests(unittest.TestCase):
         # 第二天止损后进入冷却，第三天不应买入
         self.assertGreater(result["summary"]["cooldown_rejected_count"], 0)
 
+    def test_system_mode_requires_entry_signal_and_reports_drawdown(self):
+        """系统模式按 entry_signal 入场，并输出组合净值回撤。"""
+        daily = {
+            "2026-04-01": {
+                "market_signal": "GREEN",
+                "candidates": [
+                    {
+                        "code": "000001",
+                        "name": "A",
+                        "score": 8.0,
+                        "price": 10.0,
+                        "veto_signals": [],
+                        "entry_signal": False,
+                        "style": "momentum",
+                        "technical_score": 3.0,
+                        "fundamental_score": 2.0,
+                        "flow_score": 2.0,
+                        "sentiment_score": 3.0,
+                    },
+                    {
+                        "code": "000002",
+                        "name": "B",
+                        "score": 8.0,
+                        "price": 20.0,
+                        "veto_signals": [],
+                        "entry_signal": True,
+                        "style": "momentum",
+                        "technical_score": 3.0,
+                        "fundamental_score": 2.0,
+                        "flow_score": 2.0,
+                        "sentiment_score": 3.0,
+                    },
+                ],
+                "prices": {"000001": 10.0, "000002": 20.0},
+                "bars": {
+                    "000001": {"high": 10.2, "low": 9.8, "close": 10.0, "ma20": 9.5},
+                    "000002": {"high": 20.5, "low": 19.8, "close": 20.0, "ma20": 19.0},
+                },
+            },
+            "2026-04-02": {
+                "market_signal": "GREEN",
+                "candidates": [],
+                "prices": {"000002": 19.2},
+                "bars": {"000002": {"high": 20.0, "low": 19.1, "close": 19.2, "ma20": 19.0}},
+            },
+        }
+        result = run_strategy_replay(
+            daily,
+            start="2026-04-01",
+            end="2026-04-02",
+            total_capital=100000,
+            params={
+                "use_system_strategy": True,
+                "require_entry_signal": True,
+                "buy_threshold": 7,
+                "weekly_max": 5,
+                "veto_rules": [],
+                "technical_weight": 3,
+                "fundamental_weight": 2,
+                "flow_weight": 2,
+                "sentiment_weight": 3,
+                "technical_denom": 3,
+                "fundamental_denom": 2,
+                "flow_denom": 2,
+                "sentiment_denom": 3,
+                "momentum_stop_loss": 0.20,
+                "momentum_trailing_stop": 0.20,
+                "momentum_time_stop_days": 10,
+            },
+        )
+
+        self.assertEqual(result["summary"]["simulation_mode"], "system_strategy_replay")
+        self.assertEqual(result["timeline"][0]["entries"][0]["code"], "000002")
+        self.assertIn("max_drawdown_pct", result["summary"])
+        self.assertLess(result["summary"]["max_drawdown_pct"], 0)
+        rejected = [r for r in result["rejected_entries"] if r["reason"] == "entry_signal_missing"]
+        self.assertEqual(len(rejected), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
