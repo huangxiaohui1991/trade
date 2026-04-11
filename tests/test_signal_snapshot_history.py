@@ -181,6 +181,69 @@ class SignalSnapshotHistoryTests(unittest.TestCase):
         self.assertEqual(len(bundle["scored_candidates"]), 2)
         self.assertEqual(bundle["pool_snapshot"]["summary"]["core_count"], 1)
 
+    def test_signal_snapshot_bundle_prefers_rich_group_over_market_only_latest(self):
+        from scripts.state import (
+            load_daily_signal_snapshot_bundle,
+            save_candidate_snapshot_history,
+            save_market_snapshot_history,
+        )
+
+        save_market_snapshot_history(
+            {
+                "as_of_date": "2026-04-11",
+                "updated_at": "2026-04-11T15:00:01",
+                "signal": "GREEN",
+                "source": "screener_market",
+                "source_chain": ["screener_market"],
+                "indices": {"上证指数": {"signal": "GREEN"}},
+            },
+            pipeline="stock_screener",
+            history_group_id="screener:2026-04-11:150001",
+            metadata={"snapshot_date": "2026-04-11"},
+        )
+        save_candidate_snapshot_history(
+            [
+                {
+                    "code": "601869",
+                    "name": "长飞光纤",
+                    "total_score": 7.6,
+                    "technical_score": 2.8,
+                    "fundamental_score": 1.5,
+                    "flow_score": 1.2,
+                    "sentiment_score": 2.1,
+                    "veto_triggered": False,
+                    "veto_signals": [],
+                    "data_quality": "ok",
+                }
+            ],
+            snapshot_date="2026-04-11",
+            pipeline="stock_screener",
+            history_group_id="screener:2026-04-11:150001",
+            pool="all",
+            universe="tracked",
+            source="unit_test",
+            actionable_count=1,
+            metadata={"snapshot_date": "2026-04-11", "updated_at": "2026-04-11T15:00:01"},
+        )
+        save_market_snapshot_history(
+            {
+                "as_of_date": "2026-04-11",
+                "updated_at": "2026-04-11T15:35:00",
+                "signal": "YELLOW",
+                "source": "evening_market",
+                "source_chain": ["evening_market"],
+                "indices": {"上证指数": {"signal": "YELLOW"}},
+            },
+            pipeline="evening",
+            history_group_id="evening:2026-04-11:close:153500",
+            metadata={"snapshot_date": "2026-04-11", "timepoint": "close"},
+        )
+
+        bundle = load_daily_signal_snapshot_bundle("2026-04-11")
+        self.assertEqual(bundle["history_group_id"], "screener:2026-04-11:150001")
+        self.assertEqual(bundle["market_snapshot"]["signal"], "GREEN")
+        self.assertEqual(len(bundle["scored_candidates"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

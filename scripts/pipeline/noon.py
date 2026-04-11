@@ -29,13 +29,17 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.data_engine import DataEngine
-from scripts.state import load_market_snapshot, load_portfolio_snapshot
+from scripts.state import load_market_snapshot, load_portfolio_snapshot, save_market_snapshot_history
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_noon_check
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.noon")
+
+
+def _market_history_group_id(snapshot_date: str, timepoint: str) -> str:
+    return f"noon:{snapshot_date}:{timepoint}:{datetime.now().strftime('%H%M%S')}"
 
 
 def run() -> dict:
@@ -50,6 +54,19 @@ def run() -> dict:
 
         _logger.info(">> 大盘数据")
         market_snapshot = load_market_snapshot(refresh=True)
+        market_history_group_id = _market_history_group_id(today_str, "midday")
+        save_market_snapshot_history(
+            market_snapshot,
+            pipeline="noon",
+            history_group_id=market_history_group_id,
+            metadata={
+                "snapshot_date": today_str,
+                "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "pipeline": "noon",
+                "timepoint": "midday",
+                "weekday": weekday,
+            },
+        )
         indices = market_snapshot.get("indices") or market_snapshot.get("market") or {}
         market_info = {}
         for name, info in indices.items():
@@ -151,11 +168,16 @@ def run() -> dict:
                 "discord_ok": ok,
                 "discord_error": err,
                 "market_signal": market_snapshot.get("signal", market_snapshot.get("market_signal", "")),
+                "history_group_id": market_history_group_id,
+                "timepoint": "midday",
             },
             today_str,
         )
 
-        return discord_data
+        return {
+            **discord_data,
+            "market_history_group_id": market_history_group_id,
+        }
     except Exception as e:
         update_pipeline_state(
             "noon",

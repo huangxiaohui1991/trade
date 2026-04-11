@@ -31,7 +31,13 @@ warnings.filterwarnings("ignore")
 
 from scripts.engine.data_engine import DataEngine
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command
-from scripts.state import load_activity_summary, load_market_snapshot, load_pool_snapshot, load_portfolio_snapshot
+from scripts.state import (
+    load_activity_summary,
+    load_market_snapshot,
+    load_pool_snapshot,
+    load_portfolio_snapshot,
+    save_market_snapshot_history,
+)
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_morning_summary
 from scripts.utils.config_loader import get_strategy
@@ -39,6 +45,10 @@ from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
 
 _logger = get_logger("pipeline.morning")
+
+
+def _market_history_group_id(snapshot_date: str, timepoint: str) -> str:
+    return f"morning:{snapshot_date}:{timepoint}:{datetime.now().strftime('%H%M%S')}"
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +370,19 @@ def run() -> dict:
 
         _logger.info(">> 大盘数据")
         market_data = load_market_snapshot(refresh=True)
+        market_history_group_id = _market_history_group_id(today_str, "preopen")
+        save_market_snapshot_history(
+            market_data,
+            pipeline="morning",
+            history_group_id=market_history_group_id,
+            metadata={
+                "snapshot_date": today_str,
+                "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "pipeline": "morning",
+                "timepoint": "preopen",
+                "weekday": weekday,
+            },
+        )
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
             if not isinstance(info, dict):
@@ -432,6 +455,8 @@ def run() -> dict:
                 "positions_count": len(positions),
                 "core_pool_count": len(core_items),
                 "weekly_bought": weekly_bought,
+                "history_group_id": market_history_group_id,
+                "timepoint": "preopen",
                 "discord_ok": ok,
                 "discord_error": err,
             },
@@ -444,6 +469,7 @@ def run() -> dict:
             "core_pool": core_items,
             "news": news_items,
             "weekly_bought": weekly_bought,
+            "market_history_group_id": market_history_group_id,
             "discord_data": discord_data,
         }
     except Exception as e:

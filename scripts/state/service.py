@@ -2675,24 +2675,52 @@ def load_candidate_snapshot_history(
 
 
 def _resolve_signal_history_group_id(conn: sqlite3.Connection, snapshot_date: str) -> str:
-    for table in (
-        "candidate_snapshot_history",
-        "decision_snapshot_history",
-        "pool_snapshot_history",
-        "market_snapshot_history",
+    groups: dict[str, dict[str, Any]] = {}
+    for table, component in (
+        ("candidate_snapshot_history", "candidate_snapshot"),
+        ("decision_snapshot_history", "today_decision"),
+        ("pool_snapshot_history", "pool_snapshot"),
+        ("market_snapshot_history", "market_snapshot"),
     ):
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT history_group_id
+            SELECT history_group_id, updated_at
             FROM {table}
             WHERE snapshot_date = ? AND TRIM(COALESCE(history_group_id, '')) <> ''
             ORDER BY updated_at DESC, id DESC
-            LIMIT 1
             """,
             (snapshot_date,),
-        ).fetchone()
-        if row and str(row["history_group_id"] or "").strip():
-            return str(row["history_group_id"]).strip()
+        ).fetchall()
+        for row in rows:
+            history_group_id = str(row["history_group_id"] or "").strip()
+            if not history_group_id:
+                continue
+            bucket = groups.setdefault(
+                history_group_id,
+                {
+                    "history_group_id": history_group_id,
+                    "updated_at": "",
+                    "components": set(),
+                },
+            )
+            bucket["components"].add(component)
+            updated_at = str(row["updated_at"] or "")
+            if updated_at > str(bucket.get("updated_at", "") or ""):
+                bucket["updated_at"] = updated_at
+
+    ranked = sorted(
+        groups.values(),
+        key=lambda item: (
+            1 if {"market_snapshot", "candidate_snapshot"}.issubset(item.get("components", set())) else 0,
+            1 if "candidate_snapshot" in item.get("components", set()) else 0,
+            len(item.get("components", set())),
+            str(item.get("updated_at", "") or ""),
+            str(item.get("history_group_id", "") or ""),
+        ),
+        reverse=True,
+    )
+    if ranked:
+        return str(ranked[0]["history_group_id"]).strip()
     return ""
 
 

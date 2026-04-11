@@ -150,8 +150,8 @@
 备注：新增 `bin/trade backtest signal-diagnose --date --history-group-id --code`，可查看当日可选 `history_group_id`、market / pool / candidates / decision，并输出单股命中 / 漏判解释。
 - [x] 单股验证报告真实 miss reason
 备注：历史镜像日里若某只股票根本不在 `scored candidates`，`validate-single` 优先输出 `not_in_scored_candidates`，不再误归因为 `score_below_threshold`。
-- [ ] 盘前/午间/收盘市场快照归档补齐
-备注：`morning / noon / evening` 统一按日写入 market snapshot history，保留时点差异。
+- [x] 盘前/午间/收盘市场快照归档补齐
+备注：`morning / noon / evening` 均已写入 `market_snapshot_history`，并记录 `timepoint=preopen/midday/close`；`load_daily_signal_snapshot_bundle()` 会优先选择含 `candidate_snapshot` 的完整组，避免 market-only 快照覆盖 screener 历史回放。
 
 ---
 
