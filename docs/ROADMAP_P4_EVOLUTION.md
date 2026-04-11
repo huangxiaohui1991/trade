@@ -133,8 +133,8 @@
 - [x] ledger 增加历史快照表：`market snapshot / pool snapshot / scored candidates / today_decision`
 - [x] 每次 `stock_screener` 运行生成统一 `history_group_id`，把四类对象作为同一次信号运行归档
 - [x] `core_pool_scoring` 同步归档评分历史，供核心池单独复核
+- [x] `historical_pipeline.py` 优先读取历史信号镜像，缺失时才回退到 proxy replay，并在单股验证里输出 `historical/hybrid/proxy` fidelity
 - [ ] `morning / noon / evening` 补齐 market snapshot history，保留时点差异
-- [ ] `historical_pipeline.py` 优先读取历史信号镜像，缺失时才回退到 proxy replay
 - [ ] 新增历史镜像诊断入口：按 `snapshot_date / history_group_id` 查看 market / pool / candidates / decision
 - [ ] 单股验证报告优先引用历史镜像中的真实 miss reason，而不是仅靠事后代理分类
 

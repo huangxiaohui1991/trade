@@ -39,6 +39,7 @@ import baostock as bs
 import pandas as pd
 
 from scripts.engine.stock_classifier import classify_style
+from scripts.state import load_daily_signal_snapshot_bundle
 from scripts.utils.config_loader import get_strategy
 
 
@@ -264,6 +265,142 @@ def _resolve_strategy_params(overrides: dict | None = None) -> dict:
     if "time_stop_days" not in preset_values and "time_stop_days" not in overrides:
         params["time_stop_days"] = params.get("momentum_time_stop_days", 10)
     return params
+
+
+def _normalize_replay_code(code: str) -> str:
+    value = str(code or "").strip().lower()
+    for prefix in ("sh.", "sz."):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    for suffix in (".sh", ".sz"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+    return value
+
+
+def _history_candidate_for_code(bundle: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    normalized_target = _normalize_replay_code(stock_code)
+    for candidate in bundle.get("scored_candidates", []) or []:
+        if _normalize_replay_code(candidate.get("code", "")) == normalized_target:
+            return dict(candidate)
+    return {}
+
+
+def _proxy_candidate_snapshot(
+    *,
+    stock_code: str,
+    row: pd.Series,
+    tech: dict[str, Any],
+    params: dict[str, Any],
+    strategy: dict[str, Any],
+    tech_score: float,
+    fundamental_score: float,
+    flow_score: float,
+    sentiment_score: float,
+    total_score: float,
+    vetoes: list[str],
+    entry_signal: bool,
+    entry_reasons: list[str],
+    code_name: str,
+    df_stock: pd.DataFrame,
+    idx: int,
+) -> dict[str, Any]:
+    close_price = float(row["close"])
+    closes = [float(v) for v in df_stock.iloc[max(0, idx - 80):idx + 1]["close"].tolist()]
+    style_info = classify_style(closes, rsi=tech.get("rsi"), strategy=strategy) if len(closes) >= 30 else {}
+    return {
+        "code": stock_code,
+        "name": code_name,
+        "score": total_score,
+        "total_score": total_score,
+        "price": round(close_price, 4),
+        "technical_score": tech_score,
+        "fundamental_score": fundamental_score,
+        "flow_score": flow_score,
+        "sentiment_score": sentiment_score,
+        "veto_signals": list(vetoes),
+        "entry_signal": entry_signal,
+        "entry_reasons": list(entry_reasons),
+        "entry_mode": params.get("entry_mode", "strict"),
+        "golden_cross": tech.get("golden_cross", False),
+        "close_above_prev": tech.get("close_above_prev", False),
+        "deviation_pct": tech.get("deviation_pct"),
+        "volume_ratio": round(float(tech.get("volume_ratio") or 0), 2),
+        "rsi": round(float(tech["rsi"]), 1) if tech.get("rsi") is not None else None,
+        "style": style_info.get("style", "momentum"),
+        "style_confidence": style_info.get("confidence", 0),
+        "ma20": round(float(row["MA20"]), 4) if not pd.isna(row.get("MA20")) else None,
+        "ma5": round(float(row["MA5"]), 4) if not pd.isna(row.get("MA5")) else None,
+        "ma10": round(float(row["MA10"]), 4) if not pd.isna(row.get("MA10")) else None,
+        "ma60": round(float(row["MA60"]), 4) if not pd.isna(row.get("MA60")) else None,
+        "low": round(float(row["low"]), 4),
+        "high": round(float(row["high"]), 4),
+        "turn": round(float(row["turn"]), 4) if not pd.isna(row.get("turn")) else 0,
+        "snapshot_source": "proxy_replay",
+    }
+
+
+def _merge_history_candidate(
+    proxy_candidate: dict[str, Any],
+    history_candidate: dict[str, Any],
+    *,
+    history_group_id: str,
+) -> dict[str, Any]:
+    merged = dict(proxy_candidate)
+    merged.update(history_candidate or {})
+
+    raw_score = history_candidate.get(
+        "score",
+        history_candidate.get("total_score", merged.get("score", merged.get("total_score", proxy_candidate.get("score", 0)))),
+    )
+    try:
+        normalized_score = round(float(raw_score or 0), 2)
+    except Exception:
+        normalized_score = float(proxy_candidate.get("score", 0) or 0)
+
+    merged["score"] = normalized_score
+    merged["total_score"] = normalized_score
+    merged["name"] = str(merged.get("name", proxy_candidate.get("name", "")) or proxy_candidate.get("name", "")).strip()
+    merged["price"] = round(float(merged.get("price", proxy_candidate.get("price", 0)) or proxy_candidate.get("price", 0) or 0), 4)
+    merged["technical_score"] = round(float(merged.get("technical_score", proxy_candidate.get("technical_score", 0)) or 0), 4)
+    merged["fundamental_score"] = round(float(merged.get("fundamental_score", proxy_candidate.get("fundamental_score", 0)) or 0), 4)
+    merged["flow_score"] = round(float(merged.get("flow_score", proxy_candidate.get("flow_score", 0)) or 0), 4)
+    merged["sentiment_score"] = round(float(merged.get("sentiment_score", proxy_candidate.get("sentiment_score", 0)) or 0), 4)
+    merged["entry_signal"] = bool(merged.get("entry_signal", proxy_candidate.get("entry_signal", False)))
+    if "entry_reasons" in merged and isinstance(merged.get("entry_reasons"), list):
+        merged["entry_reasons"] = list(merged.get("entry_reasons") or [])
+    elif merged["entry_signal"]:
+        merged["entry_reasons"] = list(proxy_candidate.get("entry_reasons", []) or [])
+    else:
+        merged["entry_reasons"] = []
+    merged["veto_signals"] = [str(item).strip() for item in merged.get("veto_signals", proxy_candidate.get("veto_signals", [])) or [] if str(item).strip()]
+    merged["entry_mode"] = str(merged.get("entry_mode", proxy_candidate.get("entry_mode", "")) or proxy_candidate.get("entry_mode", "strict"))
+    merged["style"] = str(merged.get("style", proxy_candidate.get("style", "")) or proxy_candidate.get("style", "momentum"))
+    merged["style_confidence"] = float(merged.get("style_confidence", proxy_candidate.get("style_confidence", 0)) or 0)
+    merged["snapshot_source"] = "history_signal_snapshot"
+    merged["history_group_id"] = history_group_id
+    return merged
+
+
+def _summarize_data_fidelity(day_sources: list[dict[str, Any]]) -> dict[str, Any]:
+    history_days = sum(1 for item in day_sources if item.get("source") == "history_signal_snapshot")
+    proxy_days = sum(1 for item in day_sources if item.get("source") == "proxy_replay")
+    history_candidate_hit_days = sum(1 for item in day_sources if item.get("source") == "history_signal_snapshot" and item.get("candidate_present"))
+    history_candidate_absent_days = sum(1 for item in day_sources if item.get("source") == "history_signal_snapshot" and not item.get("candidate_present"))
+    if history_days and not proxy_days:
+        mode = "historical_signal_mirror"
+    elif history_days:
+        mode = "hybrid_signal_mirror"
+    else:
+        mode = "proxy_replay"
+    return {
+        "mode": mode,
+        "history_days": history_days,
+        "proxy_days": proxy_days,
+        "history_candidate_hit_days": history_candidate_hit_days,
+        "history_candidate_absent_days": history_candidate_absent_days,
+        "day_sources": day_sources,
+    }
 
 
 def _entry_signal_for_mode(
@@ -589,6 +726,7 @@ def build_replay_fixture(
     index_code: str = "000001",
     total_capital: float = 450286.0,
     strategy_params: dict | None = None,
+    use_history_snapshots: bool = True,
 ) -> dict:
     """
     生成完整的 replay fixture。
@@ -597,6 +735,7 @@ def build_replay_fixture(
         dict with keys: daily_data, total_capital, params, strategy_snapshot
     """
     params = _resolve_strategy_params(strategy_params)
+    use_history_snapshots = bool(params.get("use_history_snapshots", use_history_snapshots))
     strategy = get_strategy()
 
     bs_code = _to_bs_code(stock_code)
@@ -612,6 +751,9 @@ def build_replay_fixture(
     else:
         df_index_raw = _fetch_daily(bs_index, warmup_start, end)
         df_index = compute_market_signal(df_index_raw)
+    if "total_amount" not in df_index.columns:
+        df_index = df_index.copy()
+        df_index["total_amount"] = None
 
     # 拉个股数据
     df_stock = _fetch_daily(bs_code, warmup_start, end)
@@ -626,6 +768,8 @@ def build_replay_fixture(
     index_map = df_index.set_index("date")[["signal", "close", "total_amount"]].to_dict("index")
 
     daily_data: dict[str, dict] = {}
+    day_sources: list[dict[str, Any]] = []
+    code_name = str(stock_code).strip()
 
     for idx, row in df_stock.iterrows():
         day_str = row["date"].strftime("%Y-%m-%d")
@@ -677,44 +821,81 @@ def build_replay_fixture(
             + sentiment_score * weights["sentiment"] / denoms["sentiment"],
             2,
         )
-
+        proxy_candidate = _proxy_candidate_snapshot(
+            stock_code=stock_code,
+            row=row,
+            tech=tech,
+            params=params,
+            strategy=strategy,
+            tech_score=tech_score,
+            fundamental_score=fundamental_score,
+            flow_score=flow_score,
+            sentiment_score=sentiment_score,
+            total_score=total_score,
+            vetoes=vetoes,
+            entry_signal=entry_signal,
+            entry_reasons=entry_reasons,
+            code_name=code_name,
+            df_stock=df_stock,
+            idx=idx,
+        )
         close_price = float(row["close"])
-        closes = [float(v) for v in df_stock.iloc[max(0, idx - 80):idx + 1]["close"].tolist()]
-        style_info = classify_style(closes, rsi=tech.get("rsi"), strategy=strategy) if len(closes) >= 30 else {}
-        style = style_info.get("style", "momentum")
+        history_bundle: dict[str, Any] = {}
+        history_market = {}
+        history_candidate_snapshot = {}
+        history_candidate = {}
+        history_group_id = ""
+        source = "proxy_replay"
+        missing_components: list[str] = []
+
+        if use_history_snapshots:
+            history_bundle = load_daily_signal_snapshot_bundle(day_str)
+            history_group_id = str(history_bundle.get("history_group_id", "")).strip()
+            history_market = history_bundle.get("market_snapshot", {}) if isinstance(history_bundle.get("market_snapshot", {}), dict) else {}
+            history_candidate_snapshot = history_bundle.get("candidate_snapshot", {}) if isinstance(history_bundle.get("candidate_snapshot", {}), dict) else {}
+            history_candidate = _history_candidate_for_code(history_bundle, stock_code) if history_candidate_snapshot else {}
+            if history_market and history_candidate_snapshot:
+                market_signal = str(history_market.get("signal", market_signal) or market_signal).upper()
+                source = "history_signal_snapshot"
+            else:
+                if not history_market:
+                    missing_components.append("market_snapshot")
+                if not history_candidate_snapshot:
+                    missing_components.append("candidate_snapshot")
+
+        if history_market and source == "history_signal_snapshot":
+            market_signal = str(history_market.get("signal", market_signal) or market_signal).upper()
+
+        candidates: list[dict[str, Any]]
+        if source == "history_signal_snapshot":
+            if history_candidate:
+                candidates = [
+                    _merge_history_candidate(
+                        proxy_candidate,
+                        history_candidate,
+                        history_group_id=history_group_id,
+                    )
+                ]
+            else:
+                candidates = []
+        else:
+            candidates = [proxy_candidate]
+
+        day_sources.append({
+            "date": day_str,
+            "source": source,
+            "history_group_id": history_group_id,
+            "candidate_present": bool(history_candidate),
+            "missing_components": missing_components,
+        })
 
         daily_data[day_str] = {
             "market_signal": market_signal,
             "market_index_close": round(float(index_close), 2) if index_close else None,
             "total_market_amount": round(float(total_market_amount), 0) if total_market_amount else None,
-            "candidates": [{
-                "code": stock_code,
-                "name": "长飞光纤",
-                "score": total_score,
-                "price": round(close_price, 4),
-                "technical_score": tech_score,
-                "fundamental_score": fundamental_score,
-                "flow_score": flow_score,
-                "sentiment_score": sentiment_score,
-                "veto_signals": vetoes,
-                "entry_signal": entry_signal,
-                "entry_reasons": entry_reasons,
-                "entry_mode": params.get("entry_mode", "strict"),
-                "golden_cross": tech.get("golden_cross", False),
-                "close_above_prev": tech.get("close_above_prev", False),
-                "deviation_pct": tech.get("deviation_pct"),
-                "volume_ratio": round(float(tech.get("volume_ratio") or 0), 2),
-                "rsi": round(float(tech["rsi"]), 1) if tech.get("rsi") is not None else None,
-                "style": style,
-                "style_confidence": style_info.get("confidence", 0),
-                "ma20": round(float(row["MA20"]), 4) if not pd.isna(row.get("MA20")) else None,
-                "ma5": round(float(row["MA5"]), 4) if not pd.isna(row.get("MA5")) else None,
-                "ma10": round(float(row["MA10"]), 4) if not pd.isna(row.get("MA10")) else None,
-                "ma60": round(float(row["MA60"]), 4) if not pd.isna(row.get("MA60")) else None,
-                "low": round(float(row["low"]), 4),
-                "high": round(float(row["high"]), 4),
-                "turn": round(float(row["turn"]), 4) if not pd.isna(row.get("turn")) else 0,
-            }],
+            "history_group_id": history_group_id,
+            "snapshot_source": source,
+            "candidates": candidates,
             "prices": {stock_code: round(close_price, 4)},
             "bars": {
                 stock_code: {
@@ -734,6 +915,7 @@ def build_replay_fixture(
     if params.get("preset"):
         strategy_source += f"[preset={params['preset']}]"
     strategy_source += " + historical_overrides"
+    data_fidelity = _summarize_data_fidelity(day_sources)
 
     return {
         "daily_data": daily_data,
@@ -746,7 +928,9 @@ def build_replay_fixture(
             "end": end,
             "preset": params.get("preset"),
             "entry_mode": params.get("entry_mode", "strict"),
+            "use_history_snapshots": bool(use_history_snapshots),
             "strategy_source": strategy_source,
+            "data_fidelity": data_fidelity,
             "generated_at": datetime.now().isoformat(),
         },
         "strategy_snapshot": strategy,
@@ -1422,6 +1606,37 @@ def _build_validation_findings(
     return findings
 
 
+def _validation_data_fidelity(meta: dict[str, Any]) -> dict[str, Any]:
+    fidelity = dict(meta.get("data_fidelity", {}) if isinstance(meta.get("data_fidelity", {}), dict) else {})
+    mode = str(fidelity.get("mode", "")).strip() or "proxy_replay"
+    history_days = int(fidelity.get("history_days", 0) or 0)
+    proxy_days = int(fidelity.get("proxy_days", 0) or 0)
+    history_candidate_absent_days = int(fidelity.get("history_candidate_absent_days", 0) or 0)
+
+    if mode == "historical_signal_mirror":
+        notes = [
+            "交易日优先使用每日持久化的 market snapshot 与 scored candidates",
+            "当日股票不在历史候选池时，按真实快照保留为空候选，仅继续管理已有持仓",
+        ]
+    elif mode == "hybrid_signal_mirror":
+        notes = [
+            f"{history_days} 个交易日使用历史信号快照，{proxy_days} 个交易日回退到价格代理重建",
+            "缺快照日期仍按当前策略逻辑重建，不会中断整段回放",
+        ]
+    else:
+        notes = [
+            "技术面、风格和大盘择时按历史价格重建",
+            "基本面、资金流和舆情仍为历史近似，不是当日完整实盘镜像",
+        ]
+
+    fidelity["mode"] = mode
+    fidelity["history_days"] = history_days
+    fidelity["proxy_days"] = proxy_days
+    fidelity["history_candidate_absent_days"] = history_candidate_absent_days
+    fidelity["notes"] = notes
+    return fidelity
+
+
 def run_single_stock_strategy_validation(
     stock_code: str,
     start: str,
@@ -1491,13 +1706,7 @@ def run_single_stock_strategy_validation(
         "start": start,
         "end": end,
         "index_code": index_code,
-        "data_fidelity": {
-            "mode": "proxy_replay",
-            "notes": [
-                "技术面、风格和大盘择时按历史价格重建",
-                "基本面、资金流和舆情仍为历史近似，不是当日完整实盘镜像",
-            ],
-        },
+        "data_fidelity": _validation_data_fidelity(fixture.get("_meta", {})),
         "params": fixture["params"],
         "fixture_meta": fixture.get("_meta", {}),
         "performance": replay.get("summary", {}),

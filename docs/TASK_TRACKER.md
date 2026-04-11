@@ -144,8 +144,8 @@
 备注：ledger 新增历史快照表，支持按 `snapshot_date / history_group_id` 读取 market / pool / candidates / decision，并可组合成单日信号 bundle。
 - [x] 历史快照首条生产链路接入
 备注：`stock_screener` 运行时按统一 `history_group_id` 落盘 market / pool / scored candidates / today_decision；`core_pool_scoring` 同步落盘评分历史。
-- [ ] 历史信号镜像回放引擎
-备注：`historical_pipeline.py` 优先读取每日历史快照，缺失时才回退到当前 proxy replay。
+- [x] 历史信号镜像回放引擎
+备注：`historical_pipeline.py` 已接入混合回放模式；单日存在 `market snapshot + scored candidates` 时优先使用历史镜像，当日缺快照时自动回退到 proxy replay，并在验证结果输出 data fidelity。
 - [ ] 历史信号镜像 CLI / 诊断
 备注：增加按日查看某次 `history_group_id` 的 market / pool / candidates / decision，支持单股命中/漏判解释。
 - [ ] 盘前/午间/收盘市场快照归档补齐

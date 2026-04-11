@@ -174,6 +174,107 @@ class HistoricalPipelineTests(unittest.TestCase):
         self.assertEqual(result["aggregate"]["blended_win_rate"], 66.7)
         self.assertEqual(result["aggregate"]["worst_max_drawdown_pct"], -2.5)
 
+    def test_build_replay_fixture_prefers_history_signal_snapshots(self):
+        df_index = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-04-01", "2026-04-02", "2026-04-03"]),
+                "open": [3000.0, 3010.0, 3020.0],
+                "high": [3010.0, 3020.0, 3030.0],
+                "low": [2990.0, 3000.0, 3010.0],
+                "close": [3005.0, 3015.0, 3025.0],
+                "volume": [1, 1, 1],
+                "amount": [700_000_000_000, 710_000_000_000, 720_000_000_000],
+                "turn": [1.0, 1.0, 1.0],
+            }
+        )
+        df_stock = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-04-01", "2026-04-02", "2026-04-03"]),
+                "open": [10.0, 10.5, 11.0],
+                "high": [10.4, 10.8, 11.4],
+                "low": [9.8, 10.1, 10.7],
+                "close": [10.2, 10.6, 11.2],
+                "volume": [1000, 1200, 1400],
+                "amount": [10_200, 12_720, 15_680],
+                "turn": [1.1, 1.2, 1.3],
+            }
+        )
+        params = {
+            "technical_weight": 3,
+            "fundamental_weight": 2,
+            "flow_weight": 2,
+            "sentiment_weight": 3,
+            "technical_denom": 3,
+            "fundamental_denom": 2,
+            "flow_denom": 2,
+            "sentiment_denom": 3,
+            "entry_mode": "hybrid",
+            "require_entry_signal": True,
+            "use_history_snapshots": True,
+        }
+
+        def _bundle(day: str) -> dict:
+            if day == "2026-04-01":
+                return {
+                    "status": "ok",
+                    "history_group_id": "grp-001",
+                    "market_snapshot": {"signal": "RED"},
+                    "candidate_snapshot": {"candidate_count": 1},
+                    "scored_candidates": [
+                        {
+                            "code": "AAA",
+                            "name": "AAA Snapshot",
+                            "total_score": 9.1,
+                            "technical_score": 2.8,
+                            "fundamental_score": 1.7,
+                            "flow_score": 1.4,
+                            "sentiment_score": 2.2,
+                            "entry_signal": True,
+                            "veto_signals": ["red_market"],
+                            "style": "momentum",
+                            "price": 10.2,
+                        }
+                    ],
+                }
+            if day == "2026-04-02":
+                return {
+                    "status": "ok",
+                    "history_group_id": "grp-002",
+                    "market_snapshot": {"signal": "GREEN"},
+                    "candidate_snapshot": {"candidate_count": 0},
+                    "scored_candidates": [],
+                }
+            return {
+                "status": "missing",
+                "history_group_id": "",
+                "market_snapshot": {},
+                "candidate_snapshot": {},
+                "scored_candidates": [],
+            }
+
+        with (
+            patch.object(historical_pipeline, "_resolve_strategy_params", return_value=params),
+            patch.object(historical_pipeline, "get_strategy", return_value={}),
+            patch.object(historical_pipeline, "_fetch_daily", side_effect=[df_index, df_stock]),
+            patch.object(historical_pipeline, "load_daily_signal_snapshot_bundle", side_effect=_bundle),
+        ):
+            fixture = historical_pipeline.build_replay_fixture(
+                stock_code="AAA",
+                start="2026-04-01",
+                end="2026-04-03",
+            )
+
+        self.assertEqual(fixture["daily_data"]["2026-04-01"]["market_signal"], "RED")
+        self.assertEqual(fixture["daily_data"]["2026-04-01"]["snapshot_source"], "history_signal_snapshot")
+        self.assertEqual(fixture["daily_data"]["2026-04-01"]["candidates"][0]["score"], 9.1)
+        self.assertEqual(fixture["daily_data"]["2026-04-02"]["snapshot_source"], "history_signal_snapshot")
+        self.assertEqual(fixture["daily_data"]["2026-04-02"]["candidates"], [])
+        self.assertEqual(fixture["daily_data"]["2026-04-03"]["snapshot_source"], "proxy_replay")
+        self.assertEqual(fixture["_meta"]["data_fidelity"]["mode"], "hybrid_signal_mirror")
+        self.assertEqual(fixture["_meta"]["data_fidelity"]["history_days"], 2)
+        self.assertEqual(fixture["_meta"]["data_fidelity"]["proxy_days"], 1)
+        self.assertEqual(fixture["_meta"]["data_fidelity"]["history_candidate_absent_days"], 1)
+
     def test_compare_system_strategy_presets_ranks_by_total_pnl(self):
         def _fake_batch(stock_codes, start, end, index_code="system", total_capital=None, strategy_params=None):
             preset = strategy_params["preset"]
@@ -308,12 +409,64 @@ class HistoricalPipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(result["action"], "single_stock_strategy_validation")
+        self.assertEqual(result["data_fidelity"]["mode"], "proxy_replay")
         self.assertEqual(result["diagnostics"]["opportunity_statistics"]["total_opportunity_windows"], 1)
         self.assertEqual(result["diagnostics"]["opportunity_statistics"]["captured_opportunity_windows"], 0)
         self.assertEqual(
             result["diagnostics"]["opportunity_miss_reason_breakdown"][0]["reason"],
             "entry_signal_missing",
         )
+
+    def test_single_stock_validation_reports_fixture_data_fidelity(self):
+        fixture = {
+            "daily_data": {
+                "2026-04-01": {
+                    "market_signal": "GREEN",
+                    "candidates": [{"code": "AAA", "score": 8.0, "price": 10.0, "entry_signal": True, "veto_signals": []}],
+                    "prices": {"AAA": 10.0},
+                    "bars": {"AAA": {"close": 10.0, "high": 10.0, "low": 9.8}},
+                }
+            },
+            "total_capital": 100000,
+            "params": {"buy_threshold": 7, "require_entry_signal": True, "entry_mode": "hybrid"},
+            "_meta": {
+                "stock_code": "AAA",
+                "data_fidelity": {
+                    "mode": "hybrid_signal_mirror",
+                    "history_days": 2,
+                    "proxy_days": 1,
+                    "history_candidate_absent_days": 1,
+                },
+            },
+        }
+        replay = {
+            "summary": {
+                "total_realized_pnl": 0.0,
+                "ending_equity": 100000.0,
+                "closed_trade_count": 0,
+                "win_rate": 0.0,
+                "max_drawdown_pct": 0.0,
+                "max_drawdown_date": "",
+            },
+            "closed_trades": [],
+            "open_positions": [],
+            "rejected_entries": [],
+            "timeline": [],
+        }
+
+        with (
+            patch.object(historical_pipeline, "build_replay_fixture", return_value=fixture),
+            patch.object(historical_pipeline, "_resolve_strategy_params", return_value=fixture["params"]),
+            patch("scripts.backtest.strategy_replay.run_strategy_replay", return_value=replay),
+        ):
+            result = run_single_stock_strategy_validation(
+                stock_code="AAA",
+                start="2026-04-01",
+                end="2026-04-01",
+            )
+
+        self.assertEqual(result["data_fidelity"]["mode"], "hybrid_signal_mirror")
+        self.assertIn("2 个交易日使用历史信号快照", result["data_fidelity"]["notes"][0])
 
     def test_single_stock_validation_reports_premature_exit(self):
         fixture = {
