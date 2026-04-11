@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 Discord 格式化推送模块
 
@@ -332,6 +334,32 @@ def _compact_field(name: str, value: str) -> dict:
     return _field(name, str(value)[:1024], inline=True)
 
 
+def _render_condition_orders(orders: list[dict], max_items: int = 12) -> str:
+    """将条件单建议渲染为多行文本字段。"""
+    lines = []
+    for idx, item in enumerate(orders):
+        if idx >= max_items:
+            lines.append(f"… 其余 {len(orders) - max_items} 笔见日志")
+            break
+        name = str(item.get("name", "")).strip() or "未命名"
+        order_type = str(item.get("type", "条件单")).strip() or "条件单"
+        currency = str(item.get("currency", "¥")).strip() or "¥"
+        quantity = str(item.get("quantity", "")).strip()
+        note = str(item.get("note", "")).strip()
+        try:
+            price_text = f"{currency}{float(item.get('price', 0) or 0):.2f}"
+        except (TypeError, ValueError):
+            raw_price = str(item.get("price", "")).strip()
+            price_text = raw_price or "—"
+        line = f"• {name} {order_type} @ `{price_text}`"
+        if quantity:
+            line += f" · {quantity}"
+        if note:
+            line += f" · {note}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "无挂单建议"
+
+
 def _build_embed(
     title: str = "",
     description: str = "",
@@ -521,6 +549,14 @@ def _build_morning_embeds(data: dict) -> list[dict]:
     else:
         fields.append({"name": "空仓", "value": "\u200b", "inline": True})
 
+    condition_orders = data.get("condition_orders", [])
+    if condition_orders:
+        fields.append({
+            "name": f"⏰ 条件单预览（{len(condition_orders)} 笔）",
+            "value": _render_condition_orders(condition_orders),
+            "inline": False,
+        })
+
     # ── 核心池 ────────────────────────────────────────────────────
     core = data.get("core_pool", [])
     if core:
@@ -679,6 +715,14 @@ def _build_evening_embeds(data: dict) -> list[dict]:
     if alerts:
         alerts_value = "\n".join(f"• {a}" for a in alerts)
         fields.append({"name": f"⚠️ 触发事项（{len(alerts)} 项）", "value": alerts_value, "inline": False})
+
+    condition_orders = data.get("condition_orders", [])
+    if condition_orders:
+        fields.append({
+            "name": f"⏰ 明日挂单建议（{len(condition_orders)} 笔）",
+            "value": _render_condition_orders(condition_orders),
+            "inline": False,
+        })
 
     # ── 核心池 ────────────────────────────────────────────────────
     core = data.get("core_pool", [])
@@ -1020,6 +1064,7 @@ def send_morning_summary(data: dict) -> Tuple[bool, str]:
       date, weekday, market_signal
       market: {名称: {price, chg_pct, ma20_pct, ma60_pct, ma60_days, signal}}
       positions: [{name, shares, price, currency, note}]
+      condition_orders: [{name, type, price, currency, quantity, note}]
       core_pool: [{name, score, note, data_quality, data_missing_fields}]
       weekly_bought, weekly_limit
     """
@@ -1051,6 +1096,7 @@ def send_evening_report(data: dict) -> Tuple[bool, str]:
       positions: [{name, shares, value, currency, status}]
       total_value
       alerts: [str, ...]
+      condition_orders: [{name, type, price, currency, quantity, note}]
       core_pool: [{name, score, note, data_quality, data_missing_fields}]
       tomorrow_plan: [str, ...]
     """
