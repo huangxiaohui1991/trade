@@ -468,6 +468,75 @@ class HistoricalPipelineTests(unittest.TestCase):
         self.assertEqual(result["data_fidelity"]["mode"], "hybrid_signal_mirror")
         self.assertIn("2 个交易日使用历史信号快照", result["data_fidelity"]["notes"][0])
 
+    def test_single_stock_validation_uses_history_miss_reason_when_stock_not_scored(self):
+        fixture = {
+            "daily_data": {
+                "2026-04-01": {
+                    "market_signal": "GREEN",
+                    "snapshot_source": "history_signal_snapshot",
+                    "history_group_id": "grp-001",
+                    "candidates": [],
+                    "prices": {"AAA": 10.0},
+                    "bars": {"AAA": {"close": 10.0, "high": 10.0, "low": 9.8}},
+                },
+                "2026-04-02": {
+                    "market_signal": "GREEN",
+                    "snapshot_source": "history_signal_snapshot",
+                    "history_group_id": "grp-001",
+                    "candidates": [],
+                    "prices": {"AAA": 13.0},
+                    "bars": {"AAA": {"close": 13.0, "high": 13.0, "low": 12.7}},
+                },
+            },
+            "total_capital": 100000,
+            "params": {
+                "buy_threshold": 7,
+                "require_entry_signal": True,
+                "entry_mode": "hybrid",
+            },
+            "_meta": {
+                "stock_code": "AAA",
+                "data_fidelity": {
+                    "mode": "historical_signal_mirror",
+                    "history_days": 2,
+                    "proxy_days": 0,
+                    "history_candidate_absent_days": 2,
+                },
+            },
+        }
+        replay = {
+            "summary": {
+                "total_realized_pnl": 0.0,
+                "ending_equity": 100000.0,
+                "closed_trade_count": 0,
+                "win_rate": 0.0,
+                "max_drawdown_pct": 0.0,
+                "max_drawdown_date": "",
+            },
+            "closed_trades": [],
+            "open_positions": [],
+            "rejected_entries": [],
+            "timeline": [],
+        }
+
+        with (
+            patch.object(historical_pipeline, "build_replay_fixture", return_value=fixture),
+            patch.object(historical_pipeline, "_resolve_strategy_params", return_value=fixture["params"]),
+            patch("scripts.backtest.strategy_replay.run_strategy_replay", return_value=replay),
+        ):
+            result = run_single_stock_strategy_validation(
+                stock_code="AAA",
+                start="2026-04-01",
+                end="2026-04-02",
+                opportunity_min_gain_pct=0.2,
+            )
+
+        self.assertEqual(result["diagnostics"]["opportunity_statistics"]["total_opportunity_windows"], 1)
+        self.assertEqual(
+            result["diagnostics"]["opportunity_miss_reason_breakdown"][0]["reason"],
+            "not_in_scored_candidates",
+        )
+
     def test_single_stock_validation_reports_premature_exit(self):
         fixture = {
             "daily_data": {

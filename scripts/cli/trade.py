@@ -28,7 +28,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
-from scripts.backtest import compare_backtest_history, list_backtest_history, run_backtest, run_drawdown_analysis, run_parameter_sweep, run_walk_forward
+from scripts.backtest import (
+    compare_backtest_history,
+    diagnose_signal_snapshot,
+    list_backtest_history,
+    run_backtest,
+    run_drawdown_analysis,
+    run_parameter_sweep,
+    run_walk_forward,
+)
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
@@ -2015,6 +2023,12 @@ def main():
     backtest_validate.add_argument("--opportunity-min-gain-pct", type=float, default=0.15, help="Minimum gain threshold for opportunity windows")
     backtest_validate.add_argument("--premature-exit-min-gain-pct", type=float, default=0.08, help="Minimum post-exit gain to flag premature exits")
     backtest_validate.add_argument("--output", default=None, help="Optional JSON output path")
+    backtest_signal_diagnose = backtest_sub.add_parser("signal-diagnose", help="Inspect one persisted daily signal snapshot bundle")
+    backtest_signal_diagnose.add_argument("--date", dest="snapshot_date", required=True, help="Snapshot date YYYY-MM-DD")
+    backtest_signal_diagnose.add_argument("--history-group-id", default=None, help="Optional history_group_id to inspect")
+    backtest_signal_diagnose.add_argument("--code", default=None, help="Optional stock code for per-stock diagnosis")
+    backtest_signal_diagnose.add_argument("--candidate-limit", type=int, default=20, help="Preview limit for candidates/pool entries")
+    backtest_signal_diagnose.add_argument("--output", default=None, help="Optional JSON output path")
 
     backtest_batch = backtest_sub.add_parser("batch", help="Run batch backtest across multiple stocks with system strategy")
     backtest_batch.add_argument("--codes", required=True, help="Comma-separated stock codes, e.g. 601869,603803,002594")
@@ -2196,6 +2210,18 @@ def main():
                             out_path.parent.mkdir(parents=True, exist_ok=True)
                             out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                             result["report_path"] = str(out_path)
+                    elif args.action == "signal-diagnose":
+                        result = diagnose_signal_snapshot(
+                            snapshot_date=args.snapshot_date,
+                            history_group_id=args.history_group_id,
+                            stock_code=args.code,
+                            candidate_limit=args.candidate_limit,
+                        )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
 
                     elif args.action == "batch":
                         from scripts.backtest import run_multi_stock_system_backtest
@@ -2324,6 +2350,18 @@ def main():
                     opportunity_lookahead_days=args.opportunity_lookahead_days,
                     opportunity_min_gain_pct=args.opportunity_min_gain_pct,
                     premature_exit_min_gain_pct=args.premature_exit_min_gain_pct,
+                )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
+            elif args.action == "signal-diagnose":
+                result = diagnose_signal_snapshot(
+                    snapshot_date=args.snapshot_date,
+                    history_group_id=args.history_group_id,
+                    stock_code=args.code,
+                    candidate_limit=args.candidate_limit,
                 )
                 if args.output:
                     out_path = Path(args.output)
@@ -2502,6 +2540,12 @@ def main():
                 from scripts.backtest.historical_pipeline import render_single_stock_validation_report
 
                 print(render_single_stock_validation_report(result))
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
+            elif result.get("action") == "signal_snapshot_diagnosis":
+                from scripts.backtest.historical_pipeline import render_signal_snapshot_diagnosis_report
+
+                print(render_signal_snapshot_diagnosis_report(result))
                 if result.get("report_path"):
                     print(f"report_path: {result.get('report_path')}")
             else:

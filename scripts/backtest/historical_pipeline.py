@@ -39,7 +39,13 @@ import baostock as bs
 import pandas as pd
 
 from scripts.engine.stock_classifier import classify_style
-from scripts.state import load_daily_signal_snapshot_bundle
+from scripts.state import (
+    load_candidate_snapshot_history,
+    load_daily_signal_snapshot_bundle,
+    load_decision_snapshot_history,
+    load_market_snapshot_history,
+    load_pool_snapshot_history,
+)
 from scripts.utils.config_loader import get_strategy
 
 
@@ -1347,6 +1353,9 @@ def _build_single_stock_daily_rows(stock_code: str, daily_data: dict[str, dict[s
             "style": str(candidate.get("style", "") or ""),
             "volume_ratio": float(candidate.get("volume_ratio", 0) or 0),
             "rsi": candidate.get("rsi"),
+            "snapshot_source": str(snapshot.get("snapshot_source", "proxy_replay") or "proxy_replay"),
+            "history_group_id": str(snapshot.get("history_group_id", "") or ""),
+            "candidate_present": bool(candidate),
         })
     return rows
 
@@ -1383,6 +1392,8 @@ def _date_in_ranges(day: str, ranges: list[dict[str, Any]]) -> bool:
 
 
 def _classify_missed_reason(row: dict[str, Any], params: dict[str, Any]) -> str:
+    if row.get("snapshot_source") == "history_signal_snapshot" and not bool(row.get("candidate_present", False)):
+        return "not_in_scored_candidates"
     if row.get("market_signal") in {"RED", "CLEAR"}:
         return f"market_signal_{str(row['market_signal']).lower()}"
     if float(row.get("score", 0) or 0) < float(params.get("buy_threshold", 7) or 7):
@@ -1637,6 +1648,167 @@ def _validation_data_fidelity(meta: dict[str, Any]) -> dict[str, Any]:
     return fidelity
 
 
+def _available_signal_history_groups(snapshot_date: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    group_rows: dict[str, dict[str, Any]] = {}
+    sources = [
+        ("market_snapshot", load_market_snapshot_history(snapshot_date, limit=max(1, int(limit or 20)))),
+        ("pool_snapshot", load_pool_snapshot_history(snapshot_date, limit=max(1, int(limit or 20)))),
+        ("today_decision", load_decision_snapshot_history(snapshot_date, limit=max(1, int(limit or 20)))),
+        ("scored_candidates", load_candidate_snapshot_history(snapshot_date, limit=max(1, int(limit or 20)))),
+    ]
+    for component, payload in sources:
+        for item in payload.get("items", []) or []:
+            history_group_id = str(item.get("history_group_id", "")).strip()
+            if not history_group_id:
+                continue
+            row = group_rows.setdefault(
+                history_group_id,
+                {
+                    "history_group_id": history_group_id,
+                    "snapshot_date": snapshot_date,
+                    "updated_at": str(item.get("updated_at", "") or ""),
+                    "pipeline": str(item.get("pipeline", "") or ""),
+                    "source": str(item.get("source", "") or ""),
+                    "components": set(),
+                },
+            )
+            row["components"].add(component)
+            updated_at = str(item.get("updated_at", "") or "")
+            if updated_at > str(row.get("updated_at", "") or ""):
+                row["updated_at"] = updated_at
+            if not row.get("pipeline") and item.get("pipeline"):
+                row["pipeline"] = str(item.get("pipeline", "") or "")
+            if not row.get("source") and item.get("source"):
+                row["source"] = str(item.get("source", "") or "")
+
+    items = []
+    for row in group_rows.values():
+        items.append(
+            {
+                "history_group_id": row["history_group_id"],
+                "snapshot_date": snapshot_date,
+                "updated_at": row.get("updated_at", ""),
+                "pipeline": row.get("pipeline", ""),
+                "source": row.get("source", ""),
+                "components": sorted(row.get("components", set())),
+            }
+        )
+    items.sort(key=lambda item: (str(item.get("updated_at", "") or ""), str(item.get("history_group_id", "") or "")), reverse=True)
+    return items[: max(1, int(limit or 20))]
+
+
+def _pool_entry_for_code(snapshot: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    normalized_target = _normalize_replay_code(stock_code)
+    entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
+    for entry in entries if isinstance(entries, list) else []:
+        if _normalize_replay_code(entry.get("code", "")) == normalized_target:
+            return dict(entry)
+    return {}
+
+
+def _diagnose_signal_snapshot_code(stock_code: str, bundle: dict[str, Any]) -> dict[str, Any]:
+    code = str(stock_code or "").strip()
+    candidate = _history_candidate_for_code(bundle, code)
+    pool_entry = _pool_entry_for_code(bundle.get("pool_snapshot", {}) if isinstance(bundle.get("pool_snapshot", {}), dict) else {}, code)
+    market_snapshot = bundle.get("market_snapshot", {}) if isinstance(bundle.get("market_snapshot", {}), dict) else {}
+    candidate_snapshot = bundle.get("candidate_snapshot", {}) if isinstance(bundle.get("candidate_snapshot", {}), dict) else {}
+    missing_components = list(bundle.get("missing_components", []) or [])
+    candidates = candidate_snapshot.get("candidates", []) if isinstance(candidate_snapshot.get("candidates", []), list) else []
+
+    candidate_rank = 0
+    if candidate:
+        normalized_target = _normalize_replay_code(code)
+        for idx, item in enumerate(candidates, start=1):
+            if _normalize_replay_code(item.get("code", "")) == normalized_target:
+                candidate_rank = idx
+                break
+
+    status = "unknown"
+    reason = ""
+    if pool_entry:
+        bucket = str(pool_entry.get("bucket", "")).strip() or "other"
+        status = f"selected_{bucket}"
+        reason = str(pool_entry.get("note", "") or "").strip() or f"stock landed in {bucket} pool"
+    elif candidate:
+        veto_signals = [str(item).strip() for item in candidate.get("veto_signals", []) or [] if str(item).strip()]
+        if veto_signals:
+            status = "scored_but_vetoed"
+            reason = ",".join(veto_signals)
+        else:
+            status = "scored_but_not_in_pool"
+            reason = "candidate was scored in this run but not projected into pool snapshot"
+    elif "candidate_snapshot" in missing_components:
+        status = "candidate_snapshot_missing"
+        reason = "candidate snapshot missing for this history group"
+    else:
+        status = "not_in_scored_candidates"
+        reason = "stock was not present in scored candidates for this run"
+
+    return {
+        "code": code,
+        "history_group_id": str(bundle.get("history_group_id", "") or ""),
+        "market_signal": str(market_snapshot.get("signal", "") or ""),
+        "candidate_present": bool(candidate),
+        "candidate_rank": candidate_rank,
+        "pool_present": bool(pool_entry),
+        "pool_bucket": str(pool_entry.get("bucket", "") or ""),
+        "status": status,
+        "reason": reason,
+        "candidate": candidate,
+        "pool_entry": pool_entry,
+    }
+
+
+def diagnose_signal_snapshot(
+    snapshot_date: str,
+    *,
+    history_group_id: str | None = None,
+    stock_code: str | None = None,
+    candidate_limit: int = 20,
+) -> dict[str, Any]:
+    """Inspect one historical signal snapshot bundle and optionally explain a stock's outcome."""
+    resolved_date = str(snapshot_date or "").strip()
+    if not resolved_date:
+        raise ValueError("snapshot_date is required")
+
+    available_groups = _available_signal_history_groups(resolved_date, limit=50)
+    requested_group_id = str(history_group_id or "").strip()
+    resolved_group_id = requested_group_id or (available_groups[0]["history_group_id"] if available_groups else "")
+    bundle = load_daily_signal_snapshot_bundle(resolved_date, history_group_id=resolved_group_id or None)
+
+    pool_snapshot = dict(bundle.get("pool_snapshot", {}) if isinstance(bundle.get("pool_snapshot", {}), dict) else {})
+    candidate_snapshot = dict(bundle.get("candidate_snapshot", {}) if isinstance(bundle.get("candidate_snapshot", {}), dict) else {})
+    candidates = list(candidate_snapshot.get("candidates", []) if isinstance(candidate_snapshot.get("candidates", []), list) else [])
+    pool_entries = list(pool_snapshot.get("entries", []) if isinstance(pool_snapshot.get("entries", []), list) else [])
+
+    candidate_snapshot["candidates"] = candidates[: max(1, int(candidate_limit or 20))]
+    candidate_snapshot["candidates_truncated"] = len(candidates) > len(candidate_snapshot["candidates"])
+    pool_snapshot["entries"] = pool_entries[: max(1, int(candidate_limit or 20))]
+    pool_snapshot["entries_truncated"] = len(pool_entries) > len(pool_snapshot["entries"])
+
+    result = {
+        "command": "backtest",
+        "action": "signal_snapshot_diagnosis",
+        "status": str(bundle.get("status", "missing") or "missing"),
+        "snapshot_date": resolved_date,
+        "requested_history_group_id": requested_group_id,
+        "history_group_id": str(bundle.get("history_group_id", resolved_group_id) or resolved_group_id),
+        "resolved_from_latest": bool(not requested_group_id and str(bundle.get("history_group_id", "") or "")),
+        "missing_components": list(bundle.get("missing_components", []) or []),
+        "available_history_groups": available_groups,
+        "market_snapshot": bundle.get("market_snapshot", {}),
+        "today_decision": bundle.get("today_decision", {}),
+        "decision_snapshot": bundle.get("decision_snapshot", {}),
+        "pool_snapshot": pool_snapshot,
+        "candidate_snapshot": candidate_snapshot,
+        "candidate_count": int(candidate_snapshot.get("candidate_count", len(candidates)) or 0),
+        "pool_entry_count": len(pool_entries),
+    }
+    if stock_code:
+        result["code_diagnosis"] = _diagnose_signal_snapshot_code(stock_code, bundle)
+    return result
+
+
 def run_single_stock_strategy_validation(
     stock_code: str,
     start: str,
@@ -1785,6 +1957,91 @@ def render_single_stock_validation_report(report: dict[str, Any]) -> str:
             f"{item['future_peak_date']} 前还少赚 {item['missed_gain_pct']:.1f}%"
         )
     lines.append("")
+    return "\n".join(lines)
+
+
+def render_signal_snapshot_diagnosis_report(report: dict[str, Any]) -> str:
+    """Render a concise text report for one historical signal snapshot."""
+    market = report.get("market_snapshot", {}) if isinstance(report.get("market_snapshot", {}), dict) else {}
+    decision = report.get("today_decision", {}) if isinstance(report.get("today_decision", {}), dict) else {}
+    pool_snapshot = report.get("pool_snapshot", {}) if isinstance(report.get("pool_snapshot", {}), dict) else {}
+    candidate_snapshot = report.get("candidate_snapshot", {}) if isinstance(report.get("candidate_snapshot", {}), dict) else {}
+    lines = [
+        "",
+        "=" * 64,
+        f"  历史信号镜像诊断  {report.get('snapshot_date', '')}",
+        f"  history_group_id: {report.get('history_group_id', '') or '<auto/latest>'}",
+        "=" * 64,
+        "",
+        f"  状态: {report.get('status', 'missing')}",
+        f"  市场信号: {market.get('signal', '')}    决策: {decision.get('action', decision.get('decision', ''))}",
+        f"  候选数: {report.get('candidate_count', 0)}    池条目数: {report.get('pool_entry_count', 0)}",
+        "",
+    ]
+    if report.get("missing_components"):
+        lines.append(f"  缺失组件: {', '.join(report.get('missing_components', []))}")
+        lines.append("")
+
+    summary = pool_snapshot.get("summary", {}) if isinstance(pool_snapshot.get("summary", {}), dict) else {}
+    if summary:
+        lines.append("  池子摘要:")
+        lines.append(
+            f"    core={summary.get('core_count', summary.get('core', 0))} "
+            f"watch={summary.get('watch_count', summary.get('watch', 0))} "
+            f"other={summary.get('other_count', summary.get('avoid', 0))}"
+        )
+        lines.append("")
+
+    code_diagnosis = report.get("code_diagnosis", {}) if isinstance(report.get("code_diagnosis", {}), dict) else {}
+    if code_diagnosis:
+        lines.append(f"  个股诊断: {code_diagnosis.get('code', '')}")
+        lines.append(
+            f"    状态={code_diagnosis.get('status', '')} "
+            f"候选命中={code_diagnosis.get('candidate_present', False)} "
+            f"池命中={code_diagnosis.get('pool_present', False)} "
+            f"bucket={code_diagnosis.get('pool_bucket', '') or '-'}"
+        )
+        lines.append(f"    结论: {code_diagnosis.get('reason', '') or '无'}")
+        candidate = code_diagnosis.get("candidate", {}) if isinstance(code_diagnosis.get("candidate", {}), dict) else {}
+        if candidate:
+            score = candidate.get("score", candidate.get("total_score", 0))
+            lines.append(
+                f"    候选详情: rank={code_diagnosis.get('candidate_rank', 0)} "
+                f"score={float(score or 0):.2f} veto={','.join(candidate.get('veto_signals', []) or []) or '-'}"
+            )
+        pool_entry = code_diagnosis.get("pool_entry", {}) if isinstance(code_diagnosis.get("pool_entry", {}), dict) else {}
+        if pool_entry:
+            lines.append(
+                f"    池条目: bucket={pool_entry.get('bucket', '')} "
+                f"score={float(pool_entry.get('total_score', 0) or 0):.2f} "
+                f"note={pool_entry.get('note', '') or '-'}"
+            )
+        lines.append("")
+
+    available_groups = report.get("available_history_groups", []) or []
+    if available_groups:
+        lines.append("  当日可选运行:")
+        for item in available_groups[:5]:
+            lines.append(
+                f"    - {item.get('history_group_id', '')} "
+                f"[{','.join(item.get('components', []) or [])}] "
+                f"{item.get('updated_at', '')}"
+            )
+        lines.append("")
+
+    candidates = candidate_snapshot.get("candidates", []) if isinstance(candidate_snapshot.get("candidates", []), list) else []
+    if candidates:
+        lines.append("  候选预览:")
+        for item in candidates[:5]:
+            score = item.get("score", item.get("total_score", 0))
+            lines.append(
+                f"    - {item.get('code', '')} {item.get('name', '')} "
+                f"score={float(score or 0):.2f} "
+                f"veto={','.join(item.get('veto_signals', []) or []) or '-'}"
+            )
+        if candidate_snapshot.get("candidates_truncated", False):
+            lines.append("    - ...")
+        lines.append("")
     return "\n".join(lines)
 
 

@@ -13,6 +13,8 @@ from scripts.backtest.drawdown import run_drawdown_analysis
 from scripts.backtest.historical_pipeline import (
     build_replay_fixture,
     compare_system_strategy_presets,
+    diagnose_signal_snapshot,
+    render_signal_snapshot_diagnosis_report,
     run_multi_stock_system_backtest,
     run_single_stock_strategy_validation,
     run_system_strategy_backtest,
@@ -21,8 +23,10 @@ from scripts.backtest.historical_pipeline import (
 __all__ = [
     "compare_backtest_history",
     "compare_system_strategy_presets",
+    "diagnose_signal_snapshot",
     "list_backtest_history",
     "load_backtest_inputs",
+    "render_signal_snapshot_diagnosis_report",
     "run_backtest",
     "run_drawdown_analysis",
     "run_multi_stock_system_backtest",
