@@ -147,7 +147,7 @@
 - [x] 历史信号镜像回放引擎
 备注：`historical_pipeline.py` 已接入混合回放模式；单日存在 `market snapshot + scored candidates` 时优先使用历史镜像，当日缺快照时自动回退到 proxy replay，并在验证结果输出 data fidelity。
 - [x] 历史信号镜像 CLI / 诊断
-备注：新增 `bin/trade backtest signal-diagnose --date --history-group-id --code`，可查看当日可选 `history_group_id`、market / pool / candidates / decision，并输出单股命中 / 漏判解释；未指定组时会附带同日 `preopen / midday / screener / close` 时点摘要与单股跨组对比。
+备注：新增 `bin/trade backtest signal-diagnose --date --history-group-id --code/--codes`，可查看当日可选 `history_group_id`、market / pool / candidates / decision，并输出单股或多股命中 / 漏判解释；未指定组时会附带同日 `preopen / midday / screener / close` 时点摘要与跨组对比。
 - [x] 单股验证报告真实 miss reason
 备注：历史镜像日里若某只股票根本不在 `scored candidates`，`validate-single` 优先输出 `not_in_scored_candidates`，不再误归因为 `score_below_threshold`。
 - [x] 盘前/午间/收盘市场快照归档补齐

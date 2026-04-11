@@ -202,6 +202,25 @@ class SignalSnapshotDiagnosisTests(unittest.TestCase):
         self.assertFalse(report["code_diagnosis"]["candidate_present"])
         self.assertFalse(report["code_diagnosis"]["pool_present"])
 
+    def test_diagnose_signal_snapshot_scans_multiple_codes(self):
+        from scripts.backtest.historical_pipeline import diagnose_signal_snapshot, render_signal_snapshot_diagnosis_report
+
+        self._seed_history_bundle()
+        report = diagnose_signal_snapshot("2026-04-11", stock_codes=["601869", "603108", "002962"])
+
+        self.assertEqual(report["code_scan_summary"]["requested_code_count"], 3)
+        self.assertEqual(report["code_scan_summary"]["status_counts"]["selected_core"], 1)
+        self.assertEqual(report["code_scan_summary"]["status_counts"]["selected_watch"], 1)
+        self.assertEqual(report["code_scan_summary"]["status_counts"]["not_in_scored_candidates"], 1)
+        scan_by_code = {item["code"]: item for item in report["code_scan"]}
+        self.assertEqual(scan_by_code["601869"]["screener_status"], "selected_core")
+        self.assertEqual(scan_by_code["603108"]["current_group_status"], "selected_watch")
+        self.assertEqual(scan_by_code["002962"]["current_group_status"], "not_in_scored_candidates")
+        self.assertEqual(scan_by_code["601869"]["timepoint_statuses"]["screener"], "selected_core")
+        text = render_signal_snapshot_diagnosis_report(report)
+        self.assertIn("批量代码扫描", text)
+        self.assertIn("601869", text)
+
     def test_cli_backtest_signal_diagnose_json_dispatches(self):
         import scripts.cli.trade as trade
 
@@ -249,7 +268,56 @@ class SignalSnapshotDiagnosisTests(unittest.TestCase):
             snapshot_date="2026-04-11",
             history_group_id="screener:2026-04-11:150001",
             stock_code="601869",
+            stock_codes=[],
             candidate_limit=10,
+        )
+
+    def test_cli_backtest_signal_diagnose_json_dispatches_codes(self):
+        import scripts.cli.trade as trade
+
+        fake_result = {
+            "command": "backtest",
+            "action": "signal_snapshot_diagnosis",
+            "status": "ok",
+            "snapshot_date": "2026-04-11",
+            "history_group_id": "screener:2026-04-11:150001",
+            "available_history_groups": [],
+            "market_snapshot": {"signal": "GREEN"},
+            "today_decision": {"action": "BUY"},
+            "candidate_snapshot": {"candidate_count": 2, "candidates": []},
+            "pool_snapshot": {"entries": [], "summary": {"core_count": 1, "watch_count": 1}},
+            "candidate_count": 2,
+            "pool_entry_count": 2,
+            "code_scan": [],
+            "code_scan_summary": {"requested_code_count": 2, "status_counts": {}},
+        }
+
+        stdout = io.StringIO()
+        with mock.patch.object(trade, "diagnose_signal_snapshot", return_value=dict(fake_result)) as diagnose_mock, mock.patch.object(
+            trade.sys,
+            "argv",
+            [
+                "trade",
+                "--json",
+                "backtest",
+                "signal-diagnose",
+                "--date",
+                "2026-04-11",
+                "--codes",
+                "601869/603108",
+            ],
+        ):
+            with contextlib.redirect_stdout(stdout):
+                trade.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["action"], "signal_snapshot_diagnosis")
+        diagnose_mock.assert_called_once_with(
+            snapshot_date="2026-04-11",
+            history_group_id=None,
+            stock_code=None,
+            stock_codes=["601869", "603108"],
+            candidate_limit=20,
         )
 
 

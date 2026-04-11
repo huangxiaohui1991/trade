@@ -1817,11 +1817,82 @@ def _build_market_timepoint_timeline(snapshot_date: str, groups: list[dict[str, 
     return timeline
 
 
+def _diagnosis_across_group_row(group: dict[str, Any], diagnosis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "history_group_id": str(group.get("history_group_id", "")).strip(),
+        "timepoint": str(group.get("timepoint", "") or ""),
+        "pipeline": str(group.get("pipeline", "") or ""),
+        "updated_at": str(group.get("updated_at", "") or ""),
+        "status": diagnosis.get("status", ""),
+        "reason": diagnosis.get("reason", ""),
+        "market_signal": diagnosis.get("market_signal", ""),
+        "candidate_present": bool(diagnosis.get("candidate_present", False)),
+        "pool_present": bool(diagnosis.get("pool_present", False)),
+        "pool_bucket": str(diagnosis.get("pool_bucket", "") or ""),
+    }
+
+
+def _diagnose_snapshot_code_across_groups(
+    stock_code: str,
+    *,
+    snapshot_date: str,
+    available_groups: list[dict[str, Any]],
+    bundle_cache: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    across_groups = []
+    for group in available_groups[:20]:
+        group_id = str(group.get("history_group_id", "")).strip()
+        if not group_id:
+            continue
+        bundle = bundle_cache.get(group_id)
+        if bundle is None:
+            bundle = load_daily_signal_snapshot_bundle(snapshot_date, history_group_id=group_id)
+            bundle_cache[group_id] = bundle
+        across_groups.append(_diagnosis_across_group_row(group, _diagnose_signal_snapshot_code(stock_code, bundle)))
+    return across_groups
+
+
+def _build_code_scan_item(
+    stock_code: str,
+    *,
+    selected_group_id: str,
+    across_groups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    current = next(
+        (item for item in across_groups if str(item.get("history_group_id", "")).strip() == selected_group_id),
+        across_groups[0] if across_groups else {},
+    )
+    screener = next((item for item in across_groups if item.get("timepoint") == "screener"), {})
+    timepoint_statuses = {
+        str(item.get("timepoint", "") or ""): str(item.get("status", "") or "")
+        for item in across_groups
+        if str(item.get("timepoint", "") or "")
+    }
+    selected_count = sum(1 for item in across_groups if str(item.get("status", "")).startswith("selected_"))
+    candidate_count = sum(1 for item in across_groups if bool(item.get("candidate_present", False)))
+    pool_count = sum(1 for item in across_groups if bool(item.get("pool_present", False)))
+    return {
+        "code": str(stock_code or "").strip(),
+        "current_group_status": str(current.get("status", "") or ""),
+        "current_group_reason": str(current.get("reason", "") or ""),
+        "current_group_bucket": str(current.get("pool_bucket", "") or ""),
+        "current_group_market_signal": str(current.get("market_signal", "") or ""),
+        "screener_status": str(screener.get("status", "") or ""),
+        "screener_bucket": str(screener.get("pool_bucket", "") or ""),
+        "selected_group_count": selected_count,
+        "candidate_group_count": candidate_count,
+        "pool_group_count": pool_count,
+        "timepoint_statuses": timepoint_statuses,
+        "across_groups": across_groups,
+    }
+
+
 def diagnose_signal_snapshot(
     snapshot_date: str,
     *,
     history_group_id: str | None = None,
     stock_code: str | None = None,
+    stock_codes: list[str] | None = None,
     candidate_limit: int = 20,
 ) -> dict[str, Any]:
     """Inspect one historical signal snapshot bundle and optionally explain a stock's outcome."""
@@ -1833,6 +1904,9 @@ def diagnose_signal_snapshot(
     requested_group_id = str(history_group_id or "").strip()
     resolved_group_id = requested_group_id or (available_groups[0]["history_group_id"] if available_groups else "")
     bundle = load_daily_signal_snapshot_bundle(resolved_date, history_group_id=resolved_group_id or None)
+    bundle_cache = {
+        str(bundle.get("history_group_id", resolved_group_id) or resolved_group_id): bundle,
+    } if str(bundle.get("history_group_id", resolved_group_id) or resolved_group_id).strip() else {}
 
     pool_snapshot = dict(bundle.get("pool_snapshot", {}) if isinstance(bundle.get("pool_snapshot", {}), dict) else {})
     candidate_snapshot = dict(bundle.get("candidate_snapshot", {}) if isinstance(bundle.get("candidate_snapshot", {}), dict) else {})
@@ -1866,30 +1940,42 @@ def diagnose_signal_snapshot(
     }
     if stock_code:
         result["code_diagnosis"] = _diagnose_signal_snapshot_code(stock_code, bundle)
-        across_groups = []
-        for group in available_groups[:20]:
-            group_id = str(group.get("history_group_id", "")).strip()
-            if not group_id:
-                continue
-            group_bundle = bundle if group_id == str(result.get("history_group_id", "") or "") else load_daily_signal_snapshot_bundle(
-                resolved_date, history_group_id=group_id
-            )
-            diagnosis = _diagnose_signal_snapshot_code(stock_code, group_bundle)
-            across_groups.append(
-                {
-                    "history_group_id": group_id,
-                    "timepoint": str(group.get("timepoint", "") or ""),
-                    "pipeline": str(group.get("pipeline", "") or ""),
-                    "updated_at": str(group.get("updated_at", "") or ""),
-                    "status": diagnosis.get("status", ""),
-                    "reason": diagnosis.get("reason", ""),
-                    "market_signal": diagnosis.get("market_signal", ""),
-                    "candidate_present": bool(diagnosis.get("candidate_present", False)),
-                    "pool_present": bool(diagnosis.get("pool_present", False)),
-                    "pool_bucket": str(diagnosis.get("pool_bucket", "") or ""),
-                }
-            )
+        across_groups = _diagnose_snapshot_code_across_groups(
+            stock_code,
+            snapshot_date=resolved_date,
+            available_groups=available_groups,
+            bundle_cache=bundle_cache,
+        )
         result["code_diagnosis_across_groups"] = across_groups
+    requested_codes = []
+    if stock_codes:
+        requested_codes.extend([str(code).strip() for code in stock_codes if str(code).strip()])
+    if stock_code and str(stock_code).strip() not in requested_codes:
+        requested_codes.append(str(stock_code).strip())
+    if requested_codes:
+        code_scan = []
+        summary: dict[str, int] = {}
+        for code in requested_codes:
+            across_groups = _diagnose_snapshot_code_across_groups(
+                code,
+                snapshot_date=resolved_date,
+                available_groups=available_groups,
+                bundle_cache=bundle_cache,
+            )
+            item = _build_code_scan_item(
+                code,
+                selected_group_id=str(result.get("history_group_id", "") or ""),
+                across_groups=across_groups,
+            )
+            code_scan.append(item)
+            current_status = str(item.get("current_group_status", "") or "unknown")
+            summary[current_status] = summary.get(current_status, 0) + 1
+        result["requested_codes"] = requested_codes
+        result["code_scan"] = code_scan
+        result["code_scan_summary"] = {
+            "requested_code_count": len(requested_codes),
+            "status_counts": summary,
+        }
     return result
 
 
@@ -2135,6 +2221,19 @@ def render_signal_snapshot_diagnosis_report(report: dict[str, Any]) -> str:
                 f"{item.get('status', '')} "
                 f"signal={item.get('market_signal', '') or '-'} "
                 f"bucket={item.get('pool_bucket', '') or '-'}"
+            )
+        lines.append("")
+
+    code_scan = report.get("code_scan", []) if isinstance(report.get("code_scan", []), list) else []
+    if code_scan:
+        lines.append("  批量代码扫描:")
+        for item in code_scan[:10]:
+            lines.append(
+                f"    - {item.get('code', '')} "
+                f"current={item.get('current_group_status', '') or '-'} "
+                f"screener={item.get('screener_status', '') or '-'} "
+                f"selected={item.get('selected_group_count', 0)} "
+                f"candidate={item.get('candidate_group_count', 0)}"
             )
         lines.append("")
 

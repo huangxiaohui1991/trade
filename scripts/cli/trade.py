@@ -612,6 +612,16 @@ def _parse_json_arg_or_file(value: str | None) -> dict:
     return json.loads(text)
 
 
+def _parse_codes_arg(value: str | None) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    normalized = text
+    for sep in ("/", "，", "、", " "):
+        normalized = normalized.replace(sep, ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
 def _financial_missing_fields(data) -> list[str]:
     if not isinstance(data, dict):
         return []
@@ -2027,6 +2037,7 @@ def main():
     backtest_signal_diagnose.add_argument("--date", dest="snapshot_date", required=True, help="Snapshot date YYYY-MM-DD")
     backtest_signal_diagnose.add_argument("--history-group-id", default=None, help="Optional history_group_id to inspect")
     backtest_signal_diagnose.add_argument("--code", default=None, help="Optional stock code for per-stock diagnosis")
+    backtest_signal_diagnose.add_argument("--codes", default=None, help="Optional comma-separated stock codes for batch diagnosis")
     backtest_signal_diagnose.add_argument("--candidate-limit", type=int, default=20, help="Preview limit for candidates/pool entries")
     backtest_signal_diagnose.add_argument("--output", default=None, help="Optional JSON output path")
 
@@ -2211,10 +2222,12 @@ def main():
                             out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                             result["report_path"] = str(out_path)
                     elif args.action == "signal-diagnose":
+                        stock_codes = _parse_codes_arg(getattr(args, "codes", None))
                         result = diagnose_signal_snapshot(
                             snapshot_date=args.snapshot_date,
                             history_group_id=args.history_group_id,
                             stock_code=args.code,
+                            stock_codes=stock_codes,
                             candidate_limit=args.candidate_limit,
                         )
                         if args.output:
@@ -2357,10 +2370,12 @@ def main():
                     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                     result["report_path"] = str(out_path)
             elif args.action == "signal-diagnose":
+                stock_codes = _parse_codes_arg(getattr(args, "codes", None))
                 result = diagnose_signal_snapshot(
                     snapshot_date=args.snapshot_date,
                     history_group_id=args.history_group_id,
                     stock_code=args.code,
+                    stock_codes=stock_codes,
                     candidate_limit=args.candidate_limit,
                 )
                 if args.output:
