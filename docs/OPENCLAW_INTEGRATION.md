@@ -33,6 +33,12 @@ bin/trade backtest walk-forward --start 2026-03-01 --end 2026-04-09 --folds 3 --
 bin/trade backtest strategy-replay --start 2026-04-01 --end 2026-04-10 --fixture data/replay_fixture.json --json
 bin/trade backtest history --json
 bin/trade backtest compare --json
+# 批量回测多只股票（支持 preset 名称或 params-json）
+bin/trade backtest batch --codes 601869,603803 --start 2026-03-01 --end 2026-04-11 --preset 保守验证C --json
+# 单股诊断回测
+bin/trade backtest validate-single --code 601869 --start 2026-03-01 --end 2026-04-11 --preset 保守验证C --json
+# 资金曲线回撤分析
+bin/trade backtest drawdown --codes 601869,603803 --days 365 --json
 ```
 
 ### 订单管理（Hermes-Agent 专用）

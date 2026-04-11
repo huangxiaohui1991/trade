@@ -1,8 +1,8 @@
 # A股交易系统 · Hermes 原生架构方案
 
 > 分支：`feature/agent-native`
-> 版本：v3.0（全任务收口 + 策略回放引擎版）
-> 日期：2026-04-10
+> 版本：v3.1（策略参数C版 + 批量回测引擎）
+> 日期：2026-04-11
 
 ---
 
@@ -121,7 +121,9 @@ trade/
 │   │   └── trade.py           # 统一 CLI（doctor / run / status / backtest）
 │   ├── backtest/
 │   │   ├── runner.py           # 回测 / sweep / walk-forward 引擎
-│   │   └── strategy_replay.py  # 信号驱动逐日策略回放引擎
+│   │   ├── strategy_replay.py  # 信号驱动逐日策略回放引擎
+│   │   ├── historical_pipeline.py  # 真实历史数据回填 + 批量回测引擎
+│   │   └── drawdown.py        # 资金曲线回撤分析
 │   └── utils/
 │       ├── cache.py            # 本地缓存
 │       ├── obsidian.py         # Obsidian 读写
@@ -163,13 +165,13 @@ trade/
 # 评分权重（满分10）
 scoring:
   weights:
-    technical: 2      # 技术信号（MA20/MA60/量能）
-    fundamental: 3    # 基本面（ROE/营收/现金流）
+    technical: 3      # 技术信号（MA20/MA60/量能）
+    fundamental: 2    # 基本面（ROE/营收/现金流）
     flow: 2           # 资金（主力/北向）
-    sentiment: 3     # 舆情（TrendRadar）
+    sentiment: 3       # 舆情（TrendRadar）
 
   thresholds:
-    buy: 7            # ≥7 可买入
+    buy: 6.5          # ≥6.5 可买入（C版，已从7调低）
     watch: 5          # ≥5 可观察池
     reject: 4         # ≤4 一票否决
 
@@ -179,20 +181,54 @@ scoring:
     - consecutive_outflow
     - red_market
     - earnings_bomb
+    - ma20_trend_down
 
-# 风控参数
+# 风控参数（C版 2026-04-11 更新）
 risk:
-  stop_loss: 0.04     # 4% 止损
-  absolute_stop: 0.07  # 7% 绝对止损
-  take_profit:
-    t1_pct: 0.15       # +15% 卖 1/3
-    t1_drawdown: 0.05  # 回撤 5% 卖第二批
-    t2_drawdown: 0.08  # 回撤 8% 清仓
-  time_stop_days: 15
+  # 慢牛成长股
+  slow_bull:
+    stop_loss: 0.08
+    absolute_stop_ma: 60
+    take_profit: none
+    exit_ma: 20
+    time_stop_days: 30
+  # 题材趋势股
+  momentum:
+    stop_loss: 0.08          # -8% 止损（C版）
+    stop_loss_anchor: entry_day_low
+    trailing_stop: 0.10       # 移动止盈 -10%（C版）
+    trailing_ma_cross:
+      fast: 5
+      slow: 10
+    exit_ma: 20
+    time_stop_days: 15        # 15个交易日不创新高即警惕（C版）
+  # 通用风控
+  portfolio:
+    daily_loss_limit_pct: 0.03
+    consecutive_loss_days_limit: 2
+    cooldown_days: 2
   position:
-    total_max: 0.60    # 总仓位上限
-    single_max: 0.20   # 单只上限
-    weekly_max: 2      # 每周最多2笔
+    total_max: 0.60
+    single_max: 0.20
+    weekly_max: 2
+    holding_max: 4
+
+# 入场信号（C版新增参数）
+entry_signal:
+  ma_cross:
+    fast: 10
+    slow: 20
+    type: golden_cross
+  volume_ratio_min: 1.5
+  rsi_max: 70
+  rsi_period: 14
+  deviation_max: 10.0           # 乖离率 < 10%（C版新增）
+  require_bullish_candle: true # 金叉当日必须收阳线（C版新增）
+  pullback:
+    enabled: true
+    ma_support: 20
+    volume_confirm: true
+    require_bullish_candle: true
 
 # 大盘择时
 market_timer:
@@ -201,16 +237,46 @@ market_timer:
   clear_days_ma60: 15  # MA60下方15日 → CLEAR
 
 screening:
-  mx_query: "站上20日均线，ROE大于8%，成交额超2亿，股价5-200元，市盈率TTM低于40，剔除ST"
+  mx_query: "站上20日均线，ROE大于8%，成交额超5000万，股价5-200元，市盈率TTM低于100，剔除ST"
   mx_select_type: "A股"
   market_scan_limit: 30
   candidate_cache_ttl_hours: 24
   fallback_filters:
     min_price: 5
     max_price: 200
-    min_amount: 100000000
-    max_pe_ttm: 40
+    min_amount: 50000000
+    max_pe_ttm: 100
     exclude_st: true
+    ma20_trend_up: true
+
+# 回测 preset（C版新增）
+backtest_presets:
+  大盘择时增强版:
+    description: "金叉收阳 + 乖离率<12% + 两市成交>6000亿"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 40
+    entry_trend_rsi_max: 85
+    entry_pullback_rsi_max: 85
+    entry_pullback_volume_ratio_min: 1.0
+    entry_deviation_max: 12.0
+    entry_require_bullish_candle: true
+  保守验证C:
+    description: "乖离率<10% + 收阳线 + trailing10% + time_stop15天"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 15
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
 
 capital: 450286
 ```
@@ -279,6 +345,12 @@ bin/trade backtest walk-forward --start 2026-03-01 --end 2026-04-09 --folds 3 --
 bin/trade backtest strategy-replay --start 2026-04-01 --end 2026-04-10 --fixture data/replay_fixture.json --json
 bin/trade backtest history --json
 bin/trade backtest compare --json
+# 批量回测多只股票（支持 preset 或 params-json）
+bin/trade backtest batch --codes 601869,603803,002594 --start 2026-03-01 --end 2026-04-11 --preset 保守验证C --json
+# 单股诊断回测
+bin/trade backtest validate-single --code 601869 --start 2026-03-01 --end 2026-04-11 --preset 保守验证C --json
+# 资金曲线回撤分析
+bin/trade backtest drawdown --codes 601869,603803 --days 365 --json
 ```
 
 `status today` 除了 `today_decision` 之外，还会返回 `pool_management.summary`，方便 OpenClaw 直接消费。
@@ -528,9 +600,8 @@ market 模式：
 - [x] doctor 数据源健康度检查（recent runs / cache freshness / score data quality）
 - [x] 数据质量买入门禁（degraded/error → manual_review/blocked，不自动新增买入）
 
-### 待继续优化
-
-- [ ] 回测参数校准实盘参数
+- [x] 回测参数校准实盘参数（C版：乖离率<10% + 收阳线 + trailing10% + time_stop15天）
+- [ ] 大盘择时增强版实盘验证（当前用保守验证C）
 
 ---
 

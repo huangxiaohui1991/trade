@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
-from scripts.backtest import compare_backtest_history, list_backtest_history, run_backtest, run_parameter_sweep, run_walk_forward
+from scripts.backtest import compare_backtest_history, list_backtest_history, run_backtest, run_drawdown_analysis, run_parameter_sweep, run_walk_forward
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
 from scripts.pipeline.core_pool_scoring import run as run_scoring
 from scripts.pipeline.evening import run as run_evening
@@ -592,6 +592,16 @@ def _load_json_file(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _parse_json_arg_or_file(value: str | None) -> dict:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    path = Path(text)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(text)
 
 
 def _financial_missing_fields(data) -> list[str]:
@@ -1987,6 +1997,34 @@ def main():
     backtest_replay.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     backtest_replay.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     backtest_replay.add_argument("--fixture", required=True, help="JSON fixture with daily_data for strategy replay")
+    backtest_drawdown = backtest_sub.add_parser("drawdown")
+    backtest_drawdown.add_argument("--code", default=None, help="Single stock code, e.g. 601869")
+    backtest_drawdown.add_argument("--codes", default=None, help="Comma-separated codes, e.g. 601869,603803")
+    backtest_drawdown.add_argument("--start", default=None, help="Start date YYYY-MM-DD (default: today - days)")
+    backtest_drawdown.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: today)")
+    backtest_drawdown.add_argument("--days", type=int, default=365, help="Days back from today when start is omitted (default 365)")
+    backtest_validate = backtest_sub.add_parser("validate-single")
+    backtest_validate.add_argument("--code", required=True, help="Single stock code, e.g. 601869")
+    backtest_validate.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_validate.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_validate.add_argument("--index", default="system", help="Index code; default system composite voting")
+    backtest_validate.add_argument("--capital", type=float, default=None, help="Optional capital override")
+    backtest_validate.add_argument("--preset", default=None, help="Backtest preset, e.g. aggressive_high_return")
+    backtest_validate.add_argument("--params-json", default=None, help="JSON string or file path for parameter overrides")
+    backtest_validate.add_argument("--opportunity-lookahead-days", type=int, default=20, help="Lookahead days for opportunity windows")
+    backtest_validate.add_argument("--opportunity-min-gain-pct", type=float, default=0.15, help="Minimum gain threshold for opportunity windows")
+    backtest_validate.add_argument("--premature-exit-min-gain-pct", type=float, default=0.08, help="Minimum post-exit gain to flag premature exits")
+    backtest_validate.add_argument("--output", default=None, help="Optional JSON output path")
+
+    backtest_batch = backtest_sub.add_parser("batch", help="Run batch backtest across multiple stocks with system strategy")
+    backtest_batch.add_argument("--codes", required=True, help="Comma-separated stock codes, e.g. 601869,603803,002594")
+    backtest_batch.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    backtest_batch.add_argument("--end", required=True, help="End date YYYY-MM-DD")
+    backtest_batch.add_argument("--index", default="system", help="Index code; default system composite")
+    backtest_batch.add_argument("--capital", type=float, default=None, help="Optional capital override")
+    backtest_batch.add_argument("--preset", default=None, help="Backtest preset name in strategy.yaml, e.g. 保守验证C")
+    backtest_batch.add_argument("--params-json", default=None, help="JSON string or file path for parameter overrides")
+    backtest_batch.add_argument("--output", default=None, help="Optional JSON output path")
 
     # --- order subcommand (for Hermes-Agent) ---
     order_parser = sub.add_parser("order", help="Order management for Hermes-Agent")
@@ -2136,6 +2174,50 @@ def main():
                             total_capital=fixture_data.get("total_capital", 450286),
                             params=fixture_data.get("params", {}),
                         )
+                    elif args.action == "validate-single":
+                        from scripts.backtest.historical_pipeline import run_single_stock_strategy_validation
+
+                        params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                        if getattr(args, "preset", None):
+                            params_override["preset"] = args.preset
+                        result = run_single_stock_strategy_validation(
+                            stock_code=args.code,
+                            start=args.start,
+                            end=args.end,
+                            index_code=args.index,
+                            total_capital=args.capital,
+                            strategy_params=params_override,
+                            opportunity_lookahead_days=args.opportunity_lookahead_days,
+                            opportunity_min_gain_pct=args.opportunity_min_gain_pct,
+                            premature_exit_min_gain_pct=args.premature_exit_min_gain_pct,
+                        )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
+
+                    elif args.action == "batch":
+                        from scripts.backtest import run_multi_stock_system_backtest
+
+                        params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                        if getattr(args, "preset", None):
+                            params_override["preset"] = args.preset
+                        codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+                        result = run_multi_stock_system_backtest(
+                            stock_codes=codes,
+                            start=args.start,
+                            end=args.end,
+                            index_code=args.index,
+                            total_capital=args.capital,
+                            strategy_params=params_override,
+                        )
+                        if args.output:
+                            out_path = Path(args.output)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                            result["report_path"] = str(out_path)
+
                     else:
                         result = run_walk_forward(
                             start=args.start,
@@ -2226,6 +2308,68 @@ def main():
                     total_capital=fixture_data.get("total_capital", 450286),
                     params=fixture_data.get("params", {}),
                 )
+            elif args.action == "validate-single":
+                from scripts.backtest.historical_pipeline import run_single_stock_strategy_validation
+
+                params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                if getattr(args, "preset", None):
+                    params_override["preset"] = args.preset
+                result = run_single_stock_strategy_validation(
+                    stock_code=args.code,
+                    start=args.start,
+                    end=args.end,
+                    index_code=args.index,
+                    total_capital=args.capital,
+                    strategy_params=params_override,
+                    opportunity_lookahead_days=args.opportunity_lookahead_days,
+                    opportunity_min_gain_pct=args.opportunity_min_gain_pct,
+                    premature_exit_min_gain_pct=args.premature_exit_min_gain_pct,
+                )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
+            elif args.action == "drawdown":
+                code_list = (
+                    [c.strip() for c in args.codes.split(",")]
+                    if args.codes
+                    else ([args.code.strip()] if args.code else [])
+                )
+                if not code_list:
+                    result = {
+                        "command": "backtest",
+                        "action": "drawdown",
+                        "status": "error",
+                        "error": "请提供 --code 或 --codes 参数",
+                    }
+                else:
+                    result = run_drawdown_analysis(
+                        codes=code_list,
+                        start=args.start,
+                        end=args.end,
+                        days=args.days,
+                    )
+            elif args.action == "batch":
+                from scripts.backtest import run_multi_stock_system_backtest
+
+                params_override = _parse_json_arg_or_file(getattr(args, "params_json", None))
+                if getattr(args, "preset", None):
+                    params_override["preset"] = args.preset
+                codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+                result = run_multi_stock_system_backtest(
+                    stock_codes=codes,
+                    start=args.start,
+                    end=args.end,
+                    index_code=args.index,
+                    total_capital=args.capital,
+                    strategy_params=params_override,
+                )
+                if args.output:
+                    out_path = Path(args.output)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["report_path"] = str(out_path)
             else:
                 result = run_walk_forward(
                     start=args.start,
@@ -2319,6 +2463,47 @@ def main():
                     f"best_win_rate={leaders.get('best_win_rate', {}).get('win_rate', 0)} "
                     f"largest_sample={leaders.get('largest_sample', {}).get('sample_count', 0)}"
                 )
+            elif result.get("action") == "strategy-replay":
+                summary = result.get("summary", {})
+                print(f"strategy-replay: {result.get('status', 'ok')}")
+                if summary:
+                    print(f"  交易笔数: {summary.get('closed_trade_count', 0)} "
+                          f"胜率: {summary.get('win_rate', 0)}% "
+                          f"累计盈亏: {summary.get('total_realized_pnl', 0):+.2f} "
+                          f"最大回撤: {summary.get('peak_exposure_pct', 0):.2%} "
+                          f"开仓中: {summary.get('open_position_count', 0)}")
+                closed = result.get("closed_trades", [])
+                if closed:
+                    print("  逐笔明细:")
+                    for t in closed:
+                        print(f"    {t['entry_date']} 买入 {t['code']} {t['name']} @¥{t['entry_price']} "
+                              f"→ {t['exit_date']} @¥{t['exit_price']} "
+                              f"PnL={t['realized_pnl']:+.2f} ({t['exit_reason']}) "
+                              f"持有{t.get('holding_days', '?')}天")
+                open_pos = result.get("open_positions", [])
+                if open_pos:
+                    print(f"  未平仓 ({len(open_pos)}笔):")
+                    for p in open_pos:
+                        print(f"    {p['entry_date']} 买入 {p['code']} {p['name']} @¥{p['entry_price']} "
+                              f"持有{p.get('holding_days', 0)}天")
+            elif result.get("action") == "drawdown":
+                for r in result.get("results", []):
+                    if r["status"] == "error":
+                        print(f"  [{r['code']}] ERROR: {r.get('error', 'unknown')}")
+                    else:
+                        print(r.get("report", ""))
+                        artifacts = r.get("artifacts", {})
+                        if artifacts.get("csv"):
+                            print(f"  [CSV] {artifacts['csv']}")
+                        if artifacts.get("json"):
+                            print(f"  [JSON] {artifacts['json']}")
+                print(f"ok={result.get('ok_count', 0)}/{result.get('count', 0)}")
+            elif result.get("action") in {"validate-single", "single_stock_strategy_validation"}:
+                from scripts.backtest.historical_pipeline import render_single_stock_validation_report
+
+                print(render_single_stock_validation_report(result))
+                if result.get("report_path"):
+                    print(f"report_path: {result.get('report_path')}")
             else:
                 print(f"sample_count: {result.get('sample_count', 0)}")
                 print(
@@ -2356,9 +2541,26 @@ def main():
                 print(f"modified: {result.get('modified_count', 0)} orders for {result.get('code', '')} → ¥{result.get('new_price', 0):.2f}")
             elif action == "list":
                 print(f"orders: {result.get('order_count', 0)}")
+        elif result.get("command") == "backtest":
+            action = result.get("action", "")
+            print(f"backtest {action}: {result.get('status', 'ok')}")
+            summary = result.get("summary", {})
+            if summary:
+                print(f"  closed_trades={summary.get('closed_trade_count', 0)} "
+                      f"win_rate={summary.get('win_rate', 0)}% "
+                      f"total_pnl={summary.get('total_realized_pnl', 0)} "
+                      f"max_drawdown={summary.get('max_drawdown_pct', 'N/A')}")
+                print(f"  open_positions={summary.get('open_position_count', 0)} "
+                      f"ending_cash={summary.get('ending_cash', 0)}")
+            if result.get("closed_trades"):
+                print("  逐笔交易:")
+                for t in result["closed_trades"]:
+                    print(f"    {t['entry_date']} 买入 {t['code']} {t['name']} @¥{t['entry_price']} "
+                          f"→ {t['exit_date']} @¥{t['exit_price']} "
+                          f"PnL={t['realized_pnl']:+.2f} ({t['exit_reason']})")
         else:
-            print(f"run {result['pipeline']}: {result['status']}")
-            print(f"run_id: {result['run_id']}")
+            print(f"run {result.get('pipeline', 'unknown')}: {result.get('status', 'ok')}")
+            print(f"run_id: {result.get('run_id', 'N/A')}")
             print(f"result_path: {result['result_path']}")
 
 

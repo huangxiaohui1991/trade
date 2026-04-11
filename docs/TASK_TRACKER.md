@@ -74,6 +74,12 @@
 备注：walk-forward 每个 fold now 输出 evaluation portfolio replay summary，并在 comparison rows 中展示峰值仓位/并发/冷却拒绝数。
 - [x] 回测结果对比视图继续强化
 备注：`backtest compare` now 输出风险状态分布、总/均值指标与 leaderboard 排名。
+- [x] 历史数据批量回测引擎（`historical_pipeline.py` + `run_multi_stock_system_backtest`）
+备注：支持乖离率过滤 / 收阳线确认 / 两市成交额过滤；CLI `backtest batch` 统一入口。
+- [x] 策略参数 C 版校准（乖离率<10% + 收阳线 + trailing10% + time_stop15天）
+备注：经 80 只股回测对比，选定保守验证C写入 `strategy.yaml` 主配置。
+- [x] `backtest batch` CLI 入口
+备注：`trade backtest batch --codes --start --end --preset --params-json`，统一外部调用。
 
 ### 复盘归因深化
 

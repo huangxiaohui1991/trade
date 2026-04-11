@@ -30,6 +30,9 @@ entry_signal:
   volume_ratio_min: 1.5        # 量比 > 1.5
   rsi_max: 70                  # RSI < 70（防接盘）
   rsi_period: 14               # RSI 周期
+  # C版新增过滤条件
+  deviation_max: 10.0          # 乖离率 < 10%（C版）
+  require_bullish_candle: true # 金叉当日必须收阳线（C版）
 
   # 慢牛补充信号：回踩 MA20 不破 + 次日放量阳线
   pullback:
@@ -68,14 +71,14 @@ risk:
 
   # 题材趋势股
   momentum:
-    stop_loss: 0.05                  # -5% 止损
+    stop_loss: 0.08                  # -8% 止损（C版）
     stop_loss_anchor: entry_day_low  # 或跌破买入日最低价
-    trailing_stop: 0.08              # 移动止盈：最高点回撤 -8%
+    trailing_stop: 0.10              # 移动止盈：最高点回撤 -10%（C版）
     trailing_ma_cross:               # 或 MA5 死叉 MA10
       fast: 5
       slow: 10
     exit_ma: 20                      # 收盘价跌破 MA20 离场
-    time_stop_days: 10               # 10 个交易日不创新高即警惕
+    time_stop_days: 15               # 15 个交易日不创新高即警惕（C版）
 
   # 通用风控（不分风格）
   portfolio:
@@ -114,7 +117,7 @@ scoring:
     sentiment: 3      # 舆情
 
   thresholds:
-    buy: 7
+    buy: 6.5    # C版：从7调整为6.5
     watch: 5
     reject: 4
 
@@ -152,6 +155,69 @@ pool_management:
 # 资金
 # ---------------------------------------------------------------------------
 capital: 450286
+
+# ---------------------------------------------------------------------------
+# 历史回测 preset（用于 historical_pipeline / strategy_replay）
+# ---------------------------------------------------------------------------
+backtest_presets:
+  aggressive_high_return:
+    description: "高收益优先，接受更高交易频次与阶段性回撤"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 10
+    entry_trend_rsi_max: 75
+    entry_pullback_rsi_max: 75
+    entry_pullback_volume_ratio_min: 1.0
+  aggressive_high_return_trail12:
+    description: "高收益优先，放宽移动止盈到 12%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.12
+    momentum_time_stop_days: 10
+    entry_trend_rsi_max: 75
+    entry_pullback_rsi_max: 75
+    entry_pullback_volume_ratio_min: 1.0
+  aggressive_score_capture:
+    description: "分数优先，放宽入场过滤以提高覆盖率"
+    entry_mode: score_only
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 10
+
+  # ── 新增策略 preset ──────────────────────────────────────────────
+  大盘择时增强版:
+    description: "金叉收阳 + 乖离率<12% + 两市成交>6000亿，高胜率但交易频次低"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 40
+    entry_trend_rsi_max: 85
+    entry_pullback_rsi_max: 85
+    entry_pullback_volume_ratio_min: 1.0
+    entry_deviation_max: 12.0
+    entry_require_bullish_candle: true
+
+  保守验证C:
+    description: "乖离率<10% + 收阳线 + trailing10% + time_stop15天，稳健首选"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 15
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
 
 # ---------------------------------------------------------------------------
 # 舆情监控

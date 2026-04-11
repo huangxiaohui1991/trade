@@ -1,0 +1,1926 @@
+"""
+backtest/historical_pipeline.py — 真实策略历史回填引擎
+
+职责：
+  把 601869（或其他股票）在指定时间区间内的每日行情数据
+  → 按真实策略逻辑计算大盘信号 + 技术面评分 + veto 检查
+  → 生成与 run_strategy_replay 兼容的 daily_data fixture
+
+用法：
+  python -c "
+    from scripts.backtest.historical_pipeline import build_replay_fixture
+    fixture = build_replay_fixture(
+        stock_code='601869',
+        start='2025-04-10',
+        end='2026-04-10',
+        index_code='000001',      # 上证指数
+    )
+    # 写入 fixture 文件供 strategy_replay 消费
+  "
+"""
+
+from __future__ import annotations
+
+import atexit
+from collections import Counter, defaultdict
+import json
+import math
+import re
+import sys
+from datetime import datetime, timedelta, date
+from pathlib import Path
+from typing import Any
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+import baostock as bs
+import pandas as pd
+
+from scripts.engine.stock_classifier import classify_style
+from scripts.utils.config_loader import get_strategy
+
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+_FETCH_DAILY_CACHE: dict[tuple[str, str, str, str], pd.DataFrame] = {}
+_BS_SESSION_OPEN = False
+
+
+def _ensure_bs_session() -> None:
+    global _BS_SESSION_OPEN
+    if _BS_SESSION_OPEN:
+        return
+    lg = bs.login()
+    assert lg.error_code == "0", lg.error_msg
+    _BS_SESSION_OPEN = True
+
+
+def _close_bs_session() -> None:
+    global _BS_SESSION_OPEN
+    if not _BS_SESSION_OPEN:
+        return
+    try:
+        bs.logout()
+    finally:
+        _BS_SESSION_OPEN = False
+
+
+atexit.register(_close_bs_session)
+
+
+def _ensure_bs_code(code: str) -> str:
+    """规范化为 baostock 格式"""
+    c = code.strip().lower().replace(".sh", "").replace(".sz", "")
+    if c.startswith("sh") or c.startswith("sz"):
+        return c
+    if c.startswith("6"):
+        return f"sh.{c}"
+    return f"sz.{c}"
+
+
+def _to_bs_code(std_code: str) -> str:
+    """个股标准码 → baostock 格式"""
+    return _ensure_bs_code(std_code)
+
+
+def _fetch_daily(
+    bs_code: str,
+    start: str,
+    end: str,
+    fields: str = "date,open,high,low,close,volume,amount,turn",
+) -> pd.DataFrame:
+    """拉取日线数据（前复权）"""
+    cache_key = (bs_code, start, end, fields)
+    cached = _FETCH_DAILY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
+
+    _ensure_bs_session()
+    rs = bs.query_history_k_data_plus(
+        bs_code, fields,
+        start_date=start, end_date=end,
+        frequency="d", adjustflag="2",
+    )
+    assert rs.error_code == "0", rs.error_msg
+    rows = []
+    while rs.next():
+        rows.append(rs.get_row_data())
+    df = pd.DataFrame(rows, columns=rs.fields)
+
+    for col in ["open", "high", "low", "close", "volume", "amount", "turn"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    _FETCH_DAILY_CACHE[cache_key] = df
+    return df.copy()
+
+
+# ---------------------------------------------------------------------------
+# 大盘信号计算（与 market_timer.py 逻辑一致）
+# ---------------------------------------------------------------------------
+
+def compute_market_signal(df_index: pd.DataFrame) -> pd.DataFrame:
+    """
+    输入指数日线，追加 signal 列。
+    GREEN: 连续3日收盘 > MA20
+    RED:   连续5日收盘 < MA20
+    CLEAR: 连续15日收盘 < MA60
+    YELLOW: 其他
+    """
+    GREEN_DAYS = 3
+    RED_DAYS = 5
+    CLEAR_DAYS = 15
+
+    df = df_index.copy()
+    df["MA20"] = df["close"].rolling(20).mean()
+    df["MA60"] = df["close"].rolling(60).mean()
+
+    # 是否在 MA20 上方
+    df["above_ma20"] = df["close"] > df["MA20"]
+    df["below_ma20"] = df["close"] < df["MA20"]
+    df["below_ma60"] = df["close"] < df["MA60"]
+
+    # 连续 N 日计数（逐行累加）
+    def rolling_count(series: pd.Series, min_periods: int) -> pd.Series:
+        counts = []
+        count = 0
+        for val in series:
+            if val:
+                count += 1
+            else:
+                count = 0
+            counts.append(count)
+        return pd.Series(counts, index=series.index)
+
+    df["conseq_above_20"] = rolling_count(df["above_ma20"], GREEN_DAYS)
+    df["conseq_below_20"] = rolling_count(df["below_ma20"], RED_DAYS)
+    df["conseq_below_60"] = rolling_count(df["below_ma60"], CLEAR_DAYS)
+
+    def row_signal(row):
+        if row["conseq_below_60"] >= CLEAR_DAYS:
+            return "CLEAR"
+        if row["conseq_below_20"] >= RED_DAYS:
+            return "RED"
+        if row["conseq_above_20"] >= GREEN_DAYS:
+            return "GREEN"
+        return "YELLOW"
+
+    df["signal"] = df.apply(row_signal, axis=1)
+    return df[["date", "close", "MA20", "MA60", "signal"]]
+
+
+_SYSTEM_INDEX_CODES = ["000001", "399001", "399006", "000688"]
+
+
+def _resolve_strategy_params(overrides: dict | None = None) -> dict:
+    """Flatten strategy.yaml into replay params, then apply preset + caller overrides."""
+    strategy = get_strategy()
+    scoring = strategy.get("scoring", {})
+    weights = scoring.get("weights", {})
+    thresholds = scoring.get("thresholds", {})
+    risk = strategy.get("risk", {})
+    entry_cfg = strategy.get("entry_signal", {})
+    position = risk.get("position", {})
+    portfolio = risk.get("portfolio", {})
+    momentum = risk.get("momentum", {})
+    slow_bull = risk.get("slow_bull", {})
+    overrides = dict(overrides or {})
+    preset_name = str(overrides.pop("preset", "")).strip()
+    presets = strategy.get("backtest_presets", {}) or {}
+
+    params = {
+        "use_system_strategy": True,
+        "require_entry_signal": True,
+        "entry_mode": "strict",
+        "entry_volume_ratio_min": entry_cfg.get("volume_ratio_min", 1.5),
+        "entry_rsi_max": entry_cfg.get("rsi_max", 70),
+        "entry_trend_rsi_max": entry_cfg.get("rsi_max", 70),
+        "entry_pullback_rsi_max": entry_cfg.get("rsi_max", 70),
+        "entry_pullback_volume_ratio_min": entry_cfg.get("volume_ratio_min", 1.5),
+        "entry_deviation_max": entry_cfg.get("deviation_max", 999.0),
+        "entry_require_bullish_candle": bool(entry_cfg.get("require_bullish_candle", False)),
+        "buy_threshold": thresholds.get("buy", 7),
+        "watch_threshold": thresholds.get("watch", 5),
+        "reject_threshold": thresholds.get("reject", 4),
+        "total_max": position.get("total_max", 0.60),
+        "single_max": position.get("single_max", 0.20),
+        "weekly_max": position.get("weekly_max", 2),
+        "holding_max": position.get("holding_max", 4),
+        "consecutive_loss_days_limit": portfolio.get("consecutive_loss_days_limit", 0),
+        "cooldown_days": portfolio.get("cooldown_days", 0),
+        "veto_rules": scoring.get("veto", [
+            "below_ma20", "limit_up_today", "consecutive_outflow",
+            "red_market", "earnings_bomb", "ma20_trend_down",
+        ]),
+        "technical_weight": weights.get("technical", 3),
+        "fundamental_weight": weights.get("fundamental", 2),
+        "flow_weight": weights.get("flow", 2),
+        "sentiment_weight": weights.get("sentiment", 3),
+        "technical_denom": 3,
+        "fundamental_denom": 2,
+        "flow_denom": 2,
+        "sentiment_denom": 3,
+        "momentum_stop_loss": momentum.get("stop_loss", 0.05),
+        "momentum_trailing_stop": momentum.get("trailing_stop", 0.08),
+        "momentum_time_stop_days": momentum.get("time_stop_days", 10),
+        "momentum_exit_ma": momentum.get("exit_ma", 20),
+        "slow_bull_stop_loss": slow_bull.get("stop_loss", 0.08),
+        "slow_bull_time_stop_days": slow_bull.get("time_stop_days", 30),
+        "slow_bull_exit_ma": slow_bull.get("exit_ma", 20),
+        "slow_bull_absolute_stop_ma": slow_bull.get("absolute_stop_ma", 60),
+        # Legacy replay fallback values.
+        "stop_loss": momentum.get("stop_loss", 0.05),
+        "take_profit": momentum.get("trailing_stop", 0.08),
+        "time_stop_days": momentum.get("time_stop_days", 10),
+    }
+
+    preset_values: dict[str, Any] = {}
+    preset_sets_entry_requirement = False
+    if preset_name:
+        preset = presets.get(preset_name)
+        if not isinstance(preset, dict):
+            available = ", ".join(sorted(str(name) for name in presets)) or "<none>"
+            raise ValueError(f"Unknown backtest preset '{preset_name}'. Available presets: {available}")
+        preset_values = {key: value for key, value in preset.items() if key != "description"}
+        preset_sets_entry_requirement = "require_entry_signal" in preset_values
+        params["preset"] = preset_name
+        params.update(preset_values)
+
+    override_sets_entry_requirement = "require_entry_signal" in overrides
+    params.update(overrides)
+
+    if not preset_sets_entry_requirement and not override_sets_entry_requirement:
+        params["require_entry_signal"] = str(params.get("entry_mode", "strict")).strip().lower() != "score_only"
+
+    if "stop_loss" not in preset_values and "stop_loss" not in overrides:
+        params["stop_loss"] = params.get("momentum_stop_loss", 0.05)
+    if "take_profit" not in preset_values and "take_profit" not in overrides:
+        params["take_profit"] = params.get("momentum_trailing_stop", 0.08)
+    if "time_stop_days" not in preset_values and "time_stop_days" not in overrides:
+        params["time_stop_days"] = params.get("momentum_time_stop_days", 10)
+    return params
+
+
+def _entry_signal_for_mode(
+    row: pd.Series,
+    tech: dict[str, Any],
+    params: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """Compute entry eligibility using the selected entry mode."""
+    mode = str(params.get("entry_mode", "strict") or "strict").strip().lower()
+    volume_ratio = float(tech.get("volume_ratio") or 0.0)
+    rsi = tech.get("rsi")
+
+    ma5 = float(row["MA5"]) if "MA5" in row and not pd.isna(row["MA5"]) else None
+    ma10 = float(row["MA10"]) if "MA10" in row and not pd.isna(row["MA10"]) else None
+    ma20 = float(row["MA20"]) if "MA20" in row and not pd.isna(row["MA20"]) else None
+    ma60 = float(row["MA60"]) if "MA60" in row and not pd.isna(row["MA60"]) else None
+    close = float(row["close"])
+
+    golden_cross = tech.get("golden_cross", False)
+    close_above_prev = tech.get("close_above_prev", False)
+    deviation_pct = tech.get("deviation_pct")
+
+    # 金叉收阳线：增强版要求 golden_cross 且今日收阳
+    require_bullish = params.get("entry_require_bullish_candle", False)
+    golden_cross_ok = golden_cross and (not require_bullish or close_above_prev)
+
+    # 乖离率过滤：超过阈值则不入
+    deviation_max = params.get("entry_deviation_max", 999.0)
+    deviation_ok = deviation_pct is None or deviation_pct < deviation_max
+
+    strict_entry = bool(
+        golden_cross_ok
+        and deviation_ok
+        and volume_ratio >= float(params.get("entry_volume_ratio_min", 1.5) or 1.5)
+        and rsi is not None
+        and float(rsi) < float(params.get("entry_rsi_max", 70) or 70)
+    )
+    trend_follow_entry = bool(
+        rsi is not None
+        and ma10 is not None
+        and ma20 is not None
+        and ma60 is not None
+        and ma10 > ma20 > ma60
+        and deviation_ok
+        and float(rsi) < float(params.get("entry_trend_rsi_max", 70) or 70)
+    )
+    pullback_entry = bool(
+        rsi is not None
+        and ma5 is not None
+        and ma10 is not None
+        and ma20 is not None
+        and close >= ma20
+        and ma5 > ma10 > ma20
+        and deviation_ok
+        and volume_ratio >= float(params.get("entry_pullback_volume_ratio_min", 1.5) or 1.5)
+        and float(rsi) < float(params.get("entry_pullback_rsi_max", 70) or 70)
+    )
+
+    if mode == "score_only":
+        return True, ["score_only"]
+    if mode == "trend_follow":
+        return trend_follow_entry, ["trend_follow"] if trend_follow_entry else []
+    if mode == "hybrid":
+        reasons: list[str] = []
+        if strict_entry:
+            reasons.append("strict")
+        if trend_follow_entry:
+            reasons.append("trend_follow")
+        if pullback_entry:
+            reasons.append("pullback")
+        return bool(reasons), reasons
+    return strict_entry, ["strict"] if strict_entry else []
+
+
+def _composite_market_signal(
+    start: str,
+    end: str,
+    *,
+    warmup_start: str,
+) -> pd.DataFrame:
+    """Compute the historical market signal with the same multi-index voting idea as MarketTimer."""
+    signal_frames = []
+    close_frames = []
+    sh_amount_frames = []
+    sz_amount_frames = []
+    for code in _SYSTEM_INDEX_CODES:
+        df_raw = _fetch_daily(_to_bs_code(code), warmup_start, end)
+        df_signal = compute_market_signal(df_raw).rename(columns={"signal": f"signal_{code}", "close": f"close_{code}"})
+        signal_frames.append(df_signal[["date", f"signal_{code}"]])
+        close_frames.append(df_signal[["date", f"close_{code}"]])
+        # 收集上证和深证的成交额用于两市成交额过滤
+        if code == "000001" and "amount" in df_raw.columns:
+            sh_amount_frames.append(df_signal[["date"]].assign(amount=df_raw["amount"]))
+        if code == "399001" and "amount" in df_raw.columns:
+            sz_amount_frames.append(df_signal[["date"]].assign(amount=df_raw["amount"]))
+
+    merged = signal_frames[0]
+    for frame in signal_frames[1:]:
+        merged = merged.merge(frame, on="date", how="outer")
+    for frame in close_frames:
+        merged = merged.merge(frame, on="date", how="left")
+    # 合并上证成交额
+    if sh_amount_frames:
+        sh_df = sh_amount_frames[0].rename(columns={"amount": "amount_000001"})
+        merged = merged.merge(sh_df[["date", "amount_000001"]], on="date", how="left")
+    # 合并深成成交额
+    if sz_amount_frames:
+        sz_df = sz_amount_frames[0].rename(columns={"amount": "amount_399001"})
+        merged = merged.merge(sz_df[["date", "amount_399001"]], on="date", how="left")
+    merged = merged.sort_values("date").reset_index(drop=True)
+
+    signal_cols = [f"signal_{code}" for code in _SYSTEM_INDEX_CODES]
+
+    def row_signal(row):
+        values = [str(row[col]) for col in signal_cols if pd.notna(row.get(col))]
+        if not values:
+            return "CLEAR"
+        clear_pct = sum(1 for value in values if value == "CLEAR") / len(values)
+        green_pct = sum(1 for value in values if value == "GREEN") / len(values)
+        if clear_pct >= 0.6:
+            return "CLEAR"
+        if green_pct >= 0.6:
+            return "GREEN"
+        if green_pct >= 0.3:
+            return "YELLOW"
+        return "RED"
+
+    merged["signal"] = merged.apply(row_signal, axis=1)
+    merged["close"] = merged.get("close_000001")
+
+    # 两市成交额 = 上证成交额 + 深成成交额（单位万元，baostock 的 AMOUNT 单位就是元）
+    if "amount_000001" in merged.columns and "amount_399001" in merged.columns:
+        merged["total_amount"] = merged["amount_000001"].fillna(0) + merged["amount_399001"].fillna(0)
+    else:
+        merged["total_amount"] = None
+
+    return merged[["date", "close", "signal", "total_amount"]]
+
+
+# ---------------------------------------------------------------------------
+# 技术面评分（与 scorer.py / technical.py 逻辑对齐）
+# ---------------------------------------------------------------------------
+
+def compute_technical_score(
+    df_stock: pd.DataFrame,
+    row: pd.Series,
+    idx: int,
+) -> dict:
+    """
+    根据当日及历史数据计算技术面评分（满分 3 分）。
+    V1.0 策略因子：
+      - 金叉信号（MA10 上穿 MA20）：+1 分
+      - 量比 > 1.5：+0.5 分
+      - RSI < 70（不过热）：+0.5 分
+      - 均线多头排列（MA5>MA10>MA20）：+0.5 分
+      - 动量（近5日涨幅 > 3%）：+0.5 分
+    """
+    close = float(row["close"])
+    ma = {}
+    lookback = df_stock.iloc[max(0, idx - 60):idx + 1]
+    for window in [5, 10, 20, 60]:
+        if len(lookback) >= window:
+            ma[f"MA{window}"] = lookback["close"].iloc[-window:].mean()
+        else:
+            ma[f"MA{window}"] = close
+
+    # 金叉：前一日 MA10 <= MA20，当日 MA10 > MA20
+    score = 0.0
+    details = []
+
+    if idx >= 1:
+        prev_ma10 = (
+            df_stock.iloc[idx - 10:idx]["close"].mean()
+            if idx >= 10
+            else float(df_stock.iloc[idx - 1]["close"])
+        )
+        prev_ma20 = (
+            df_stock.iloc[idx - 20:idx]["close"].mean()
+            if idx >= 20
+            else float(df_stock.iloc[idx - 1]["close"])
+        )
+        curr_ma10 = ma["MA10"]
+        curr_ma20 = ma["MA20"]
+        if prev_ma10 <= prev_ma20 and curr_ma10 > curr_ma20:
+            score += 1.0
+            details.append("golden_cross")
+
+    # 量比
+    if idx >= 4:
+        avg_vol5 = df_stock.iloc[idx - 4:idx + 1]["volume"].mean()
+        today_vol = float(row["volume"])
+        vol_ratio = today_vol / avg_vol5 if avg_vol5 > 0 else 0
+        if vol_ratio >= 1.5:
+            score += 0.5
+            details.append(f"vol_ratio={vol_ratio:.2f}")
+
+    # RSI (14日)
+    rsi = _compute_rsi(df_stock, idx, period=14)
+    if rsi is not None and rsi < 70:
+        score += 0.5
+        details.append(f"rsi={rsi:.1f}")
+
+    # 均线多头排列
+    if ma["MA5"] > ma["MA10"] > ma["MA20"]:
+        score += 0.5
+        details.append("ma_bullish")
+
+    # 动量：近5日涨幅
+    if idx >= 4:
+        price_5d_ago = float(df_stock.iloc[idx - 4]["close"])
+        momentum = (close - price_5d_ago) / price_5d_ago if price_5d_ago > 0 else 0
+        if momentum > 0.03:
+            score += 0.5
+            details.append(f"momentum={momentum*100:.1f}%")
+
+    # 收阳线：今日收盘 > 昨日收盘
+    close_above_prev = False
+    if idx >= 1:
+        prev_close = float(df_stock.iloc[idx - 1]["close"])
+        close_above_prev = close > prev_close
+
+    # 乖离率：(收盘价 - MA20) / MA20 * 100
+    deviation_pct = None
+    if ma["MA20"] and ma["MA20"] > 0:
+        deviation_pct = round((close - ma["MA20"]) / ma["MA20"] * 100, 2)
+
+    return {
+        "score": round(score, 2),
+        "details": details,
+        "technical_score": round(score, 2),
+        "golden_cross": "golden_cross" in details,
+        "volume_ratio": next(
+            (float(item.split("=", 1)[1]) for item in details if item.startswith("vol_ratio=")),
+            0.0,
+        ),
+        "rsi": rsi,
+        "close_above_prev": close_above_prev,
+        "deviation_pct": deviation_pct,
+    }
+
+
+def _compute_rsi(df: pd.DataFrame, idx: int, period: int = 14) -> float | None:
+    if idx < period:
+        return None
+    window = df.iloc[idx - period:idx]["close"]
+    deltas = window.diff().dropna()
+    if deltas.empty:
+        return None
+    gains = deltas.clip(lower=0).mean()
+    losses = (-deltas.clip(upper=0)).mean()
+    if losses == 0:
+        return 100.0
+    rs = gains / losses
+    return 100 - (100 / (1 + rs))
+
+
+# ---------------------------------------------------------------------------
+# Veto 检查（与 strategy.yaml v2 一致）
+# ---------------------------------------------------------------------------
+
+def check_veto(
+    row: pd.Series,
+    idx: int,
+    df_stock: pd.DataFrame,
+    market_signal: str,
+    ma20_history: list,
+    total_market_amount: float | None = None,
+) -> list[str]:
+    """
+    返回触发的 veto 列表。无 veto = 可以买入。
+    """
+    vetoes: list[str] = []
+    close = float(row["close"])
+
+    # 1. below_ma20：收盘价 < MA20
+    if idx >= 20:
+        ma20 = float(row["MA20"]) if "MA20" in row and not pd.isna(row["MA20"]) else None
+        if ma20 and close < ma20:
+            vetoes.append("below_ma20")
+
+    # 2. red_market：大盘信号 RED 或 CLEAR
+    if market_signal in ("RED", "CLEAR"):
+        vetoes.append("red_market")
+
+    # 3. limit_up_today：涨停（涨幅 > 9.5%）
+    if idx >= 1:
+        prev_close = float(df_stock.iloc[idx - 1]["close"])
+        if prev_close > 0:
+            change = (close - prev_close) / prev_close
+            if change > 0.095:
+                vetoes.append("limit_up_today")
+
+    # 4. ma20_trend_down：MA20 斜率向下（近10日）
+    if len(ma20_history) >= 10:
+        ma20_slice = ma20_history[-10:]
+        if len(ma20_slice) >= 2 and ma20_slice[-1] < ma20_slice[0]:
+            vetoes.append("ma20_trend_down")
+
+    # 5. consecutive_outflow：近3日成交量连续萎缩
+    if idx >= 3:
+        vols = [float(df_stock.iloc[idx - i]["volume"]) for i in range(3)]
+        if vols[0] < vols[1] < vols[2]:
+            vetoes.append("consecutive_outflow")
+
+    # 6. 两市成交额不足（大盘择时增强版：两市成交 > 6000亿，baostock AMOUNT 单位是元）
+    # 6000亿 = 6000 * 1亿 = 6000 * 100,000,000 = 600,000,000,000 元
+    if total_market_amount is not None:
+        min_amount = 600_000_000_000  # 6000亿元
+        if total_market_amount < min_amount:
+            vetoes.append("insufficient_market_amount")
+
+    return vetoes
+
+
+# ---------------------------------------------------------------------------
+# 完整 daily_data 生成
+# ---------------------------------------------------------------------------
+
+def build_replay_fixture(
+    stock_code: str,
+    start: str,
+    end: str,
+    index_code: str = "000001",
+    total_capital: float = 450286.0,
+    strategy_params: dict | None = None,
+) -> dict:
+    """
+    生成完整的 replay fixture。
+
+    Returns:
+        dict with keys: daily_data, total_capital, params, strategy_snapshot
+    """
+    params = _resolve_strategy_params(strategy_params)
+    strategy = get_strategy()
+
+    bs_code = _to_bs_code(stock_code)
+    bs_index = _to_bs_code(index_code)
+
+    # 预拉额外60日数据用于计算MA等指标
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    warmup_start = (start_dt - timedelta(days=90)).strftime("%Y-%m-%d")
+
+    # 拉指数数据。index_code="system"/"composite" 时按当前系统多指数投票。
+    if str(index_code).lower() in {"system", "composite", "all"}:
+        df_index = _composite_market_signal(start, end, warmup_start=warmup_start)
+    else:
+        df_index_raw = _fetch_daily(bs_index, warmup_start, end)
+        df_index = compute_market_signal(df_index_raw)
+
+    # 拉个股数据
+    df_stock = _fetch_daily(bs_code, warmup_start, end)
+
+    # 预计算个股 MA20 序列
+    df_stock["MA20"] = df_stock["close"].rolling(20).mean()
+    df_stock["MA5"] = df_stock["close"].rolling(5).mean()
+    df_stock["MA10"] = df_stock["close"].rolling(10).mean()
+    df_stock["MA60"] = df_stock["close"].rolling(60).mean()
+
+    # 合并信号：个股日期在指数上对齐
+    index_map = df_index.set_index("date")[["signal", "close", "total_amount"]].to_dict("index")
+
+    daily_data: dict[str, dict] = {}
+
+    for idx, row in df_stock.iterrows():
+        day_str = row["date"].strftime("%Y-%m-%d")
+
+        # 跳过回测区间外
+        if day_str < start:
+            continue
+        if day_str > end:
+            break
+
+        idx_info = index_map.get(row["date"], {})
+        market_signal = idx_info.get("signal", "GREEN")
+        index_close = idx_info.get("close", row["close"])
+        total_market_amount = idx_info.get("total_amount")
+
+        # 技术评分
+        tech = compute_technical_score(df_stock, row, idx)
+        tech_score = tech["technical_score"]
+        entry_signal, entry_reasons = _entry_signal_for_mode(row, tech, params)
+
+        # Veto
+        ma20_hist = list(df_stock["MA20"].iloc[max(0, idx - 20):idx + 1])
+        vetoes = check_veto(row, idx, df_stock, market_signal, ma20_hist, total_market_amount=total_market_amount)
+
+        # 综合评分：技术3 + 资金2 + 舆情3 + 基本面2 简化
+        # 由于历史回测无法重建资金流/舆情，用技术面代理 + 固定基础分
+        # 真实策略中基本面/舆情在实盘中起作用，这里做合理近似
+        flow_score = 2.0  # 近似：量比高则加分
+        sentiment_score = 1.5  # 无法回测，设为中性
+        fundamental_score = 1.0  # 无法重建季度财务快照，设为中性
+
+        weights = {
+            "technical": params.get("technical_weight", 3),
+            "fundamental": params.get("fundamental_weight", 2),
+            "flow": params.get("flow_weight", 2),
+            "sentiment": params.get("sentiment_weight", 3),
+        }
+        denoms = {
+            "technical": params.get("technical_denom", 3),
+            "fundamental": params.get("fundamental_denom", 2),
+            "flow": params.get("flow_denom", 2),
+            "sentiment": params.get("sentiment_denom", 3),
+        }
+
+        total_score = round(
+            tech_score * weights["technical"] / denoms["technical"]
+            + fundamental_score * weights["fundamental"] / denoms["fundamental"]
+            + flow_score * weights["flow"] / denoms["flow"]
+            + sentiment_score * weights["sentiment"] / denoms["sentiment"],
+            2,
+        )
+
+        close_price = float(row["close"])
+        closes = [float(v) for v in df_stock.iloc[max(0, idx - 80):idx + 1]["close"].tolist()]
+        style_info = classify_style(closes, rsi=tech.get("rsi"), strategy=strategy) if len(closes) >= 30 else {}
+        style = style_info.get("style", "momentum")
+
+        daily_data[day_str] = {
+            "market_signal": market_signal,
+            "market_index_close": round(float(index_close), 2) if index_close else None,
+            "total_market_amount": round(float(total_market_amount), 0) if total_market_amount else None,
+            "candidates": [{
+                "code": stock_code,
+                "name": "长飞光纤",
+                "score": total_score,
+                "price": round(close_price, 4),
+                "technical_score": tech_score,
+                "fundamental_score": fundamental_score,
+                "flow_score": flow_score,
+                "sentiment_score": sentiment_score,
+                "veto_signals": vetoes,
+                "entry_signal": entry_signal,
+                "entry_reasons": entry_reasons,
+                "entry_mode": params.get("entry_mode", "strict"),
+                "golden_cross": tech.get("golden_cross", False),
+                "close_above_prev": tech.get("close_above_prev", False),
+                "deviation_pct": tech.get("deviation_pct"),
+                "volume_ratio": round(float(tech.get("volume_ratio") or 0), 2),
+                "rsi": round(float(tech["rsi"]), 1) if tech.get("rsi") is not None else None,
+                "style": style,
+                "style_confidence": style_info.get("confidence", 0),
+                "ma20": round(float(row["MA20"]), 4) if not pd.isna(row.get("MA20")) else None,
+                "ma5": round(float(row["MA5"]), 4) if not pd.isna(row.get("MA5")) else None,
+                "ma10": round(float(row["MA10"]), 4) if not pd.isna(row.get("MA10")) else None,
+                "ma60": round(float(row["MA60"]), 4) if not pd.isna(row.get("MA60")) else None,
+                "low": round(float(row["low"]), 4),
+                "high": round(float(row["high"]), 4),
+                "turn": round(float(row["turn"]), 4) if not pd.isna(row.get("turn")) else 0,
+            }],
+            "prices": {stock_code: round(close_price, 4)},
+            "bars": {
+                stock_code: {
+                    "open": round(float(row["open"]), 4),
+                    "high": round(float(row["high"]), 4),
+                    "low": round(float(row["low"]), 4),
+                    "close": round(close_price, 4),
+                    "ma5": round(float(row["MA5"]), 4) if not pd.isna(row.get("MA5")) else None,
+                    "ma10": round(float(row["MA10"]), 4) if not pd.isna(row.get("MA10")) else None,
+                    "ma20": round(float(row["MA20"]), 4) if not pd.isna(row.get("MA20")) else None,
+                    "ma60": round(float(row["MA60"]), 4) if not pd.isna(row.get("MA60")) else None,
+                }
+            },
+        }
+
+    strategy_source = "config/strategy.yaml"
+    if params.get("preset"):
+        strategy_source += f"[preset={params['preset']}]"
+    strategy_source += " + historical_overrides"
+
+    return {
+        "daily_data": daily_data,
+        "total_capital": total_capital,
+        "params": params,
+        "_meta": {
+            "stock_code": stock_code,
+            "index_code": index_code,
+            "start": start,
+            "end": end,
+            "preset": params.get("preset"),
+            "entry_mode": params.get("entry_mode", "strict"),
+            "strategy_source": strategy_source,
+            "generated_at": datetime.now().isoformat(),
+        },
+        "strategy_snapshot": strategy,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ATR 跟踪止盈止损专用回测（不依赖 strategy_replay）
+# ---------------------------------------------------------------------------
+
+def _compute_atr(df: pd.DataFrame, idx: int, period: int = 14) -> float | None:
+    """计算 ATR(14)"""
+    if idx < period:
+        return None
+    trs = []
+    for i in range(idx - period + 1, idx + 1):
+        high = float(df.iloc[i]["high"])
+        low = float(df.iloc[i]["low"])
+        prev_close = float(df.iloc[i - 1]["close"]) if i > 0 else high
+        close = float(df.iloc[i]["close"])
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    return sum(trs) / len(trs) if trs else None
+
+
+def _compute_ma(df: pd.DataFrame, idx: int, window: int) -> float | None:
+    if idx < window - 1:
+        return None
+    return float(df.iloc[idx - window + 1:idx + 1]["close"].mean())
+
+
+def _volume_ratio(df: pd.DataFrame, idx: int, window: int = 5) -> float:
+    if idx < window:
+        return 0.0
+    avg = float(df.iloc[idx - window:idx]["volume"].mean())
+    today = float(df.iloc[idx]["volume"])
+    return today / avg if avg > 0 else 0.0
+
+
+def _is_golden_cross(df: pd.DataFrame, idx: int) -> bool:
+    """MA10 上穿 MA20（金叉）"""
+    if idx < 20:
+        return False
+    ma10_prev = _compute_ma(df, idx - 1, 10)
+    ma20_prev = _compute_ma(df, idx - 1, 20)
+    ma10_curr = _compute_ma(df, idx, 10)
+    ma20_curr = _compute_ma(df, idx, 20)
+    if None in (ma10_prev, ma20_prev, ma10_curr, ma20_curr):
+        return False
+    return ma10_prev <= ma20_prev and ma10_curr > ma20_curr
+
+
+def run_atr_strategy_replay(
+    stock_code: str,
+    start: str,
+    end: str,
+    index_code: str = "000001",
+    total_capital: float = 450286.0,
+    atr_period: int = 14,
+    stop_loss_atr_mult: float = 2.0,    # ATR×2
+    stop_loss_pct: float = 0.05,        # 5% 固定止损
+    stop_loss_low_mult: float = 0.97,   # 入场低点×0.97
+    trailing_stop_pct: float = 0.08,    # 跟踪止盈 -8%
+) -> dict:
+    """
+    ATR 跟踪止盈止损策略回测。
+
+    入场规则：
+      - MA10 金叉 MA20（金叉当天）
+      - 量比 > 1.5
+      - 大盘信号非 RED/CLEAR
+
+    离场规则（优先级）：
+      1. 跟踪止盈触发（从入场后高点回撤 > trailing_stop_pct）
+      2. ATR 止损（从入场价跌 > ATR×2）
+      3. 固定止损（从入场价跌 > stop_loss_pct）
+      4. ATR 低点止损（入场低点 × stop_loss_low_mult）
+      5. 大盘 RED/CLEAR 清仓
+    """
+    bs_code = _to_bs_code(stock_code)
+    bs_index = _to_bs_code(index_code)
+
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    warmup = (start_dt - timedelta(days=120)).strftime("%Y-%m-%d")
+
+    df_index_raw = _fetch_daily(bs_index, warmup, end)
+    df_index = compute_market_signal(df_index_raw)
+    index_map = df_index.set_index("date")[["signal"]].to_dict("index")
+
+    df = _fetch_daily(bs_code, warmup, end)
+    # 预计算 MA10/MA20
+    df["MA10"] = df["close"].rolling(10).mean()
+    df["MA20"] = df["close"].rolling(20).mean()
+
+    cash = total_capital
+    peak_exposure = 0.0
+    min_cash = cash
+    cumulative_pnl = 0.0
+    max_capital_deployed = 0.0
+    constrained_count = 0
+
+    closed_trades: list[dict] = []
+    open_positions: list[dict] = []
+    timeline: list[dict] = []
+    rejected_entries: list[dict] = []
+
+    # 持仓状态
+    position: dict | None = None
+
+    for idx, row in df.iterrows():
+        day_str = row["date"].strftime("%Y-%m-%d")
+        date_val = row["date"]
+        if day_str < start or day_str > end:
+            continue
+
+        idx_info = index_map.get(row["date"], {})
+        market_signal = idx_info.get("signal", "GREEN")
+        close_price = float(row["close"])
+        high_price = float(row["high"])
+        low_price = float(row["low"])
+        atr = _compute_atr(df, idx, atr_period) if idx >= atr_period else None
+        vol_ratio = _volume_ratio(df, idx)
+        golden_cross = _is_golden_cross(df, idx)
+
+        exits_today = []
+        entries_today = []
+
+        # ── 持仓管理 ──
+        if position:
+            entry_price = position["entry_price"]
+            entry_low = position["entry_low"]
+            shares = position["shares"]
+            capital = position["capital"]
+
+            # 更新峰值（先更新，再用最新峰值计算止盈）
+            if high_price > position["peak_price"]:
+                position["peak_price"] = high_price
+            peak_price = position["peak_price"]
+
+            exit_reason = None
+            exit_price = close_price
+
+            # 1. 跟踪止盈（从峰值回落 > trailing_stop_pct）
+            trailing_trigger = peak_price * (1 - trailing_stop_pct)
+            if close_price <= trailing_trigger:
+                exit_reason = "trailing_stop"
+                exit_price = trailing_trigger
+
+            # 2. ATR 止损
+            if atr and exit_reason is None:
+                atr_stop = entry_price - atr * stop_loss_atr_mult
+                if close_price <= atr_stop:
+                    exit_reason = "atr_stop"
+                    exit_price = atr_stop
+
+            # 3. 固定止损
+            if exit_reason is None:
+                fixed_stop = entry_price * (1 - stop_loss_pct)
+                if close_price <= fixed_stop:
+                    exit_reason = "fixed_stop"
+                    exit_price = fixed_stop
+
+            # 4. ATR 低点止损
+            if exit_reason is None:
+                low_stop = entry_low * stop_loss_low_mult
+                if close_price <= low_stop:
+                    exit_reason = "low_stop"
+                    exit_price = low_stop
+
+            # 5. 大盘止损
+            if exit_reason is None and market_signal in ("RED", "CLEAR"):
+                exit_reason = "market_signal_exit"
+                exit_price = close_price
+
+            if exit_reason:
+                # 以触发止盈/止损时的价格出局（非收盘价）
+                exit_price = round(exit_price, 4)
+                realized_pnl = round((exit_price - entry_price) * shares, 2)
+                cash = round(cash + capital + realized_pnl, 2)
+                cumulative_pnl = round(cumulative_pnl + realized_pnl, 2)
+                holding_days = (datetime.strptime(day_str, "%Y-%m-%d") -
+                                datetime.strptime(position["entry_date"], "%Y-%m-%d")).days
+                closed_trades.append({
+                    "code": stock_code,
+                    "name": "长飞光纤",
+                    "entry_date": position["entry_date"],
+                    "exit_date": day_str,
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": exit_price,
+                    "shares": shares,
+                    "capital": round(capital, 2),
+                    "realized_pnl": realized_pnl,
+                    "exit_reason": exit_reason,
+                    "entry_score": 10,
+                    "holding_days": holding_days,
+                    "atr": round(atr, 4) if atr else None,
+                    "peak_price": round(peak_price, 4),
+                    "trailing_trigger": round(trailing_trigger, 4),
+                })
+                exits_today.append({
+                    "code": stock_code,
+                    "capital_released": capital,
+                    "realized_pnl": realized_pnl,
+                    "exit_reason": exit_reason,
+                })
+                position = None
+
+        # ── 入场判断 ──
+        entry_today = None
+        if not position and market_signal not in ("RED", "CLEAR"):
+            # 大盘允许开仓
+            if golden_cross and vol_ratio > 1.5:
+                # 检查 ATR 存在（预热足够）
+                if atr and atr > 0:
+                    entry_price = close_price
+                    entry_low = low_price
+                    # 计算入场股数（单笔上限 20% 仓位）
+                    single_cap_limit = round(total_capital * 0.20, 2)
+                    capital = min(single_cap_limit, cash)
+                    shares = max(int(capital / entry_price // 100) * 100, 100)
+                    actual_capital = round(entry_price * shares, 2)
+                    if actual_capital > cash:
+                        shares = max(shares - 100, 100)
+                        actual_capital = round(entry_price * shares, 2)
+                    if actual_capital > 0 and actual_capital <= cash:
+                        position = {
+                            "code": stock_code,
+                            "name": "长飞光纤",
+                            "entry_date": day_str,
+                            "entry_price": entry_price,
+                            "entry_low": low_price,
+                            "shares": shares,
+                            "capital": actual_capital,
+                            "peak_price": high_price,
+                            "atr": atr,
+                            "stop_atr": round(entry_price - atr * stop_loss_atr_mult, 4),
+                            "stop_fixed": round(entry_price * (1 - stop_loss_pct), 4),
+                            "stop_low": round(low_price * stop_loss_low_mult, 4),
+                            "trailing_trigger": round(high_price * (1 - trailing_stop_pct), 4),
+                        }
+                        cash = round(cash - actual_capital, 2)
+                        entries_today.append({
+                            "code": stock_code,
+                            "capital": actual_capital,
+                            "atr": round(atr, 4),
+                            "stop_atr": position["stop_atr"],
+                            "stop_fixed": position["stop_fixed"],
+                        })
+
+        # ── 当日快照 ──
+        capital_deployed = 0.0
+        if position:
+            # 盯市：当前亏损
+            mark_pnl = round((close_price - position["entry_price"]) * position["shares"], 2)
+            capital_deployed = position["capital"]
+            peak_exposure = max(peak_exposure, capital_deployed / total_capital)
+            max_capital_deployed = max(max_capital_deployed, capital_deployed)
+
+        realized_today = sum(e["realized_pnl"] for e in exits_today)
+        timeline.append({
+            "date": day_str,
+            "market_signal": market_signal,
+            "close": round(close_price, 2),
+            "atr": round(atr, 4) if atr else None,
+            "vol_ratio": round(vol_ratio, 2),
+            "golden_cross": golden_cross,
+            "open_position_count": 1 if position else 0,
+            "entry_count": len(entries_today),
+            "exit_count": len(exits_today),
+            "capital_deployed": round(capital_deployed, 2),
+            "cash_available": round(cash, 2),
+            "realized_pnl_today": round(realized_today, 2),
+            "cumulative_pnl": round(cumulative_pnl, 2),
+            "position": dict(position) if position else None,
+        })
+
+    # ── 汇总 ──
+    win_trades = [t for t in closed_trades if t["realized_pnl"] > 0]
+    loss_trades = [t for t in closed_trades if t["realized_pnl"] < 0]
+
+    return {
+        "command": "backtest",
+        "action": "atr_strategy",
+        "status": "ok",
+        "summary": {
+            "capital": round(total_capital, 2),
+            "atr_period": atr_period,
+            "stop_loss_atr_mult": stop_loss_atr_mult,
+            "stop_loss_pct": stop_loss_pct,
+            "stop_loss_low_mult": stop_loss_low_mult,
+            "trailing_stop_pct": trailing_stop_pct,
+            "timeline_days": len(timeline),
+            "max_capital_deployed": round(max_capital_deployed, 2),
+            "peak_exposure_pct": round(peak_exposure, 4),
+            "min_cash_available": round(min(min_cash, cash), 2),
+            "ending_cash": round(cash, 2),
+            "total_realized_pnl": round(cumulative_pnl, 2),
+            "closed_trade_count": len(closed_trades),
+            "win_count": len(win_trades),
+            "loss_count": len(loss_trades),
+            "win_rate": round(len(win_trades) / len(closed_trades) * 100, 1) if closed_trades else 0.0,
+            "open_position_count": 1 if position else 0,
+        },
+        "closed_trades": closed_trades,
+        "open_positions": [dict(position)] if position else [],
+        "timeline": timeline,
+    }
+
+
+def render_atr_strategy_report(result: dict) -> str:
+    """格式化 ATR 策略回测报告"""
+    s = result["summary"]
+    lines = [
+        "",
+        "=" * 58,
+        "  ATR 跟踪止盈止损策略回测",
+        f"  区间: {result.get('_period', 'N/A')}",
+        "=" * 58,
+        "",
+        f"  止损体系: ATR×{s['stop_loss_atr_mult']} | 固定 -%5 | 低点×0.97",
+        f"  止盈体系: 跟踪 -%8（从峰值回落）",
+        f"  ATR周期: {s['atr_period']}",
+        "",
+        f"  {'已平仓交易':>10}   {'胜率':>8}   {'累计盈亏':>12}",
+        f"  {s['closed_trade_count']:>10}   {s['win_rate']:>7.1f}%   {s['total_realized_pnl']:>+12.2f}",
+        "",
+        "  逐笔明细:",
+        f"  {'入场日期':<12} {'入场价':>8} {'出场日期':<12} {'出场价':>8} {'盈亏':>10} {'原因':>16} {'ATR':>8} {'峰值':>8} {'跟踪触发':>10}",
+    ]
+
+    for t in result.get("closed_trades", []):
+        lines.append(
+            f"  {t['entry_date']:<12} {t['entry_price']:>8.2f} "
+            f"{t['exit_date']:<12} {t['exit_price']:>8.2f} "
+            f"{t['realized_pnl']:>+10.2f}  {t['exit_reason']:>16} "
+            f"{t.get('atr', 0) or 0:>8.2f} {t.get('peak_price', 0):>8.2f} "
+            f"{t.get('trailing_trigger', 0):>8.2f}"
+        )
+
+    if result.get("open_positions"):
+        lines.append(f"\n  未平仓 ({len(result['open_positions'])} 笔):")
+        for p in result["open_positions"]:
+            lines.append(
+                f"  {p['entry_date']} 买入 @¥{p['entry_price']} "
+                f"ATR={p.get('atr', 0):.2f} "
+                f"峰值={p.get('peak_price', 0):.2f}"
+            )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_system_strategy_backtest(
+    stock_code: str,
+    start: str,
+    end: str,
+    index_code: str = "system",
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+) -> dict:
+    """Build a system-strategy historical fixture and immediately replay it."""
+    from scripts.backtest.strategy_replay import run_strategy_replay
+
+    params = _resolve_strategy_params(strategy_params)
+    capital = total_capital if total_capital is not None else float(get_strategy().get("capital", 450286))
+    fixture = build_replay_fixture(
+        stock_code=stock_code,
+        start=start,
+        end=end,
+        index_code=index_code,
+        total_capital=capital,
+        strategy_params=params,
+    )
+    result = run_strategy_replay(
+        daily_data=fixture["daily_data"],
+        start=start,
+        end=end,
+        total_capital=fixture["total_capital"],
+        params=fixture["params"],
+    )
+    result["fixture_meta"] = fixture.get("_meta", {})
+    result["params"] = fixture["params"]
+    return result
+
+
+def _candidate_row_for_code(snapshot: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    for cand in snapshot.get("candidates", []) or []:
+        if str(cand.get("code", "")).strip() == stock_code:
+            return cand
+    return {}
+
+
+def _build_single_stock_daily_rows(stock_code: str, daily_data: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for day in sorted(daily_data):
+        snapshot = daily_data.get(day, {}) or {}
+        candidate = _candidate_row_for_code(snapshot, stock_code)
+        prices = snapshot.get("prices", {}) if isinstance(snapshot.get("prices", {}), dict) else {}
+        bars = snapshot.get("bars", {}) if isinstance(snapshot.get("bars", {}), dict) else {}
+        bar = bars.get(stock_code, {}) if isinstance(bars.get(stock_code, {}), dict) else {}
+        close = candidate.get("price", prices.get(stock_code, bar.get("close", 0)))
+        high = bar.get("high", candidate.get("high", close))
+        low = bar.get("low", candidate.get("low", close))
+        rows.append({
+            "date": day,
+            "close": float(close or 0),
+            "high": float(high or close or 0),
+            "low": float(low or close or 0),
+            "market_signal": str(snapshot.get("market_signal", "GREEN") or "GREEN").upper(),
+            "score": float(candidate.get("score", 0) or 0),
+            "entry_signal": bool(candidate.get("entry_signal", False)),
+            "entry_reasons": list(candidate.get("entry_reasons", []) or []),
+            "veto_signals": list(candidate.get("veto_signals", []) or []),
+            "style": str(candidate.get("style", "") or ""),
+            "volume_ratio": float(candidate.get("volume_ratio", 0) or 0),
+            "rsi": candidate.get("rsi"),
+        })
+    return rows
+
+
+def _summarize_reason_counts(items: list[str]) -> list[dict[str, Any]]:
+    counter = Counter(str(item).strip() for item in items if str(item).strip())
+    return [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+
+
+def _trade_ranges(result: dict[str, Any], end: str) -> list[dict[str, Any]]:
+    ranges: list[dict[str, Any]] = []
+    for trade in result.get("closed_trades", []):
+        ranges.append({
+            "entry_date": str(trade.get("entry_date", "")).strip(),
+            "exit_date": str(trade.get("exit_date", "")).strip(),
+            "exit_reason": str(trade.get("exit_reason", "")).strip(),
+            "realized_pnl": float(trade.get("realized_pnl", 0) or 0),
+        })
+    for pos in result.get("open_positions", []):
+        ranges.append({
+            "entry_date": str(pos.get("entry_date", "")).strip(),
+            "exit_date": end,
+            "exit_reason": "open_position",
+            "realized_pnl": 0.0,
+        })
+    return ranges
+
+
+def _date_in_ranges(day: str, ranges: list[dict[str, Any]]) -> bool:
+    return any(item["entry_date"] <= day <= item["exit_date"] for item in ranges if item.get("entry_date") and item.get("exit_date"))
+
+
+def _classify_missed_reason(row: dict[str, Any], params: dict[str, Any]) -> str:
+    if row.get("market_signal") in {"RED", "CLEAR"}:
+        return f"market_signal_{str(row['market_signal']).lower()}"
+    if float(row.get("score", 0) or 0) < float(params.get("buy_threshold", 7) or 7):
+        return "score_below_threshold"
+    if bool(params.get("require_entry_signal", False)) and not bool(row.get("entry_signal", False)):
+        return "entry_signal_missing"
+    veto_signals = [str(item).strip() for item in row.get("veto_signals", []) if str(item).strip()]
+    if veto_signals:
+        return f"veto:{','.join(veto_signals)}"
+    return "portfolio_or_execution_constraint"
+
+
+def _find_opportunity_windows(
+    rows: list[dict[str, Any]],
+    params: dict[str, Any],
+    holding_ranges: list[dict[str, Any]],
+    *,
+    lookahead_days: int = 20,
+    min_gain_pct: float = 0.15,
+) -> list[dict[str, Any]]:
+    if len(rows) < 2:
+        return []
+
+    raw_candidates: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows[:-1]):
+        close = float(row.get("close", 0) or 0)
+        if close <= 0:
+            continue
+        end_idx = min(len(rows) - 1, idx + lookahead_days)
+        peak_idx = idx
+        peak_price = close
+        for j in range(idx + 1, end_idx + 1):
+            future_close = float(rows[j].get("close", 0) or 0)
+            if future_close > peak_price:
+                peak_price = future_close
+                peak_idx = j
+        if peak_idx <= idx:
+            continue
+        gain_pct = peak_price / close - 1
+        if gain_pct >= min_gain_pct:
+            raw_candidates.append({
+                "anchor_idx": idx,
+                "peak_idx": peak_idx,
+                "gain_pct": gain_pct,
+            })
+
+    if not raw_candidates:
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for candidate in raw_candidates:
+        if current is None or candidate["anchor_idx"] > current["anchor_end_idx"] + 1:
+            if current is not None:
+                blocks.append(current)
+            current = {
+                "anchor_start_idx": candidate["anchor_idx"],
+                "anchor_end_idx": candidate["anchor_idx"],
+                "best": candidate,
+            }
+            continue
+        current["anchor_end_idx"] = candidate["anchor_idx"]
+        if candidate["gain_pct"] > current["best"]["gain_pct"]:
+            current["best"] = candidate
+    if current is not None:
+        blocks.append(current)
+
+    windows: list[dict[str, Any]] = []
+    for block in blocks:
+        best = block["best"]
+        anchor = rows[best["anchor_idx"]]
+        peak = rows[best["peak_idx"]]
+        start_date = str(anchor["date"])
+        peak_date = str(peak["date"])
+        overlapping = [
+            item for item in holding_ranges
+            if item.get("entry_date") and item.get("exit_date")
+            and not (item["exit_date"] < start_date or item["entry_date"] > peak_date)
+        ]
+        captured = bool(overlapping)
+        windows.append({
+            "start_date": start_date,
+            "peak_date": peak_date,
+            "start_price": round(float(anchor.get("close", 0) or 0), 4),
+            "peak_price": round(float(peak.get("close", 0) or 0), 4),
+            "gain_pct": round(float(best["gain_pct"] * 100), 2),
+            "window_days": int(best["peak_idx"] - best["anchor_idx"]),
+            "captured": captured,
+            "capture_mode": "held_during_run" if captured else "missed",
+            "miss_reason": "" if captured else _classify_missed_reason(anchor, params),
+            "market_signal": anchor.get("market_signal", ""),
+            "score": round(float(anchor.get("score", 0) or 0), 2),
+            "entry_signal": bool(anchor.get("entry_signal", False)),
+            "veto_signals": list(anchor.get("veto_signals", []) or []),
+        })
+    return windows
+
+
+def _find_premature_exits(
+    rows: list[dict[str, Any]],
+    result: dict[str, Any],
+    *,
+    lookahead_days: int = 20,
+    min_extra_gain_pct: float = 0.08,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    index_by_date = {row["date"]: idx for idx, row in enumerate(rows)}
+    premature: list[dict[str, Any]] = []
+    for trade in result.get("closed_trades", []):
+        exit_date = str(trade.get("exit_date", "")).strip()
+        exit_price = float(trade.get("exit_price", 0) or 0)
+        if not exit_date or exit_price <= 0 or exit_date not in index_by_date:
+            continue
+        exit_idx = index_by_date[exit_date]
+        end_idx = min(len(rows) - 1, exit_idx + lookahead_days)
+        future_rows = rows[exit_idx + 1:end_idx + 1]
+        if not future_rows:
+            continue
+        future_peak = max(future_rows, key=lambda item: float(item.get("close", 0) or 0))
+        future_peak_price = float(future_peak.get("close", 0) or 0)
+        if future_peak_price <= 0:
+            continue
+        extra_gain_pct = future_peak_price / exit_price - 1
+        if extra_gain_pct < min_extra_gain_pct:
+            continue
+        premature.append({
+            "entry_date": str(trade.get("entry_date", "")).strip(),
+            "exit_date": exit_date,
+            "exit_reason": str(trade.get("exit_reason", "")).strip(),
+            "exit_price": round(exit_price, 4),
+            "future_peak_date": str(future_peak["date"]),
+            "future_peak_price": round(future_peak_price, 4),
+            "missed_gain_pct": round(extra_gain_pct * 100, 2),
+            "realized_pnl": round(float(trade.get("realized_pnl", 0) or 0), 2),
+        })
+    return premature
+
+
+def _signal_statistics(rows: list[dict[str, Any]], params: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    buy_threshold = float(params.get("buy_threshold", 7) or 7)
+    market_positive_days = sum(1 for row in rows if row.get("market_signal") in {"GREEN", "YELLOW"})
+    score_ready_days = sum(1 for row in rows if float(row.get("score", 0) or 0) >= buy_threshold)
+    entry_signal_days = sum(1 for row in rows if bool(row.get("entry_signal", False)))
+    veto_free_days = sum(1 for row in rows if not row.get("veto_signals"))
+    buy_ready_days = sum(
+        1 for row in rows
+        if row.get("market_signal") in {"GREEN", "YELLOW"}
+        and float(row.get("score", 0) or 0) >= buy_threshold
+        and (not bool(params.get("require_entry_signal", False)) or bool(row.get("entry_signal", False)))
+        and not row.get("veto_signals")
+    )
+    actual_entry_days = sum(int(item.get("entry_count", 0) or 0) for item in result.get("timeline", []))
+    return {
+        "market_positive_days": market_positive_days,
+        "score_ready_days": score_ready_days,
+        "entry_signal_days": entry_signal_days,
+        "veto_free_days": veto_free_days,
+        "buy_ready_days": buy_ready_days,
+        "actual_entry_days": actual_entry_days,
+    }
+
+
+def _summarize_exit_reasons(closed_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {
+        "count": 0,
+        "total_realized_pnl": 0.0,
+        "win_count": 0,
+        "loss_count": 0,
+        "total_holding_days": 0,
+    })
+    for trade in closed_trades:
+        reason = str(trade.get("exit_reason", "")).strip() or "unknown"
+        bucket = grouped[reason]
+        pnl = float(trade.get("realized_pnl", 0) or 0)
+        bucket["count"] += 1
+        bucket["total_realized_pnl"] += pnl
+        bucket["total_holding_days"] += int(trade.get("holding_days", 0) or 0)
+        if pnl > 0:
+            bucket["win_count"] += 1
+        elif pnl < 0:
+            bucket["loss_count"] += 1
+    items = []
+    for reason, bucket in grouped.items():
+        count = max(bucket["count"], 1)
+        items.append({
+            "reason": reason,
+            "count": bucket["count"],
+            "total_realized_pnl": round(bucket["total_realized_pnl"], 2),
+            "avg_realized_pnl": round(bucket["total_realized_pnl"] / count, 2),
+            "avg_holding_days": round(bucket["total_holding_days"] / count, 1),
+            "win_count": bucket["win_count"],
+            "loss_count": bucket["loss_count"],
+        })
+    return sorted(items, key=lambda item: (-item["count"], item["reason"]))
+
+
+def _build_validation_findings(
+    opportunities: list[dict[str, Any]],
+    premature_exits: list[dict[str, Any]],
+    rejection_breakdown: list[dict[str, Any]],
+    signal_stats: dict[str, Any],
+) -> list[str]:
+    findings: list[str] = []
+    total_windows = len(opportunities)
+    captured_windows = sum(1 for item in opportunities if item.get("captured"))
+    if total_windows:
+        findings.append(
+            f"主升窗口 {captured_windows}/{total_windows} 个被持仓覆盖，捕获率 {captured_windows / total_windows * 100:.1f}%"
+        )
+    if premature_exits:
+        top_exit = max(premature_exits, key=lambda item: float(item.get("missed_gain_pct", 0) or 0))
+        findings.append(
+            f"存在 {len(premature_exits)} 次提前离场，最大卖飞发生在 {top_exit['exit_date']} 后少赚 {top_exit['missed_gain_pct']:.1f}%"
+        )
+    if rejection_breakdown:
+        top_reject = rejection_breakdown[0]
+        findings.append(f"最常见的错过原因是 {top_reject['reason']}，共 {top_reject['count']} 次")
+    if signal_stats.get("buy_ready_days", 0) == 0 and signal_stats.get("score_ready_days", 0) > 0:
+        findings.append("出现过分数达标，但没有形成完整买点，说明入场触发条件偏严")
+    return findings
+
+
+def run_single_stock_strategy_validation(
+    stock_code: str,
+    start: str,
+    end: str,
+    index_code: str = "system",
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+    *,
+    opportunity_lookahead_days: int = 20,
+    opportunity_min_gain_pct: float = 0.15,
+    premature_exit_min_gain_pct: float = 0.08,
+) -> dict[str, Any]:
+    """Run single-stock replay and return a structured diagnostics report."""
+    from scripts.backtest.strategy_replay import run_strategy_replay
+
+    params = _resolve_strategy_params(strategy_params)
+    capital = total_capital if total_capital is not None else float(get_strategy().get("capital", 450286))
+    fixture = build_replay_fixture(
+        stock_code=stock_code,
+        start=start,
+        end=end,
+        index_code=index_code,
+        total_capital=capital,
+        strategy_params=params,
+    )
+    replay = run_strategy_replay(
+        daily_data=fixture["daily_data"],
+        start=start,
+        end=end,
+        total_capital=fixture["total_capital"],
+        params=fixture["params"],
+    )
+
+    rows = _build_single_stock_daily_rows(stock_code, fixture["daily_data"])
+    holding_ranges = _trade_ranges(replay, end)
+    opportunities = _find_opportunity_windows(
+        rows,
+        fixture["params"],
+        holding_ranges,
+        lookahead_days=opportunity_lookahead_days,
+        min_gain_pct=opportunity_min_gain_pct,
+    )
+    premature_exits = _find_premature_exits(
+        rows,
+        replay,
+        lookahead_days=opportunity_lookahead_days,
+        min_extra_gain_pct=premature_exit_min_gain_pct,
+    )
+    signal_stats = _signal_statistics(rows, fixture["params"], replay)
+    rejection_breakdown = _summarize_reason_counts([
+        item.get("reason", "") for item in replay.get("rejected_entries", [])
+    ])
+    exit_reason_breakdown = _summarize_exit_reasons(replay.get("closed_trades", []))
+    opportunity_miss_reason_breakdown = _summarize_reason_counts([
+        item.get("miss_reason", "") for item in opportunities if not item.get("captured")
+    ])
+    captured_gain = sum(float(item.get("gain_pct", 0) or 0) for item in opportunities if item.get("captured"))
+    total_gain = sum(float(item.get("gain_pct", 0) or 0) for item in opportunities)
+    captured_windows = sum(1 for item in opportunities if item.get("captured"))
+    findings = _build_validation_findings(opportunities, premature_exits, opportunity_miss_reason_breakdown, signal_stats)
+
+    return {
+        "command": "backtest",
+        "action": "single_stock_strategy_validation",
+        "status": "ok",
+        "stock_code": stock_code,
+        "start": start,
+        "end": end,
+        "index_code": index_code,
+        "data_fidelity": {
+            "mode": "proxy_replay",
+            "notes": [
+                "技术面、风格和大盘择时按历史价格重建",
+                "基本面、资金流和舆情仍为历史近似，不是当日完整实盘镜像",
+            ],
+        },
+        "params": fixture["params"],
+        "fixture_meta": fixture.get("_meta", {}),
+        "performance": replay.get("summary", {}),
+        "diagnostics": {
+            "signal_statistics": signal_stats,
+            "exit_reason_breakdown": exit_reason_breakdown,
+            "rejected_reason_breakdown": rejection_breakdown,
+            "opportunity_statistics": {
+                "total_opportunity_windows": len(opportunities),
+                "captured_opportunity_windows": captured_windows,
+                "missed_opportunity_windows": len(opportunities) - captured_windows,
+                "capture_rate_pct": round(captured_windows / len(opportunities) * 100, 1) if opportunities else 0.0,
+                "weighted_capture_rate_pct": round(captured_gain / total_gain * 100, 1) if total_gain > 0 else 0.0,
+            },
+            "opportunity_miss_reason_breakdown": opportunity_miss_reason_breakdown,
+            "premature_exit_count": len(premature_exits),
+            "findings": findings,
+        },
+        "opportunity_windows": opportunities[:20],
+        "premature_exits": premature_exits[:20],
+        "closed_trades": replay.get("closed_trades", []),
+        "open_positions": replay.get("open_positions", []),
+        "rejected_entries": replay.get("rejected_entries", []),
+    }
+
+
+def render_single_stock_validation_report(report: dict[str, Any]) -> str:
+    """Render a concise text report for single-stock validation."""
+    perf = report.get("performance", {})
+    diag = report.get("diagnostics", {})
+    opp = diag.get("opportunity_statistics", {})
+    lines = [
+        "",
+        "=" * 64,
+        f"  单股策略验证报告  {report.get('stock_code', '')}",
+        f"  区间: {report.get('start', '')} ~ {report.get('end', '')}",
+        "=" * 64,
+        "",
+        f"  模式: {report.get('data_fidelity', {}).get('mode', 'unknown')}",
+        f"  收益: {perf.get('total_realized_pnl', 0):+.2f}    期末权益: {perf.get('ending_equity', 0):.2f}",
+        f"  交易: {perf.get('closed_trade_count', 0)} 笔    胜率: {perf.get('win_rate', 0):.1f}%",
+        f"  最大回撤: {perf.get('max_drawdown_pct', 0):+.2f}% @ {perf.get('max_drawdown_date', '')}",
+        "",
+        "  信号统计:",
+        f"    市场可交易日 {diag.get('signal_statistics', {}).get('market_positive_days', 0)} / "
+        f"分数达标 {diag.get('signal_statistics', {}).get('score_ready_days', 0)} / "
+        f"完整买点 {diag.get('signal_statistics', {}).get('buy_ready_days', 0)} / "
+        f"实际入场 {diag.get('signal_statistics', {}).get('actual_entry_days', 0)}",
+        "",
+        "  机会窗口:",
+        f"    总数 {opp.get('total_opportunity_windows', 0)} / 捕获 {opp.get('captured_opportunity_windows', 0)} / "
+        f"捕获率 {opp.get('capture_rate_pct', 0):.1f}% / 加权捕获率 {opp.get('weighted_capture_rate_pct', 0):.1f}%",
+        "",
+        "  主要结论:",
+    ]
+    for item in diag.get("findings", [])[:5]:
+        lines.append(f"    - {item}")
+    if not diag.get("findings"):
+        lines.append("    - 暂无显著结论")
+    lines.append("")
+    lines.append("  主要出场原因:")
+    for item in diag.get("exit_reason_breakdown", [])[:5]:
+        lines.append(
+            f"    - {item['reason']}: {item['count']} 次, "
+            f"累计 {item['total_realized_pnl']:+.2f}, 平均持有 {item['avg_holding_days']:.1f} 天"
+        )
+    lines.append("")
+    lines.append("  错过主升的主要原因:")
+    for item in diag.get("opportunity_miss_reason_breakdown", [])[:5]:
+        lines.append(f"    - {item['reason']}: {item['count']} 次")
+    lines.append("")
+    lines.append("  提前离场样本:")
+    for item in report.get("premature_exits", [])[:3]:
+        lines.append(
+            f"    - {item['exit_date']} {item['exit_reason']} 后，"
+            f"{item['future_peak_date']} 前还少赚 {item['missed_gain_pct']:.1f}%"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _parse_symbol_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in re.split(r"[,/，、\s]+", str(value)) if item.strip()]
+
+
+def _stock_backtest_row(code: str, result: dict[str, Any]) -> dict[str, Any]:
+    summary = result.get("summary", {})
+    params = result.get("params", {})
+    return {
+        "code": code,
+        "closed_trade_count": int(summary.get("closed_trade_count", 0) or 0),
+        "win_count": int(summary.get("win_count", 0) or 0),
+        "loss_count": int(summary.get("loss_count", 0) or 0),
+        "win_rate": float(summary.get("win_rate", 0) or 0),
+        "total_realized_pnl": round(float(summary.get("total_realized_pnl", 0) or 0), 2),
+        "ending_equity": round(float(summary.get("ending_equity", 0) or 0), 2),
+        "max_drawdown_pct": round(float(summary.get("max_drawdown_pct", 0) or 0), 4),
+        "max_drawdown_date": str(summary.get("max_drawdown_date", "") or ""),
+        "simulation_mode": str(summary.get("simulation_mode", "") or ""),
+        "entry_mode": str(params.get("entry_mode", "") or ""),
+        "preset": params.get("preset"),
+    }
+
+
+def run_multi_stock_system_backtest(
+    stock_codes: list[str],
+    start: str,
+    end: str,
+    index_code: str = "system",
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+) -> dict[str, Any]:
+    """Run the system strategy replay for multiple stocks and return an aggregate summary."""
+    codes = [str(code).strip() for code in stock_codes if str(code).strip()]
+    if not codes:
+        raise ValueError("stock_codes must not be empty")
+
+    rows: list[dict[str, Any]] = []
+    total_pnl = 0.0
+    total_trades = 0
+    total_win_count = 0
+    worst_drawdown_pct = 0.0
+    total_ending_equity = 0.0
+    sample_params: dict[str, Any] | None = None
+
+    for code in codes:
+        result = run_system_strategy_backtest(
+            stock_code=code,
+            start=start,
+            end=end,
+            index_code=index_code,
+            total_capital=total_capital,
+            strategy_params=strategy_params,
+        )
+        row = _stock_backtest_row(code, result)
+        rows.append(row)
+        total_pnl += row["total_realized_pnl"]
+        total_trades += row["closed_trade_count"]
+        total_win_count += row["win_count"]
+        worst_drawdown_pct = min(worst_drawdown_pct, row["max_drawdown_pct"])
+        total_ending_equity += row["ending_equity"]
+        if sample_params is None:
+            sample_params = dict(result.get("params", {}))
+
+    aggregate = {
+        "stock_count": len(codes),
+        "closed_trade_count": total_trades,
+        "total_realized_pnl": round(total_pnl, 2),
+        "avg_ending_equity": round(total_ending_equity / len(codes), 2),
+        "worst_max_drawdown_pct": round(worst_drawdown_pct, 4),
+        "blended_win_rate": round(total_win_count / total_trades * 100, 1) if total_trades else 0.0,
+    }
+    if sample_params:
+        aggregate["entry_mode"] = sample_params.get("entry_mode")
+        aggregate["preset"] = sample_params.get("preset")
+
+    return {
+        "command": "backtest",
+        "action": "system_strategy_batch_replay",
+        "status": "ok",
+        "codes": codes,
+        "start": start,
+        "end": end,
+        "index_code": index_code,
+        "aggregate": aggregate,
+        "results": rows,
+        "params": sample_params or {},
+    }
+
+
+def compare_system_strategy_presets(
+    stock_codes: list[str],
+    preset_names: list[str],
+    *,
+    start: str,
+    end: str,
+    index_code: str = "system",
+    total_capital: float | None = None,
+    strategy_params: dict | None = None,
+) -> dict[str, Any]:
+    """Compare multiple presets on the same stock basket."""
+    codes = [str(code).strip() for code in stock_codes if str(code).strip()]
+    presets = [str(name).strip() for name in preset_names if str(name).strip()]
+    if not codes:
+        raise ValueError("stock_codes must not be empty")
+    if not presets:
+        raise ValueError("preset_names must not be empty")
+
+    base_params = dict(strategy_params or {})
+    ranked: list[dict[str, Any]] = []
+    code_breakdown: dict[str, list[dict[str, Any]]] = {}
+
+    for preset in presets:
+        params = dict(base_params)
+        params["preset"] = preset
+        batch_result = run_multi_stock_system_backtest(
+            stock_codes=codes,
+            start=start,
+            end=end,
+            index_code=index_code,
+            total_capital=total_capital,
+            strategy_params=params,
+        )
+        aggregate = batch_result["aggregate"]
+        resolved_params = batch_result.get("params", {})
+        ranked.append({
+            "preset": preset,
+            "entry_mode": resolved_params.get("entry_mode"),
+            "buy_threshold": resolved_params.get("buy_threshold"),
+            "momentum_stop_loss": resolved_params.get("momentum_stop_loss"),
+            "momentum_trailing_stop": resolved_params.get("momentum_trailing_stop"),
+            "momentum_time_stop_days": resolved_params.get("momentum_time_stop_days"),
+            "closed_trade_count": aggregate.get("closed_trade_count", 0),
+            "total_realized_pnl": aggregate.get("total_realized_pnl", 0),
+            "avg_ending_equity": aggregate.get("avg_ending_equity", 0),
+            "worst_max_drawdown_pct": aggregate.get("worst_max_drawdown_pct", 0),
+            "blended_win_rate": aggregate.get("blended_win_rate", 0),
+        })
+        code_breakdown[preset] = batch_result.get("results", [])
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("total_realized_pnl", 0) or 0),
+            -float(item.get("blended_win_rate", 0) or 0),
+            float(item.get("worst_max_drawdown_pct", 0) or 0),
+        )
+    )
+
+    return {
+        "command": "backtest",
+        "action": "system_strategy_preset_compare",
+        "status": "ok",
+        "codes": codes,
+        "presets": presets,
+        "start": start,
+        "end": end,
+        "index_code": index_code,
+        "ranked": ranked,
+        "code_breakdown": code_breakdown,
+    }
+
+
+def _parse_params_json(value: str | None) -> dict:
+    if not value:
+        return {}
+    path = Path(value)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(value)
+
+
+# ---------------------------------------------------------------------------
+# CLI 入口
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="生成系统策略历史回填 fixture，可选直接运行策略回放")
+    parser.add_argument("--code", default="601869", help="股票代码")
+    parser.add_argument("--codes", default=None, help="批量股票代码，支持逗号/斜杠/空格分隔")
+    parser.add_argument("--index", default="system", help="指数代码；system/composite=按当前系统多指数投票")
+    parser.add_argument("--start", default="2025-04-10")
+    parser.add_argument("--end", default="2026-04-10")
+    parser.add_argument("--capital", type=float, default=None, help="覆盖初始资金")
+    parser.add_argument("--preset", default=None, help="回测 preset 名称，例如 aggressive_high_return")
+    parser.add_argument("--compare-presets", default=None, help="横向比较多个 preset，支持逗号分隔")
+    parser.add_argument("--validation-report", action="store_true", help="生成单股策略验证报告")
+    parser.add_argument("--params-json", default=None, help="JSON 字符串或 JSON 文件路径，用于动态覆盖策略参数")
+    parser.add_argument("--run-replay", action="store_true", help="生成 fixture 后立即运行系统策略回放")
+    parser.add_argument("--output", default=None)
+    args = parser.parse_args()
+
+    codes = _parse_symbol_list(args.codes) or [args.code]
+    compare_presets = _parse_symbol_list(args.compare_presets)
+    params_override = _parse_params_json(args.params_json)
+    if args.preset:
+        params_override["preset"] = args.preset
+    capital = args.capital if args.capital is not None else float(get_strategy().get("capital", 450286))
+
+    if args.validation_report:
+        if len(codes) != 1:
+            raise SystemExit("--validation-report 只支持单只股票，请使用 --code 或仅传 1 个 --codes")
+        print(f"正在生成单股验证报告...")
+        validation = run_single_stock_strategy_validation(
+            stock_code=codes[0],
+            start=args.start,
+            end=args.end,
+            index_code=args.index,
+            total_capital=capital,
+            strategy_params=params_override,
+        )
+        out_path = Path(args.output) if args.output else (
+            _PROJECT_ROOT / "data" / "backtest" / f"validation_{codes[0]}_{args.end}.json"
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(render_single_stock_validation_report(validation))
+        print(f"Validation report 已写入: {out_path}")
+        raise SystemExit(0)
+
+    if compare_presets:
+        print(f"正在比较 {len(compare_presets)} 个 preset，股票数 {len(codes)}...")
+        compare_result = compare_system_strategy_presets(
+            stock_codes=codes,
+            preset_names=compare_presets,
+            start=args.start,
+            end=args.end,
+            index_code=args.index,
+            total_capital=capital,
+            strategy_params=params_override,
+        )
+        out_path = Path(args.output) if args.output else (
+            _PROJECT_ROOT / "data" / "backtest" / f"preset_compare_{len(codes)}stocks_{args.end}.json"
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(compare_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("")
+        for item in compare_result["ranked"]:
+            print(
+                f"{item['preset']}: "
+                f"收益{item['total_realized_pnl']:+.2f} "
+                f"交易{item['closed_trade_count']}笔 "
+                f"胜率{item['blended_win_rate']:.1f}% "
+                f"最差回撤{item['worst_max_drawdown_pct']:+.2f}%"
+            )
+        print(f"\nPreset compare 已写入: {out_path}")
+        raise SystemExit(0)
+
+    if len(codes) > 1:
+        print(f"正在批量回放 {len(codes)} 只股票...")
+        batch_result = run_multi_stock_system_backtest(
+            stock_codes=codes,
+            start=args.start,
+            end=args.end,
+            index_code=args.index,
+            total_capital=capital,
+            strategy_params=params_override,
+        )
+        out_path = Path(args.output) if args.output else (
+            _PROJECT_ROOT / "data" / "backtest" / f"system_batch_{len(codes)}stocks_{args.end}.json"
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(batch_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        agg = batch_result["aggregate"]
+        print(
+            "批量回放: "
+            f"收益{agg.get('total_realized_pnl', 0):+.2f} "
+            f"交易{agg.get('closed_trade_count', 0)}笔 "
+            f"胜率{agg.get('blended_win_rate', 0):.1f}% "
+            f"最差回撤{agg.get('worst_max_drawdown_pct', 0):+.2f}%"
+        )
+        for row in batch_result["results"]:
+            print(
+                f"  {row['code']}: "
+                f"{row['total_realized_pnl']:+.2f} / "
+                f"{row['closed_trade_count']}笔 / "
+                f"DD {row['max_drawdown_pct']:+.2f}%"
+            )
+        print(f"\nBatch result 已写入: {out_path}")
+        raise SystemExit(0)
+
+    print(f"正在拉取数据...")
+    fixture = build_replay_fixture(
+        stock_code=codes[0],
+        start=args.start,
+        end=args.end,
+        index_code=args.index,
+        total_capital=capital,
+        strategy_params=params_override,
+    )
+
+    out_path = Path(args.output) if args.output else (
+        _PROJECT_ROOT / "data" / "backtest" / f"fixture_real_{codes[0]}_{args.end}.json"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 打印摘要
+    signals = {}
+    for day, d in sorted(fixture["daily_data"].items()):
+        sig = d["market_signal"]
+        signals[sig] = signals.get(sig, 0) + 1
+    print(f"\n大盘信号分布: {signals}")
+    veto_stats = {}
+    for day, d in sorted(fixture["daily_data"].items()):
+        for cand in d["candidates"]:
+            for v in cand.get("veto_signals", []):
+                veto_stats[v] = veto_stats.get(v, 0) + 1
+    print(f"Veto 分布: {veto_stats}")
+    trade_days = len(fixture["daily_data"])
+    no_veto = sum(
+        1 for d in fixture["daily_data"].values()
+        if not d["candidates"][0].get("veto_signals")
+        and d["market_signal"] in ("GREEN", "YELLOW")
+    )
+    print(f"可交易天数: {no_veto}/{trade_days}")
+    print(f"\nFixture 已写入: {out_path}")
+
+    if args.run_replay:
+        from scripts.backtest.strategy_replay import run_strategy_replay
+
+        result = run_strategy_replay(
+            daily_data=fixture["daily_data"],
+            start=args.start,
+            end=args.end,
+            total_capital=fixture["total_capital"],
+            params=fixture["params"],
+        )
+        summary = result.get("summary", {})
+        result_path = out_path.with_name(out_path.stem.replace("fixture", "replay") + ".json")
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            "策略回放: "
+            f"交易{summary.get('closed_trade_count', 0)}笔 "
+            f"胜率{summary.get('win_rate', 0)}% "
+            f"累计盈亏{summary.get('total_realized_pnl', 0):+.2f} "
+            f"最大回撤{summary.get('max_drawdown_pct', 0):+.2f}% "
+            f"期末权益{summary.get('ending_equity', 0):.2f}"
+        )
+        print(f"Replay 已写入: {result_path}")
