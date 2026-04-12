@@ -811,6 +811,17 @@ def run() -> dict:
         _logger.info(">> 更新候选池总览...")
         vault.write_candidate_pool(today_str)
 
+        _logger.info(">> 舆情预抓取（为次日早晨预热缓存）...")
+        try:
+            from scripts.pipeline.sentiment_monitor import prefetch_news
+            pf = prefetch_news()
+            _logger.info(
+                f"  预抓取完成: {pf.get('prefetched_count', 0)} 只, "
+                f"错误 {pf.get('error_count', 0)} 只"
+            )
+        except Exception as pf_exc:
+            _logger.warning(f"  舆情预抓取失败（不影响主流程）: {pf_exc}")
+
         return {
             "market_data": market_data,
             "position_changes": position_changes,

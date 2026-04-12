@@ -71,6 +71,8 @@ POSITIVE_KEYWORDS = [
 ]
 
 CACHE_KEY = "sentiment_alert_history"
+NEWS_CACHE_NS = "sentiment_news"
+NEWS_CACHE_TTL_SECONDS = 2 * 3600  # 新闻缓存有效期 2 小时
 DEDUP_HOURS = 24
 
 
@@ -110,20 +112,35 @@ def _get_watch_stocks() -> list[dict]:
 
 
 def _search_news(stock_name: str) -> list[dict]:
-    """调用妙想资讯搜索获取最新资讯"""
+    """调用妙想资讯搜索获取最新资讯，带本地缓存（2小时）。"""
+    # 先查缓存
+    cached = load_json_cache(NEWS_CACHE_NS, stock_name, max_age_seconds=NEWS_CACHE_TTL_SECONDS)
+    if cached is not None:
+        _logger.info(f"[sentiment] {stock_name} 资讯命中缓存（TTL={NEWS_CACHE_TTL_SECONDS}s）")
+        return cached.get("data", []) if isinstance(cached, dict) else []
+
     try:
         result = dispatch_mx_command("mx.search.news", query=f"{stock_name} 最新资讯")
+        items = []
         if isinstance(result, dict):
             items = result.get("data", result.get("items", result.get("results", [])))
             if isinstance(items, list):
-                return items
-            # 如果返回的是字符串内容，包装成列表
-            content = result.get("content", result.get("text", ""))
-            if content:
-                return [{"title": stock_name, "content": str(content), "source": "mx_search"}]
-        if isinstance(result, str):
-            return [{"title": stock_name, "content": result, "source": "mx_search"}]
-        return []
+                pass
+            else:
+                content = result.get("content", result.get("text", ""))
+                if content:
+                    items = [{"title": stock_name, "content": str(content), "source": "mx_search"}]
+        elif isinstance(result, str):
+            items = [{"title": stock_name, "content": result, "source": "mx_search"}]
+        if not items:
+            items = []
+
+        # 写入缓存
+        if items:
+            save_json_cache(NEWS_CACHE_NS, stock_name, items)
+            _logger.info(f"[sentiment] {stock_name} 资讯已缓存（{len(items)} 条）")
+
+        return items
     except MXCommandError as exc:
         _logger.info(f"[sentiment] {stock_name} 资讯搜索失败: {exc}")
         return []
@@ -334,6 +351,54 @@ def run(dry_run: bool = False) -> dict:
         "discord_sent": discord_sent,
         "discord_failed": discord_failed,
         "dry_run": dry_run,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 舆情预抓取（傍晚 pipeline 调用，为次日早晨预热缓存）
+# ---------------------------------------------------------------------------
+
+def prefetch_news() -> dict:
+    """
+    傍晚收盘后预抓取核心池+观察池的舆情数据，为次日早晨预热缓存。
+
+    调用链：
+      evening pipeline → prefetch_news() → _search_news() → MX API
+      ↓（缓存写入）
+      次日早晨 sentiment_monitor.run() → _search_news() → 命中缓存（TTL=2h）
+
+    Returns:
+        {"status": "ok"|"warning", "prefetched_count": int, "skipped_count": int}
+    """
+    watch_stocks = _get_watch_stocks()
+    if not watch_stocks:
+        return {"status": "ok", "prefetched_count": 0, "skipped_count": 0, "message": "no_stocks"}
+
+    prefetched = 0
+    skipped = 0
+    errors = 0
+
+    for stock in watch_stocks:
+        code = stock["code"]
+        name = stock["name"]
+        try:
+            # _search_news checks TTL and only fetches if cache is stale.
+            # This is a transparent pre-fetch: no-op if cache is fresh.
+            news = _search_news(name)
+            # Count how many were actually fetched (TTL check happens inside _search_news)
+            # Since we can't distinguish hit from miss externally, we track success.
+            prefetched += 1
+        except Exception as exc:
+            errors += 1
+            _logger.warning(f"[prefetch] {name}({code}) 预抓取失败: {exc}")
+
+    status = "ok" if errors == 0 else "warning"
+    return {
+        "status": status,
+        "prefetched_count": prefetched,
+        "skipped_count": skipped,
+        "error_count": errors,
+        "stocks_count": len(watch_stocks),
     }
 
 

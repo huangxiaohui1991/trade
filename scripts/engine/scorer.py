@@ -12,10 +12,12 @@ engine/scorer.py — 四维评分引擎
   - veto 触发直接返回 0 分
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import warnings
-from typing import Optional
+from typing import Optional, Any
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -28,6 +30,7 @@ from scripts.engine.technical import get_technical, normalize_code
 from scripts.engine.financial import get_financial
 from scripts.engine.flow import get_fund_flow
 from scripts.utils.config_loader import get_strategy
+from scripts.utils.exceptions import DataSourceError, ScoreError
 from scripts.utils.logger import get_logger
 
 _logger = get_logger("scorer")
@@ -38,7 +41,7 @@ WARNING_ONLY_SIGNALS = {"consecutive_outflow_warn"}
 # 工具
 # ---------------------------------------------------------------------------
 
-def _score_technical(code: str, tech_data: dict) -> dict:
+def _score_technical(code: str, tech_data: dict[str, Any]) -> dict[str, Any]:
     """
     技术面评分（满分 3 分）— V1.0 策略
     金叉信号(1) + 量比(0.5) + RSI(0.5) + 均线排列(0.5) + 动量(0.5)
@@ -141,7 +144,7 @@ def _score_technical(code: str, tech_data: dict) -> dict:
     }
 
 
-def _score_fundamental(code: str, fin_data: dict) -> dict:
+def _score_fundamental(code: str, fin_data: dict[str, Any]) -> dict[str, Any]:
     """
     基本面评分（满分 3 分）
     ROE(1) + 营收增长(1) + 现金流(1)
@@ -202,7 +205,7 @@ def _score_fundamental(code: str, fin_data: dict) -> dict:
     }
 
 
-def _score_fund_flow(code: str, flow_data: dict) -> dict:
+def _score_fund_flow(code: str, flow_data: dict[str, Any]) -> dict[str, Any]:
     """
     资金流评分（满分 2 分）
     主力净流入(1) + 北向(1)
@@ -240,7 +243,7 @@ def _score_fund_flow(code: str, flow_data: dict) -> dict:
     }
 
 
-def _score_sentiment(code: str, name: str) -> dict:
+def _score_sentiment(code: str, name: str) -> dict[str, Any]:
     """
     舆情评分（满分 3 分）
     优先使用妙想资讯搜索获取研报/新闻，fallback 返回中性分数。
@@ -248,7 +251,10 @@ def _score_sentiment(code: str, name: str) -> dict:
     try:
         from scripts.mx.mx_search import MXSearch
         mx = MXSearch()
-        result = mx.search(f"{name} 最新研报 机构评级")
+        try:
+            result = mx.search(f"{name} 最新研报 机构评级")
+        except Exception as e:
+            raise DataSourceError(str(e)) from e
 
         data = result.get("data", {})
         inner_data = data.get("data", {})
@@ -293,7 +299,7 @@ def _score_sentiment(code: str, name: str) -> dict:
             "detail": f"研报{report_count}篇 买入{positive_count} 减持{negative_count}（MX搜索）",
             "sentiment": sentiment,
         }
-    except Exception as e:
+    except DataSourceError as e:
         _logger.info(f"[sentiment] MX搜索失败 {name}: {e}")
         return {
             "score": 1.5,
@@ -302,7 +308,7 @@ def _score_sentiment(code: str, name: str) -> dict:
         }
 
 
-def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
+def apply_veto(tech_data: dict[str, Any], flow_data: dict[str, Any], strategy: dict[str, Any]) -> list[str]:
     """
     检查一票否决规则
 
@@ -350,7 +356,7 @@ def apply_veto(tech_data: dict, flow_data: dict, strategy: dict) -> list:
     return veto_signals
 
 
-def split_veto_signals(veto_signals: list | None) -> tuple[list, list]:
+def split_veto_signals(veto_signals: list[str] | None) -> tuple[list[str], list[str]]:
     """将硬性 veto 和仅预警信号分开。"""
     hard_veto = []
     warnings = []
@@ -362,7 +368,7 @@ def split_veto_signals(veto_signals: list | None) -> tuple[list, list]:
     return hard_veto, warnings
 
 
-def describe_risk_flags(score_result: dict) -> str:
+def describe_risk_flags(score_result: dict[str, Any]) -> str:
     """给评分结果生成简短风险描述。"""
     hard_veto, warnings = split_veto_signals(score_result.get("veto_signals", []))
     if hard_veto:
@@ -372,7 +378,7 @@ def describe_risk_flags(score_result: dict) -> str:
     return ""
 
 
-def normalize_data_quality(value) -> str:
+def normalize_data_quality(value: Any) -> str:
     """归一化评分数据质量状态。"""
     quality = str(value or "ok").strip().lower()
     if quality in {"ok", "degraded", "error"}:
@@ -380,7 +386,7 @@ def normalize_data_quality(value) -> str:
     return "ok" if not quality else quality
 
 
-def _normalize_missing_fields(value) -> list[str]:
+def _normalize_missing_fields(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -390,12 +396,12 @@ def _normalize_missing_fields(value) -> list[str]:
     return [str(value).strip()] if str(value).strip() else []
 
 
-def data_quality_blocks_auto_buy(score_result: dict) -> bool:
+def data_quality_blocks_auto_buy(score_result: dict[str, Any]) -> bool:
     """数据质量非 ok 时，不允许作为自动新增买入依据。"""
     return normalize_data_quality(score_result.get("data_quality", "ok")) != "ok"
 
 
-def data_quality_review_reason(score_result: dict) -> str:
+def data_quality_review_reason(score_result: dict[str, Any]) -> str:
     """生成数据质量门禁的人类可读原因。"""
     quality = normalize_data_quality(score_result.get("data_quality", "ok"))
     missing = _normalize_missing_fields(
@@ -411,7 +417,7 @@ def data_quality_review_reason(score_result: dict) -> str:
     return f"数据质量异常:{quality}，人工复核"
 
 
-def get_recommendation(score_result: dict) -> str:
+def get_recommendation(score_result: dict[str, Any]) -> str:
     """根据统一评分结果生成建议文案。"""
     total = float(score_result.get("total_score", 0) or 0)
     hard_veto, warnings = split_veto_signals(score_result.get("veto_signals", []))
@@ -433,7 +439,7 @@ def get_recommendation(score_result: dict) -> str:
     return "❌ 规避" + ("（流出预警）" if warnings else "")
 
 
-def score(code: str, name: Optional[str] = None) -> dict:
+def score(code: str, name: str | None = None) -> dict[str, Any]:
     """
     对单个股票进行四维评分
 
@@ -542,7 +548,7 @@ def _parse_mx_float(row: dict, *keys) -> float:
     return 0.0
 
 
-def _get_real_ma_arrangement(code: str, name: str) -> dict:
+def _get_real_ma_arrangement(code: str, name: str) -> dict[str, Any]:
     """
     补调 MX 日线，计算真实均线排列和 5 日动量。
     返回 {"ma5": float, "ma20": float, "ma60": float, "momentum_5d": float}
@@ -551,7 +557,10 @@ def _get_real_ma_arrangement(code: str, name: str) -> dict:
     try:
         from scripts.engine.technical import _get_hist_data
         import pandas as pd
-        df = _get_hist_data(code, 120)
+        try:
+            df = _get_hist_data(code, 120)
+        except Exception as e:
+            raise DataSourceError(str(e)) from e
         if df is None or df.empty or len(df) < 20:
             return {}
         df = df.copy()
@@ -571,12 +580,12 @@ def _get_real_ma_arrangement(code: str, name: str) -> dict:
         else:
             momentum_5d = 0
         return {"ma5": ma5, "ma20": ma20, "ma60": ma60, "momentum_5d": round(momentum_5d, 2)}
-    except Exception as e:
+    except DataSourceError as e:
         _logger.info(f"[_get_real_ma] 补调日线失败 {code}: {e}")
         return {}
 
 
-def _get_mx_financial_supplement(code: str, name: str) -> dict:
+def _get_mx_financial_supplement(code: str, name: str) -> dict[str, Any]:
     """
     补调营收增长率和经营现金流。
     优先 MX mx_data，失败则 fallback 到 get_financial()（MX → 东财 → 新浪）。
@@ -587,7 +596,10 @@ def _get_mx_financial_supplement(code: str, name: str) -> dict:
     try:
         from scripts.mx.mx_data import MXData
         mx = MXData()
-        result = mx.query(f"{name} 最近一期营收同比增长率 经营活动现金流净额")
+        try:
+            result = mx.query(f"{name} 最近一期营收同比增长率 经营活动现金流净额")
+        except Exception as e:
+            raise DataSourceError(str(e)) from e
         tables, _, _, err = MXData.parse_result(result)
         if not err and tables:
             for table in tables:
@@ -609,14 +621,17 @@ def _get_mx_financial_supplement(code: str, name: str) -> dict:
                             parsed.setdefault("operating_cash_flow", num)
             if parsed:
                 _logger.info(f"[mx_fin_sup] {name}: rev={parsed.get('revenue_growth')} cf={parsed.get('cash_flow_positive')}")
-    except Exception as e:
+    except DataSourceError as e:
         _logger.info(f"[mx_fin_sup] {name} MX 失败: {e}")
 
     # 2. MX 缺字段时，fallback 到 get_financial（MX → 东财 → 新浪完整链路）
     if "revenue_growth" not in parsed or "cash_flow_positive" not in parsed:
         try:
             from scripts.engine.financial import get_financial
-            fin = get_financial(code)
+            try:
+                fin = get_financial(code)
+            except Exception as e:
+                raise DataSourceError(str(e)) from e
             if "revenue_growth" not in parsed and fin.get("revenue_growth") is not None:
                 parsed["revenue_growth"] = fin["revenue_growth"]
             if "cash_flow_positive" not in parsed and fin.get("cash_flow_positive") is not None:
@@ -624,7 +639,7 @@ def _get_mx_financial_supplement(code: str, name: str) -> dict:
                 parsed.setdefault("operating_cash_flow", fin.get("operating_cash_flow", 0))
             if parsed.get("revenue_growth") is not None or parsed.get("cash_flow_positive") is not None:
                 _logger.info(f"[mx_fin_sup] {name} fallback补充: rev={parsed.get('revenue_growth')} cf={parsed.get('cash_flow_positive')}")
-        except Exception as e:
+        except DataSourceError as e:
             _logger.info(f"[mx_fin_sup] {name} fallback 失败: {e}")
 
     return parsed
@@ -637,7 +652,10 @@ def _check_earnings_bomb(code: str, name: str) -> bool:
     try:
         from scripts.mx.mx_data import MXData
         mx = MXData()
-        result = mx.query(f"{name} 最近一期净利润同比增长率")
+        try:
+            result = mx.query(f"{name} 最近一期净利润同比增长率")
+        except Exception as e:
+            raise DataSourceError(str(e)) from e
         tables, _, _, err = MXData.parse_result(result)
         if err or not tables:
             return False
@@ -656,11 +674,11 @@ def _check_earnings_bomb(code: str, name: str) -> bool:
                         except (ValueError, TypeError):
                             pass
         return False
-    except Exception:
+    except DataSourceError:
         return False
 
 
-def _score_from_mx_data(code: str, name: str, mx_row: dict,
+def _score_from_mx_data(code: str, name: str, mx_row: dict[str, Any],
                          skip_sentiment: bool = False) -> dict:
     """
     用妙想选股返回的行数据 + 补调数据做四维评分（快速模式）。
@@ -848,7 +866,7 @@ def _score_from_mx_data(code: str, name: str, mx_row: dict,
     }
 
 
-def batch_score(stocks: list) -> list:
+def batch_score(stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     批量评分
 
@@ -877,11 +895,17 @@ def batch_score(stocks: list) -> list:
             mx_data = item.get("mx_data")
             try:
                 if mx_data:
-                    r = _score_from_mx_data(code, name, mx_data, skip_sentiment=True)
+                    try:
+                        r = _score_from_mx_data(code, name, mx_data, skip_sentiment=True)
+                    except Exception as e:
+                        raise ScoreError(str(e)) from e
                 else:
-                    r = score(code, name)
+                    try:
+                        r = score(code, name)
+                    except Exception as e:
+                        raise ScoreError(str(e)) from e
                 first_pass.append(r)
-            except Exception as e:
+            except ScoreError as e:
                 _logger.error(f"[scorer] 第一轮评分失败 {code}: {e}")
                 first_pass.append({
                     "code": code, "name": name or code,
@@ -968,7 +992,10 @@ def batch_score(stocks: list) -> list:
             _logger.info(f"[scorer] {r['name']}({code}): 技术{tech_s['score']:.1f} → 总分0.0 ❌ veto:below_ma20")
             continue
 
-            r = score(code, name)
+            try:
+                r = score(code, name)
+            except Exception as e:
+                raise ScoreError(str(e)) from e
             results.append(r)
             _logger.info(
                 f"[scorer] {r['name']}({code}): "
@@ -977,7 +1004,7 @@ def batch_score(stocks: list) -> list:
                 f"→ 总分{r.get('total_score',0):.1f}"
                 + (f" ❌ veto:{','.join(r.get('hard_veto_signals', r.get('veto_signals',[])))}" if r.get('veto_triggered') else "")
             )
-        except Exception as e:
+        except ScoreError as e:
             _logger.error(f"[scorer] 评分失败 {code}: {e}")
             results.append({
                 "code": code, "name": name or code,

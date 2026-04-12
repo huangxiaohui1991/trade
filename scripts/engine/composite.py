@@ -26,6 +26,8 @@ engine/composite.py — 综合决策引擎
   print(decision.action, decision.position_pct, decision.stop_loss)
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
