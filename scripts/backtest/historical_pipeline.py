@@ -49,6 +49,7 @@ from scripts.state import (
     load_market_snapshot_history,
     load_pool_snapshot_history,
 )
+from scripts.state.reason_codes import veto_reason_to_label
 from scripts.utils.config_loader import get_strategy
 
 
@@ -1368,7 +1369,7 @@ def _build_single_stock_daily_rows(stock_code: str, daily_data: dict[str, dict[s
 def _summarize_reason_counts(items: list[str]) -> list[dict[str, Any]]:
     counter = Counter(str(item).strip() for item in items if str(item).strip())
     return [
-        {"reason": reason, "count": count}
+        {"reason": veto_reason_to_label(reason), "count": count}
         for reason, count in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
     ]
 

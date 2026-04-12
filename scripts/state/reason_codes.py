@@ -46,6 +46,17 @@ REASON_CODE_REGISTRY: dict[str, dict[str, str]] = {
     "TRADE_PAPER_RECONCILE_REDUCE": {"category": "trade", "label": "补录缺失卖出", "state": "repair"},
     "RISK_TIME_STOP": {"category": "trade", "label": "时间止损提示", "state": "warning"},
     "RISK_DRAWDOWN_TAKE_PROFIT": {"category": "trade", "label": "回撤止盈提示", "state": "warning"},
+    # ── screen / pipeline ──────────────────────────────────────────────────
+    "SCREEN_ENTRY_SIGNAL_MISSING": {"category": "screen", "label": "缺少入场信号", "state": "block"},
+    "SCREEN_SCORE_BELOW_THRESHOLD": {"category": "screen", "label": "评分低于阈值", "state": "block"},
+    "SCREEN_PORTFOLIO_COOLDOWN": {"category": "screen", "label": "组合冷却中", "state": "block"},
+    "SCREEN_HOLDING_MAX_REACHED": {"category": "screen", "label": "持仓数已达上限", "state": "block"},
+    "SCREEN_WEEKLY_MAX_REACHED": {"category": "screen", "label": "周买入次数已满", "state": "block"},
+    "SCREEN_CAPITAL_LIMIT": {"category": "screen", "label": "资金不足", "state": "block"},
+    "SCREEN_NOT_IN_SCORED_CANDIDATES": {"category": "screen", "label": "不在候选池", "state": "block"},
+    "SCREEN_MARKET_SIGNAL_RED": {"category": "screen", "label": "大盘 RED", "state": "block"},
+    "SCREEN_MARKET_SIGNAL_CLEAR": {"category": "screen", "label": "大盘 CLEAR", "state": "block"},
+    "SCREEN_PORTFOLIO_OR_EXECUTION": {"category": "screen", "label": "组合或执行限制", "state": "block"},
 }
 
 REASON_CODE_ALIASES = {
@@ -58,6 +69,17 @@ REASON_CODE_ALIASES = {
     "trade_portfolio_daily_loss_limit": "TRADE_PORTFOLIO_DAILY_LOSS_LIMIT",
     "trade_consecutive_loss_cooldown": "TRADE_CONSECUTIVE_LOSS_COOLDOWN",
     "trade_position_concentration_warning": "TRADE_POSITION_CONCENTRATION_WARNING",
+    # ── screen / pipeline ──────────────────────────────────────────────
+    "entry_signal_missing": "SCREEN_ENTRY_SIGNAL_MISSING",
+    "score_below_threshold": "SCREEN_SCORE_BELOW_THRESHOLD",
+    "portfolio_cooldown": "SCREEN_PORTFOLIO_COOLDOWN",
+    "holding_max_reached": "SCREEN_HOLDING_MAX_REACHED",
+    "weekly_max_reached": "SCREEN_WEEKLY_MAX_REACHED",
+    "capital_limit": "SCREEN_CAPITAL_LIMIT",
+    "not_in_scored_candidates": "SCREEN_NOT_IN_SCORED_CANDIDATES",
+    "market_signal_red": "SCREEN_MARKET_SIGNAL_RED",
+    "market_signal_clear": "SCREEN_MARKET_SIGNAL_CLEAR",
+    "portfolio_or_execution_constraint": "SCREEN_PORTFOLIO_OR_EXECUTION",
 }
 
 TRADE_REASON_PATTERNS = (
@@ -73,6 +95,68 @@ TRADE_REASON_PATTERNS = (
     (re.compile(r"^\[?RISK_TIME_STOP\]?$", re.IGNORECASE), "RISK_TIME_STOP"),
     (re.compile(r"^\[?RISK_DRAWDOWN_TAKE_PROFIT\]?$", re.IGNORECASE), "RISK_DRAWDOWN_TAKE_PROFIT"),
 )
+
+# ── veto signal → Chinese label ──────────────────────────────────────────────
+VETO_LABEL_MAP: dict[str, str] = {
+    "below_ma20": "股价位于 MA20 下方",
+    "limit_up_today": "今日涨停",
+    "consecutive_outflow": "连续资金净流出",
+    "consecutive_outflow_warn": "连续流出预警（疑似洗盘）",
+    "red_market": "大盘转弱",
+    "ma20_trend_down": "MA20 趋势向下",
+    "earnings_bomb": "近期业绩暴雷",
+    "low_liquidity": "流动性不足",
+    "score_error": "评分计算异常",
+    # 兼容 pool manager 中可能传入的带前缀形式
+    "veto:below_ma20": "股价位于 MA20 下方",
+    "veto:limit_up_today": "今日涨停",
+    "veto:consecutive_outflow": "连续资金净流出",
+    "veto:consecutive_outflow_warn": "连续流出预警（疑似洗盘）",
+    "veto:red_market": "大盘转弱",
+    "veto:ma20_trend_down": "MA20 趋势向下",
+    "veto:earnings_bomb": "近期业绩暴雷",
+    "veto:score_error": "评分计算异常",
+}
+
+
+def parse_veto_reason(reason: str) -> list[str]:
+    """从 'veto:xxx,yyy' 格式中解析出各个 veto 信号。"""
+    text = str(reason or "").strip()
+    if text.startswith("veto:"):
+        parts = text[5:].split(",")
+        return [p.strip() for p in parts if p.strip()]
+    return []
+
+
+def veto_reason_to_label(reason: str) -> str:
+    """
+    将原始 reason 字符串转换为中文标签。
+    支持：
+      - 简单字符串：直接查 SCREEN_*/VETO_LABEL_MAP 别名
+      - veto:xxx,yyy 格式：各信号分别查表后用 + 连接
+    """
+    text = str(reason or "").strip()
+    if not text:
+        return text
+
+    # veto:xxx,yyy 格式 → 组合标签
+    veto_signals = parse_veto_reason(text)
+    if veto_signals:
+        labels = [VETO_LABEL_MAP.get(s, s) for s in veto_signals]
+        return " + ".join(labels)
+
+    # 直接别名查表
+    alias = REASON_CODE_ALIASES.get(text.lower())
+    if alias and alias in REASON_CODE_REGISTRY:
+        return REASON_CODE_REGISTRY[alias]["label"]
+
+    # registry 直接命中
+    meta = REASON_CODE_REGISTRY.get(text.upper(), {})
+    if meta.get("label"):
+        return meta["label"]
+
+    return text
+
 
 
 def _dedupe(items: list[str]) -> list[str]:
