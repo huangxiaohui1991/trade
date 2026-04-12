@@ -938,8 +938,8 @@ def _project_pool_markdown(snapshot: dict) -> dict:
     core_content = _render_pool_markdown("核心池", ["核心池", "选股"], snapshot.get("core_pool", []), snapshot_date)
     watch_content = _render_pool_markdown("观察池", ["观察池", "选股"], snapshot.get("watch_pool", []), snapshot_date)
 
-    core_path = Path(vault.vault_path) / "04-选股" / "核心池.md"
-    watch_path = Path(vault.vault_path) / "04-选股" / "观察池.md"
+    core_path = Path(vault.vault_path) / vault.core_pool_path
+    watch_path = Path(vault.vault_path) / vault.watch_pool_path
     core_path.parent.mkdir(parents=True, exist_ok=True)
     watch_path.parent.mkdir(parents=True, exist_ok=True)
     core_path.write_text(core_content, encoding="utf-8")
@@ -949,8 +949,9 @@ def _project_pool_markdown(snapshot: dict) -> dict:
 
 def _bootstrap_pool_entries() -> list[dict]:
     stocks_cfg = get_stocks()
-    core_rows = {str(row.get("代码", "")).strip(): row for row in _load_md_rows("04-选股/核心池.md")}
-    watch_rows = {str(row.get("代码", "")).strip(): row for row in _load_md_rows("04-选股/观察池.md")}
+    vault = ObsidianVault()
+    core_rows = {str(row.get("代码", "")).strip(): row for row in _load_md_rows(vault.core_pool_path)}
+    watch_rows = {str(row.get("代码", "")).strip(): row for row in _load_md_rows(vault.watch_pool_path)}
     snapshot_date = _today_str()
     entries = []
 
@@ -1207,7 +1208,7 @@ def _bootstrap_trade_events() -> list[dict]:
     vault = ObsidianVault()
     events = _portfolio_weekly_trade_events(source="bootstrap:weekly_record")
 
-    shadow_path = Path(vault.vault_path) / "03-复盘" / "模拟盘" / "交易记录.md"
+    shadow_path = Path(vault.vault_path) / vault.paper_trade_dir / "交易记录.md"
     if shadow_path.exists():
         content = shadow_path.read_text(encoding="utf-8")
         tables = parse_md_table(content)
@@ -1966,8 +1967,17 @@ def _shadow_trade_snapshot() -> dict:
     try:
         from scripts.pipeline.shadow_trade import get_status, paper_trade_consistency_snapshot
 
-        consistency = paper_trade_consistency_snapshot(window=180)
-        shadow_status = get_status()
+        consistency = paper_trade_consistency_snapshot(window=180) or {
+            "ok": False,
+            "status": "error",
+            "error": "empty_consistency_snapshot",
+            "inferred_open_codes": [],
+            "actual_open_codes": [],
+            "event_only_codes": [],
+            "broker_only_codes": [],
+            "event_trade_count": 0,
+        }
+        shadow_status = get_status() or {}
         actual_positions = [
             {
                 "code": str(item.get("code", "")).strip(),
@@ -3908,8 +3918,8 @@ def audit_state() -> dict:
         return scores
 
     md_view = {
-        "core": _filtered_md_scores("04-选股/核心池.md"),
-        "watch": _filtered_md_scores("04-选股/观察池.md"),
+        "core": _filtered_md_scores(ObsidianVault().core_pool_path),
+        "watch": _filtered_md_scores(ObsidianVault().watch_pool_path),
     }
 
     def _compare_pool_view(view: dict[str, dict[str, float]], expected_view: dict[str, dict[str, float]]) -> dict:

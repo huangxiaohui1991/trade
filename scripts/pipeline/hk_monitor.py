@@ -258,7 +258,7 @@ def _read_hk_from_markdown() -> list[dict]:
         from scripts.utils.obsidian import ObsidianVault
         from scripts.utils.parser import parse_portfolio
         vault = ObsidianVault()
-        portfolio_path = os.path.join(vault.vault_path, "01-持仓", "portfolio.md")
+        portfolio_path = os.path.join(vault.vault_path, vault.portfolio_path)
         if not os.path.exists(portfolio_path):
             return []
         data = parse_portfolio(portfolio_path)

@@ -321,7 +321,7 @@ def _save_candidate_cache(cache_key: str, candidates: list, source: str, extra_m
 def _write_market_scan_watchlist(results: list) -> str:
     """将市场扫描中可操作的股票写入观察池候选文件。"""
     vault = ObsidianVault()
-    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+    report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
     path = report_dir / f"市场扫描候选_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
 
@@ -345,7 +345,7 @@ def _write_market_scan_watchlist(results: list) -> str:
 
 def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
     vault = ObsidianVault()
-    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+    report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
     path = report_dir / f"池子调整建议_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     meta = meta or {}
@@ -535,7 +535,7 @@ def _write_screening_result(results: list, pool_name: str, source: str) -> str:
     date_str = datetime.now().strftime("%Y%m%d")
     time_str = datetime.now().strftime("%H%M%S")
 
-    report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+    report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"筛选结果_{pool_name}_{date_str}_{time_str}.md"
 
@@ -710,6 +710,10 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
             history_group_id=history_group_id,
             metadata=history_meta,
         )
+        try:
+            ObsidianVault().write_today_decision(today_decision)
+        except Exception as exc:
+            _logger.warning(f"[SCREENER] 今日决策写入失败: {exc}")
         save_candidate_snapshot_history(
             scored,
             snapshot_date=today_str,

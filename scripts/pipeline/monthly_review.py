@@ -2,7 +2,7 @@
 """
 pipeline/monthly_review.py — 月度复盘自动生成
 
-从结构化账本统计月度数据，生成 03-复盘/月/YYYY-MM.md。
+从结构化账本统计月度数据，生成 03-分析/月复盘/YYYY-MM.md。
 
 功能：
   - 月度 P&L、胜率、盈亏比、最大回撤
@@ -375,7 +375,7 @@ def run(month: str | None = None) -> dict:
             trading_day_count,
         )
 
-        review_dir = Path(vault.vault_path) / "03-复盘" / "月"
+        review_dir = Path(vault.vault_path) / vault.monthly_review_dir
         review_dir.mkdir(parents=True, exist_ok=True)
         report_path = review_dir / f"{month}.md"
         report_path.write_text(report_content, encoding="utf-8")

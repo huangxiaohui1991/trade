@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -93,6 +94,53 @@ class TradeMxCliTests(unittest.TestCase):
         self.assertEqual(result["action"], "health")
         self.assertEqual(result["health"]["available_count"], 4)
         mx_mock.assert_called_once()
+
+    def test_doctor_accepts_discord_bot_mode(self):
+        import scripts.cli.trade as trade
+
+        old_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+        old_bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+        old_channel_id = os.environ.get("DISCORD_CHANNEL_ID")
+        old_dm_user_id = os.environ.get("DISCORD_DM_USER_ID")
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        os.environ["DISCORD_BOT_TOKEN"] = "bot-token"
+        os.environ["DISCORD_CHANNEL_ID"] = "channel-id"
+        os.environ.pop("DISCORD_DM_USER_ID", None)
+        try:
+            with mock.patch.object(trade, "ObsidianVault", return_value=mock.Mock(vault_path=str(trade.PROJECT_ROOT))), mock.patch.object(
+                trade, "_check_path_writable", return_value={"ok": True}
+            ), mock.patch.object(
+                trade, "load_daily_state", return_value={"date": "2026-04-12", "pipelines": {}}
+            ), mock.patch.object(
+                trade, "_combined_state_audit", return_value={"status": "ok", "snapshot_date": "2026-04-12", "checks": {}}
+            ), mock.patch.object(
+                trade, "_data_source_health_snapshot", return_value={"ok": True, "status": "ok", "warning": []}
+            ), mock.patch.object(
+                trade, "_requests_ok", return_value={"ok": True}
+            ), mock.patch.object(
+                trade, "get_notification", return_value={"discord": {"webhook_url": "", "bot_token": "", "channel_id": ""}}
+            ):
+                payload = trade.doctor()
+        finally:
+            if old_webhook is None:
+                os.environ.pop("DISCORD_WEBHOOK_URL", None)
+            else:
+                os.environ["DISCORD_WEBHOOK_URL"] = old_webhook
+            if old_bot_token is None:
+                os.environ.pop("DISCORD_BOT_TOKEN", None)
+            else:
+                os.environ["DISCORD_BOT_TOKEN"] = old_bot_token
+            if old_channel_id is None:
+                os.environ.pop("DISCORD_CHANNEL_ID", None)
+            else:
+                os.environ["DISCORD_CHANNEL_ID"] = old_channel_id
+            if old_dm_user_id is None:
+                os.environ.pop("DISCORD_DM_USER_ID", None)
+            else:
+                os.environ["DISCORD_DM_USER_ID"] = old_dm_user_id
+
+        self.assertTrue(payload["checks"]["discord_webhook"]["configured"])
+        self.assertEqual(payload["checks"]["discord_webhook"]["mode"], "bot_channel")
 
 
 if __name__ == "__main__":

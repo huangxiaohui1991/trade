@@ -37,6 +37,7 @@ from scripts.engine.scorer import (
 from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
+from scripts.utils.obsidian import ObsidianVault
 
 _logger = get_logger("pipeline.shadow_trade")
 
@@ -127,10 +128,10 @@ def _log_trade(action: str, code: str, name: str, shares: int,
                source: str = "shadow_trade", metadata: dict | None = None) -> None:
     """
     记录模拟盘交易到 Obsidian 交易日志。
-    追加到 03-复盘/模拟盘/交易记录.md
+    追加到 02-运行/模拟盘/交易记录.md
     """
-    vault_path = os.environ.get("AStockVault", _PROJECT_ROOT)
-    log_dir = Path(vault_path) / "03-复盘" / "模拟盘"
+    vault = ObsidianVault()
+    log_dir = Path(vault.vault_path) / vault.paper_trade_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "交易记录.md"
 
@@ -1041,7 +1042,11 @@ def _get_positions(_client: object = None) -> list:
         result = _client.positions()
     else:
         result = _query_mx("mx.moni.positions", fallback={})
+    if not isinstance(result, dict):
+        return []
     data = result.get("data", {})
+    if not isinstance(data, dict):
+        return []
     return data.get("posList", [])
 
 
@@ -1051,7 +1056,11 @@ def _get_balance(_client: object = None) -> dict:
         result = _client.balance()
     else:
         result = _query_mx("mx.moni.balance", fallback={})
+    if not isinstance(result, dict):
+        result = {}
     data = result.get("data", {})
+    if not isinstance(data, dict):
+        data = {}
     return {
         "total_assets": data.get("totalAssets", 0),
         "available": data.get("availBalance", 0),
@@ -1067,7 +1076,11 @@ def _get_orders(_client: object = None) -> list:
         result = _client.orders()
     else:
         result = _query_mx("mx.moni.orders", fallback={})
+    if not isinstance(result, dict):
+        return []
     data = result.get("data", {})
+    if not isinstance(data, dict):
+        return []
     return data.get("orderList", data.get("list", []))
 
 
@@ -1640,8 +1653,8 @@ def generate_report() -> str:
     content = "\n".join(lines)
 
     # 写入 Obsidian
-    vault_path = os.environ.get("AStockVault", _PROJECT_ROOT)
-    report_dir = Path(vault_path) / "03-复盘" / "模拟盘"
+    vault = ObsidianVault()
+    report_dir = Path(vault.vault_path) / vault.paper_trade_dir
     report_dir.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
     report_path = report_dir / f"模拟盘_{date_str}.md"

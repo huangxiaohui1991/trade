@@ -142,6 +142,22 @@ def _make_manage_runner(client_cls: Optional[type]) -> Callable[..., Any]:
     return runner
 
 
+def _looks_like_success(result: Any) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    code = str(result.get("code", "")).strip()
+    status = str(result.get("status", result.get("message", ""))).strip().lower()
+    if code in {"200", "0"}:
+        return True
+    return any(token in status for token in ("success", "filled", "done", "成交", "已成交"))
+
+
+def _should_log_cli_trade(result: Any, *, use_market_price: bool) -> bool:
+    if not use_market_price:
+        return False
+    return _looks_like_success(result)
+
+
 def _make_trade_runner(client_cls: Optional[type], side: str) -> Callable[..., Any]:
     def runner(
         stock_code: str,
@@ -154,27 +170,27 @@ def _make_trade_runner(client_cls: Optional[type], side: str) -> Callable[..., A
         instance = _ensure_client(client, client_cls)
         result = instance.trade(side, stock_code, quantity, price, use_market_price)
 
-        # 写入结构化 ledger + 模拟盘交易记录
-        try:
-            from scripts.pipeline.shadow_trade import _log_trade
-            action = "买入" if side == "buy" else "卖出"
-            trade_price = float(price or 0)
-            if trade_price <= 0 and use_market_price:
-                # 市价单，尝试从返回结果取价格
-                trade_price = float(result.get("price", result.get("成交价", 0)) or 0)
-            reason_code = f"CLI_MONI_{side.upper()}"
-            _log_trade(
-                action=action,
-                code=stock_code,
-                name=result.get("name", result.get("股票名称", stock_code)),
-                shares=int(quantity),
-                price=trade_price,
-                reason=f"CLI mx run moni.{side}",
-                reason_code=reason_code,
-                source="cli_mx_trade",
-            )
-        except Exception:
-            pass  # 日志写入失败不阻断交易
+        if _should_log_cli_trade(result, use_market_price=use_market_price):
+            # 只有明确成交的市价单才直接写入事件流；限价单/未知状态交给 broker 同步。
+            try:
+                from scripts.pipeline.shadow_trade import _log_trade
+                action = "买入" if side == "buy" else "卖出"
+                trade_price = float(price or 0)
+                if trade_price <= 0 and use_market_price and isinstance(result, Mapping):
+                    trade_price = float(result.get("price", result.get("成交价", 0)) or 0)
+                reason_code = f"CLI_MONI_{side.upper()}"
+                _log_trade(
+                    action=action,
+                    code=stock_code,
+                    name=result.get("name", result.get("股票名称", stock_code)) if isinstance(result, Mapping) else stock_code,
+                    shares=int(quantity),
+                    price=trade_price,
+                    reason=f"CLI mx run moni.{side}",
+                    reason_code=reason_code,
+                    source="cli_mx_trade",
+                )
+            except Exception:
+                pass  # 日志写入失败不阻断交易
 
         return result
 

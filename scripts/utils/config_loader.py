@@ -16,6 +16,7 @@ _CONFIG_PATHS = {
     "strategy": _PROJECT_ROOT / "config" / "strategy.yaml",
     "stocks": _PROJECT_ROOT / "config" / "stocks.yaml",
     "notification": _PROJECT_ROOT / "config" / "notification.yaml",
+    "paths": _PROJECT_ROOT / "config" / "paths.yaml",
 }
 
 # In-memory cache so we only read each file once
@@ -29,6 +30,9 @@ def _load_file(name: str) -> dict:
     if name in _cache:
         return _cache[name]
     path = _CONFIG_PATHS[name]
+    if not path.exists() and name == "paths":
+        _cache[name] = {}
+        return _cache[name]
     with open(path, "r", encoding="utf-8") as f:
         _cache[name] = yaml.safe_load(f)
     return _cache[name]
@@ -61,6 +65,11 @@ def get_stocks() -> dict:
 def get_notification() -> dict:
     """Return the notification configuration (cached)."""
     return _load_file("notification")
+
+
+def get_paths() -> dict:
+    """Return the path configuration (cached)."""
+    return _load_file("paths")
 
 
 def clear_config_cache(name: Optional[str] = None) -> None:

@@ -50,8 +50,8 @@ def get_portfolio_data(engine: DataEngine) -> dict:
     """
     读取 portfolio.md，返回持仓数据
     """
-    vault = ObsidianVault(_PROJECT_ROOT)
-    portfolio_path = Path(_PROJECT_ROOT) / "data" / "01-持仓" / "持仓概览.md"
+    vault = ObsidianVault()
+    portfolio_path = Path(vault.vault_path) / vault.portfolio_overview_path
     if not portfolio_path.exists():
         return {}
 
@@ -123,6 +123,7 @@ def snapshot(force: bool = False) -> dict:
     """
     today = date.today()
     snap_path = _get_snapshot_path(today)
+    vault = ObsidianVault()
 
     if snap_path.exists() and not force:
         return {"success": False, "path": str(snap_path),
@@ -191,12 +192,12 @@ tags: [每日快照, 自动归档]
 
 ## 核心池评分（最近）
 
-> 核心池评分报告路径: `data/04-选股/筛选结果/`
+> 核心池评分报告路径: `{vault.screening_results_dir}/`
 
 ## 备注
 
 - 本文件为自动归档，用于回溯分析
-- 如需修改持仓成本，请手动编辑 `data/01-持仓/持仓概览.md`
+- 如需修改持仓成本，请手动编辑 `{vault.portfolio_overview_path}`
 """
 
     snap_path.write_text(content, encoding="utf-8")

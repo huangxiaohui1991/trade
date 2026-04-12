@@ -930,8 +930,17 @@ def _shadow_trade_snapshot() -> dict:
     try:
         from scripts.pipeline.shadow_trade import get_status, paper_trade_consistency_snapshot
 
-        consistency = paper_trade_consistency_snapshot(window=180)
-        shadow_status = get_status()
+        consistency = paper_trade_consistency_snapshot(window=180) or {
+            "ok": False,
+            "status": "error",
+            "error": "empty_consistency_snapshot",
+            "inferred_open_codes": [],
+            "actual_open_codes": [],
+            "event_only_codes": [],
+            "broker_only_codes": [],
+            "event_trade_count": 0,
+        }
+        shadow_status = get_status() or {}
         actual_positions = [
             {
                 "code": str(item.get("code", "")).strip(),
@@ -1203,8 +1212,18 @@ def doctor() -> dict:
                     break
     checks["mx_apikey"] = {"ok": bool(mx_key), "configured": bool(mx_key)}
 
-    webhook = os.environ.get("DISCORD_WEBHOOK_URL") or get_notification().get("discord", {}).get("webhook_url", "")
-    checks["discord_webhook"] = {"ok": bool(webhook), "configured": bool(webhook)}
+    notification_cfg = get_notification().get("discord", {}) or {}
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL") or notification_cfg.get("webhook_url", "")
+    bot_token = os.environ.get("DISCORD_BOT_TOKEN") or notification_cfg.get("bot_token", "")
+    channel_id = os.environ.get("DISCORD_CHANNEL_ID") or notification_cfg.get("channel_id", "")
+    dm_user_id = os.environ.get("DISCORD_DM_USER_ID", "")
+    discord_configured = bool(webhook) or (bool(bot_token) and bool(channel_id or dm_user_id))
+    discord_mode = "webhook" if webhook else "bot_dm" if bot_token and dm_user_id else "bot_channel" if bot_token and channel_id else ""
+    checks["discord_webhook"] = {
+        "ok": discord_configured,
+        "configured": discord_configured,
+        "mode": discord_mode,
+    }
 
     vault_path = Path(vault.vault_path)
     checks["vault"] = {
@@ -1213,13 +1232,16 @@ def doctor() -> dict:
         "exists": vault_path.exists(),
     }
 
+    screening_results_dir = getattr(vault, "screening_results_dir", None)
+    if not isinstance(screening_results_dir, (str, os.PathLike)):
+        screening_results_dir = "04-决策/筛选结果"
     checks["writable"] = {
         "cache": _check_path_writable(CACHE_DIR),
         "runtime": _check_path_writable(RUNTIME_DIR),
         "runs": _check_path_writable(RUNS_DIR),
         "locks": _check_path_writable(LOCK_DIR),
         "ledger": _check_path_writable(Path(LEDGER_DB_PATH).parent),
-        "screening": _check_path_writable(vault_path / "04-选股" / "筛选结果"),
+        "screening": _check_path_writable(vault_path / screening_results_dir),
     }
 
     try:
@@ -1736,6 +1758,12 @@ def status_today(sync_state: bool = True) -> dict:
         "pool_snapshot": pool_snapshot,
         "market_snapshot": market_snapshot,
     })
+    try:
+        vault = ObsidianVault()
+        vault.write_account_overview(portfolio_snapshot, paper_portfolio_snapshot)
+        vault.write_today_decision(today_decision)
+    except Exception:
+        pass
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():

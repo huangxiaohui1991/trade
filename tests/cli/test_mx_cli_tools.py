@@ -206,6 +206,76 @@ class MXCliToolsTests(unittest.TestCase):
         with self.assertRaises(cli_tools.MXCommandNotFound):
             registry.resolve("mx.unknown.command")
 
+    def test_limit_trade_does_not_write_trade_event(self):
+        import scripts.mx.cli_tools as cli_tools
+
+        overrides = {
+            ("scripts.mx.mx_moni", "MXMoni"): (FakeMoni, None),
+        }
+        with mock.patch.object(cli_tools, "_load_command_class", side_effect=_fake_loader_factory(overrides)):
+            registry = cli_tools.build_mx_command_registry()
+
+        with mock.patch("scripts.pipeline.shadow_trade._log_trade") as log_trade:
+            result = registry.dispatch(
+                "mx.moni.buy",
+                stock_code="600519",
+                quantity=100,
+                price=1700.0,
+                use_market_price=False,
+            )
+
+        self.assertEqual(result["side"], "buy")
+        log_trade.assert_not_called()
+
+    def test_market_trade_logs_only_after_success(self):
+        import scripts.mx.cli_tools as cli_tools
+
+        overrides = {
+            ("scripts.mx.mx_moni", "MXMoni"): (FakeMoni, None),
+        }
+        with mock.patch.object(cli_tools, "_load_command_class", side_effect=_fake_loader_factory(overrides)):
+            registry = cli_tools.build_mx_command_registry()
+
+        with mock.patch("scripts.pipeline.shadow_trade._log_trade") as log_trade:
+            registry.dispatch(
+                "mx.moni.buy",
+                stock_code="600519",
+                quantity=100,
+                price=None,
+                use_market_price=True,
+            )
+
+        log_trade.assert_not_called()
+
+    def test_successful_market_trade_writes_trade_event(self):
+        import scripts.mx.cli_tools as cli_tools
+
+        class SuccessfulMoni(FakeMoni):
+            def trade(self, side, stock_code, quantity, price, use_market_price):
+                self.calls.append(("trade", side, stock_code, quantity, price, use_market_price))
+                return {
+                    "code": "200",
+                    "name": "贵州茅台",
+                    "price": 1701.5,
+                }
+
+        overrides = {
+            ("scripts.mx.mx_moni", "MXMoni"): (SuccessfulMoni, None),
+        }
+        with mock.patch.object(cli_tools, "_load_command_class", side_effect=_fake_loader_factory(overrides)):
+            registry = cli_tools.build_mx_command_registry()
+
+        with mock.patch("scripts.pipeline.shadow_trade._log_trade") as log_trade:
+            registry.dispatch(
+                "mx.moni.buy",
+                stock_code="600519",
+                quantity=100,
+                price=None,
+                use_market_price=True,
+            )
+
+        log_trade.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,55 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from scripts.utils.parser import parse_frontmatter, parse_md_table, parse_portfolio as parse_portfolio_file
 from scripts.engine.scorer import split_veto_signals
+from scripts.utils.config_loader import get_paths
+
+
+VAULT_LAYOUT = {
+    "system_dir": "00-系统",
+    "state_dir": "01-状态",
+    "run_dir": "02-运行",
+    "analysis_dir": "03-分析",
+    "decision_dir": "04-决策",
+    "portfolio_dir": "01-状态/持仓",
+    "account_dir": "01-状态/账户",
+    "pool_dir": "01-状态/池子",
+    "journal_dir": "02-运行/日志",
+    "paper_trade_dir": "02-运行/模拟盘",
+    "signal_snapshot_dir": "02-运行/信号快照",
+    "daily_output_dir": "02-运行/当日输出",
+    "weekly_review_dir": "03-分析/周复盘",
+    "monthly_review_dir": "03-分析/月复盘",
+    "screening_results_dir": "04-决策/筛选结果",
+    "candidate_pool_dir": "04-决策/候选池",
+    "stock_explain_dir": "04-决策/个股解释",
+    "portfolio_path": "01-状态/持仓/portfolio.md",
+    "portfolio_overview_path": "01-状态/持仓/持仓概览.md",
+    "account_overview_path": "01-状态/账户/账户总览.md",
+    "core_pool_path": "01-状态/池子/核心池.md",
+    "watch_pool_path": "01-状态/池子/观察池.md",
+    "today_decision_path": "04-决策/今日决策.md",
+}
+
+
+def default_vault_path(project_root: Path | None = None) -> str:
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent.parent
+    env_path = os.environ.get("AStockVault", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser().resolve())
+    config_path = str(get_paths().get("vault_path", "") or "").strip()
+    if config_path:
+        configured_path = Path(config_path).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = project_root / configured_path
+        return str(configured_path.resolve())
+    local_vault_path = project_root / "trade-vault"
+    if local_vault_path.exists():
+        return str(local_vault_path.resolve())
+    sibling_path = project_root.parent / "trade-vault"
+    if sibling_path.exists():
+        return str(sibling_path.resolve())
+    return str(project_root.resolve())
 
 
 class ObsidianVault:
@@ -29,18 +78,18 @@ class ObsidianVault:
             vault_path: vault 根目录，默认按以下优先级解析：
                 1. 显式传入 vault_path
                 2. 环境变量 AStockVault
-                3. 当前仓库根目录
+                3. config/paths.yaml 的 vault_path
+                4. 当前仓库内 trade-vault
+                5. 当前仓库同级 trade-vault
+                6. 当前仓库根目录
         """
         if vault_path is None:
             project_root = Path(__file__).resolve().parent.parent.parent
-            vault_path = os.environ.get("AStockVault") or str(project_root)
+            vault_path = default_vault_path(project_root)
         self.vault_path = os.path.abspath(vault_path)
 
-        # 文件路径映射（Obsidian vault 根目录直接存放）
-        self.portfolio_path = "01-持仓/portfolio.md"
-        self.core_pool_path = "04-选股/核心池.md"
-        self.watch_pool_path = "04-选股/观察池.md"
-        self.journal_dir = "02-日志"
+        for key, value in VAULT_LAYOUT.items():
+            setattr(self, key, value)
 
     def _full_path(self, relative_path: str) -> str:
         """将相对路径转换为绝对路径"""
@@ -85,6 +134,257 @@ class ObsidianVault:
         # 写入新内容
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
+
+    @staticmethod
+    def _fmt_currency(value) -> str:
+        try:
+            return f"¥{float(value or 0):,.2f}"
+        except (TypeError, ValueError):
+            return "¥0.00"
+
+    @staticmethod
+    def _fmt_pct(value) -> str:
+        try:
+            return f"{float(value or 0) * 100:.1f}%"
+        except (TypeError, ValueError):
+            return "0.0%"
+
+    @staticmethod
+    def _fmt_count(value) -> str:
+        try:
+            return str(int(value or 0))
+        except (TypeError, ValueError):
+            return "0"
+
+    @staticmethod
+    def _display_source(source: str) -> str:
+        mapping = {
+            "bootstrap:portfolio": "portfolio.md",
+            "broker:mx_moni": "MX 模拟盘",
+            "bootstrap:shadow": "初始化占位",
+        }
+        source = str(source or "").strip()
+        return mapping.get(source, source or "—")
+
+    @staticmethod
+    def _snapshot_balance(snapshot: dict, scope: str = "") -> dict:
+        if not isinstance(snapshot, dict):
+            return {}
+        balances = snapshot.get("balances", [])
+        if not isinstance(balances, list):
+            return {}
+        for item in balances:
+            if not isinstance(item, dict):
+                continue
+            if scope and str(item.get("scope", "")).strip() != scope:
+                continue
+            return item
+        return {}
+
+    @staticmethod
+    def _snapshot_health(balance: dict) -> tuple[str, list[str]]:
+        metadata = balance.get("metadata", {}) if isinstance(balance, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        issues = []
+        for key in ("balance", "positions"):
+            payload = metadata.get(key)
+            if not isinstance(payload, dict):
+                continue
+            success = payload.get("success")
+            message = str(payload.get("message", "")).strip()
+            code = payload.get("code", payload.get("status", ""))
+            if success is False or message:
+                suffix = f" (code={code})" if code not in ("", None) else ""
+                issues.append(f"{key}: {message or '请求失败'}{suffix}")
+        return ("降级" if issues else "正常"), issues
+
+    def _render_snapshot_row(self, label: str, snapshot: dict, scope: str) -> tuple[str, list[str]]:
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        summary = snapshot.get("summary", {}) if isinstance(snapshot.get("summary", {}), dict) else {}
+        balance = self._snapshot_balance(snapshot, scope=scope)
+        status, issues = self._snapshot_health(balance)
+        as_of_date = str(snapshot.get("as_of_date", balance.get("as_of_date", ""))).strip() or "—"
+        market_value = balance.get("total_market_value", 0.0)
+        total_capital = summary.get("total_capital", balance.get("total_capital", 0.0))
+        row = (
+            f"| {label} | {as_of_date} | {self._display_source(balance.get('source', ''))} | "
+            f"{status} | {self._fmt_count(summary.get('holding_count', 0))} | "
+            f"{self._fmt_pct(summary.get('current_exposure', balance.get('exposure', 0.0)))} | "
+            f"{self._fmt_currency(summary.get('cash_value', balance.get('cash_value', 0.0)))} | "
+            f"{self._fmt_currency(market_value)} | "
+            f"{self._fmt_currency(total_capital)} |"
+        )
+        return row, issues
+
+    def _render_positions_table(self, positions: list[dict], scope: str) -> list[str]:
+        rows = [
+            "| 股票 | 代码 | 持仓 | 成本 | 现价 | 市值 | 状态 |",
+            "|------|------|------|------|------|------|------|",
+        ]
+        scoped_positions = []
+        for item in positions if isinstance(positions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if scope and str(item.get("scope", "")).strip() != scope:
+                continue
+            scoped_positions.append(item)
+        scoped_positions.sort(key=lambda item: float(item.get("market_value", 0.0) or 0.0), reverse=True)
+        if not scoped_positions:
+            rows.append("| — | — | — | — | — | — | — |")
+            return rows
+        for item in scoped_positions:
+            rows.append(
+                f"| {item.get('name', '') or '—'} | {item.get('code', '') or '—'} | "
+                f"{self._fmt_count(item.get('shares', 0))} | "
+                f"{self._fmt_currency(item.get('avg_cost', 0.0))} | "
+                f"{self._fmt_currency(item.get('current_price', 0.0))} | "
+                f"{self._fmt_currency(item.get('market_value', 0.0))} | "
+                f"{item.get('status', '') or '—'} |"
+            )
+        return rows
+
+    def render_account_overview(self, primary_snapshot: dict, paper_snapshot: Optional[dict] = None) -> str:
+        """渲染账户总览 markdown。"""
+        primary_snapshot = primary_snapshot or {}
+        paper_snapshot = paper_snapshot or {}
+        primary_balance = self._snapshot_balance(primary_snapshot, scope="cn_a_system")
+        primary_positions = primary_snapshot.get("positions", []) if isinstance(primary_snapshot, dict) else []
+        paper_positions = paper_snapshot.get("positions", []) if isinstance(paper_snapshot, dict) else []
+        overview_rows = primary_balance.get("metadata", {}).get("account_overview", []) if isinstance(primary_balance, dict) else []
+        primary_row, primary_issues = self._render_snapshot_row("实盘", primary_snapshot, "cn_a_system")
+        paper_row, paper_issues = self._render_snapshot_row("模拟盘", paper_snapshot, "paper_mx")
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: account_overview",
+            "tags: [账户, 状态, 自动更新]",
+            "---",
+            "",
+            "# 账户总览",
+            "",
+            "## 快照总览",
+            "",
+            "| 账户 | 快照日期 | 数据来源 | 数据状态 | 持仓数 | 仓位 | 现金 | 持仓市值 | 总资产 |",
+            "|------|----------|----------|----------|--------|------|------|----------|--------|",
+            primary_row,
+            paper_row,
+            "",
+            "## 数据提示",
+            "",
+        ]
+
+        if primary_issues or paper_issues:
+            if primary_issues:
+                lines.extend([f"- 实盘: {item}" for item in primary_issues])
+            if paper_issues:
+                lines.extend([f"- 模拟盘: {item}" for item in paper_issues])
+        else:
+            lines.append("- 当前两路账户快照均正常。")
+
+        if overview_rows:
+            lines.extend([
+                "",
+                "## 实盘补充摘录",
+                "",
+                "| 项目 | 金额 | 说明 |",
+                "|------|------|------|",
+            ])
+            for row in overview_rows:
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"| {row.get('项目', '') or '—'} | {row.get('金额', '') or '—'} | {row.get('说明', '') or '—'} |"
+                )
+
+        lines.extend([
+            "",
+            "## 实盘持仓",
+            "",
+        ])
+        lines.extend(self._render_positions_table(primary_positions, scope="cn_a_system"))
+        lines.extend([
+            "",
+            "## 模拟盘持仓",
+            "",
+        ])
+        lines.extend(self._render_positions_table(paper_positions, scope="paper_mx"))
+        lines.extend([
+            "",
+            "## 备注",
+            "",
+            "- 本页由结构化账本自动投影生成。",
+            "- 运行 `trade status today` 会刷新本页和 `今日决策.md`。",
+        ])
+        return "\n".join(lines)
+
+    def write_account_overview(self, primary_snapshot: dict, paper_snapshot: Optional[dict] = None) -> str:
+        """写入账户总览。"""
+        self.write(self.account_overview_path, self.render_account_overview(primary_snapshot, paper_snapshot))
+        return self._full_path(self.account_overview_path)
+
+    def render_today_decision(self, today_decision: dict) -> str:
+        """渲染今日决策 markdown。"""
+        today_decision = today_decision or {}
+        risk = today_decision.get("risk", {}) if isinstance(today_decision.get("risk", {}), dict) else {}
+        portfolio_risk = (
+            today_decision.get("portfolio_risk", {})
+            if isinstance(today_decision.get("portfolio_risk", {}), dict)
+            else {}
+        )
+        reasons = [str(item).strip() for item in (today_decision.get("reasons", []) or []) if str(item).strip()]
+        reason_codes = [str(item).strip() for item in (today_decision.get("reason_codes", []) or []) if str(item).strip()]
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: today_decision",
+            "tags: [决策, 自动更新]",
+            "---",
+            "",
+            "# 今日决策",
+            "",
+            "## 决策摘要",
+            "",
+            "| 项目 | 数值 |",
+            "|------|------|",
+            f"| 决策动作 | {today_decision.get('action', today_decision.get('decision', '')) or '—'} |",
+            f"| 市场信号 | {today_decision.get('market_signal', '') or '—'} |",
+            f"| 仓位系数 | {float(today_decision.get('market_multiplier', 0.0) or 0.0):.2f} |",
+            f"| 当前仓位 | {self._fmt_pct(today_decision.get('current_exposure', 0.0))} |",
+            f"| 本周买入次数 | {int(today_decision.get('weekly_buys', 0) or 0)} |",
+            f"| 当前持仓数 | {int(today_decision.get('holding_count', 0) or 0)} |",
+            "",
+            "## 风控状态",
+            "",
+            "| 项目 | 状态 |",
+            "|------|------|",
+            f"| 买入风控 | {'允许' if risk.get('can_buy', False) else '阻断'} |",
+            f"| 组合风控 | {portfolio_risk.get('state', 'ok') or 'ok'} |",
+            "",
+            "## 原因说明",
+            "",
+        ]
+        if reasons:
+            lines.extend([f"- {item}" for item in reasons])
+        else:
+            lines.append("- 无")
+        lines.extend([
+            "",
+            "## 原因代码",
+            "",
+        ])
+        if reason_codes:
+            lines.extend([f"- `{item}`" for item in reason_codes])
+        else:
+            lines.append("- 无")
+        return "\n".join(lines)
+
+    def write_today_decision(self, today_decision: dict) -> str:
+        """写入今日决策。"""
+        self.write(self.today_decision_path, self.render_today_decision(today_decision))
+        return self._full_path(self.today_decision_path)
 
     def sync_portfolio_state(self) -> dict:
         """将 portfolio.md 当前内容同步到结构化账本。"""

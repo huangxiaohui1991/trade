@@ -102,6 +102,60 @@ class SignalBusTests(unittest.TestCase):
         self.assertIn("RISK_TIME_STOP", signal_bus["trade"]["reason_codes"])
         self.assertEqual(signal_bus["trade"]["state"], "drift")
 
+    def test_status_today_syncs_vault_projection_files(self):
+        from scripts.cli.trade import status_today
+
+        fake_vault = mock.Mock()
+        with mock.patch("scripts.cli.trade.load_daily_state", return_value={
+            "date": "2026-04-09",
+            "updated_at": "2026-04-09T09:30:00",
+            "pipelines": {},
+        }), mock.patch("scripts.cli.trade.get_strategy", return_value={}), mock.patch(
+            "scripts.cli.trade.build_today_decision",
+            return_value={"action": "BUY_ALLOWED", "weekly_buys": 1},
+        ), mock.patch(
+            "scripts.cli.trade.load_portfolio_snapshot",
+            side_effect=[
+                {"summary": {"holding_count": 1, "current_exposure": 0.2}, "positions": []},
+                {"summary": {"holding_count": 2, "current_exposure": 0.4}, "positions": []},
+            ],
+        ), mock.patch("scripts.cli.trade.load_pool_snapshot", return_value={
+            "snapshot_date": "2026-04-09",
+            "updated_at": "2026-04-09T09:30:00",
+            "summary": {"core_count": 1, "watch_count": 0, "other_count": 0},
+            "entries": [],
+        }), mock.patch("scripts.cli.trade.audit_state", return_value={
+            "status": "ok",
+            "snapshot_date": "2026-04-09",
+            "checks": {},
+        }), mock.patch("scripts.cli.trade.load_market_snapshot", return_value={
+            "signal": "GREEN",
+            "source": "market_timer",
+            "source_chain": ["market_timer"],
+            "as_of_date": "2026-04-09",
+        }), mock.patch("scripts.cli.trade._shadow_trade_snapshot", return_value={
+            "status": "ok",
+            "consistency": {"ok": True, "status": "ok", "event_only_codes": [], "broker_only_codes": []},
+            "advisory_summary": {"triggered_signal_count": 0, "triggered_position_count": 0, "triggered_rules": [], "positions": []},
+            "mx_health": {"status": "ok"},
+            "positions_count": 0,
+            "timestamp": "2026-04-09 09:30",
+            "automation_scope": "",
+        }), mock.patch("scripts.cli.trade.load_order_snapshot", return_value={
+            "scope": "paper_mx",
+            "status": "all",
+            "db_path": "/tmp/trade_state.sqlite3",
+            "orders": [],
+            "summary": {"order_count": 0, "open_count": 0, "terminal_count": 0, "status_counts": {}, "scope_counts": {}, "class_counts": {}, "pending_count": 0, "exception_count": 0},
+        }), mock.patch("scripts.cli.trade._mx_health_snapshot", return_value={"status": "ok"}), mock.patch(
+            "scripts.cli.trade.ObsidianVault",
+            return_value=fake_vault,
+        ):
+            status_today(sync_state=False)
+
+        fake_vault.write_account_overview.assert_called_once()
+        fake_vault.write_today_decision.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

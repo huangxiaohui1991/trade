@@ -6,8 +6,8 @@ pipeline/core_pool_scoring.py — 核心池每日评分（15:40 执行）
   1. 读 config/stocks.yaml 的核心池列表
   2. 批量拉取：实时价格 + 技术指标 + 基本面 + 资金流向 + TrendRadar 舆情
   3. 四维评分（技术/基本面/资金/舆情）
-  4. 输出到 vault/04-选股/评分报告/核心池_评分_YYYYMMDD.md
-  5. 更新 vault/04-选股/核心池.md 的评分列
+  4. 输出到 vault/04-决策/筛选结果/核心池_评分报告_YYYYMMDD_HHMMSS.md
+  5. 更新 vault/01-状态/池子/核心池.md 的评分列
 
 用法（CLI）：
   python -m scripts.pipeline.core_pool_scoring
@@ -184,7 +184,7 @@ def run() -> list:
 
         _logger.info(">> 写入评分报告...")
         report_content = _build_report_content(scores, date_str)
-        report_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+        report_dir = Path(vault.vault_path) / vault.screening_results_dir
         report_dir.mkdir(parents=True, exist_ok=True)
         time_str = datetime.now().strftime("%H%M%S")
         report_path = report_dir / f"核心池_评分报告_{date_str.replace('-', '')}_{time_str}.md"

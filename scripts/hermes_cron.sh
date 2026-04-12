@@ -14,7 +14,7 @@
 #
 # 环境变量（由 launchd 或 Hermes 注入）：
 #   DISCORD_WEBHOOK_URL  - Discord webhook URL
-#   AStockVault         - vault 路径（默认当前仓库根目录）
+#   AStockVault         - vault 路径（默认 repo/trade-vault，缺失时回退仓库根目录）
 #
 # 用法（Hermes 调度）：
 #   hermes_cron.sh morning
@@ -30,7 +30,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VAULT_PATH="${AStockVault:-$REPO_ROOT}"
+DEFAULT_VAULT_PATH="$REPO_ROOT/trade-vault"
+if [[ ! -d "$DEFAULT_VAULT_PATH" ]]; then
+    DEFAULT_VAULT_PATH="$REPO_ROOT"
+fi
+VAULT_PATH="${AStockVault:-$DEFAULT_VAULT_PATH}"
 PYTHON="$REPO_ROOT/.venv/bin/python"
 
 # 确保 vault 的 scripts 在 PYTHONPATH

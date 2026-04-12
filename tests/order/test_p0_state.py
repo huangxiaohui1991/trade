@@ -198,6 +198,22 @@ class P0StateTests(unittest.TestCase):
         )
         self.assertEqual(result["checks"]["paper_portfolio_snapshot"]["holding_count"], 1)
 
+    def test_state_service_shadow_snapshot_handles_empty_runtime_payloads(self):
+        from scripts.state.service import _shadow_trade_snapshot
+
+        with mock.patch(
+            "scripts.pipeline.shadow_trade.paper_trade_consistency_snapshot",
+            return_value=None,
+        ), mock.patch(
+            "scripts.pipeline.shadow_trade.get_status",
+            return_value=None,
+        ):
+            snapshot = _shadow_trade_snapshot()
+
+        self.assertEqual(snapshot["status"], "error")
+        self.assertEqual(snapshot["consistency"]["error"], "empty_consistency_snapshot")
+        self.assertEqual(snapshot["positions_count"], 0)
+
     def test_paper_trade_consistency_snapshot_detects_share_mismatch(self):
         from scripts.pipeline.shadow_trade import paper_trade_consistency_snapshot
 
@@ -358,6 +374,36 @@ class P0StateTests(unittest.TestCase):
             result["shadow_trade_state"]["advisory_summary"]["triggered_signal_count"],
             2,
         )
+
+    def test_shadow_get_status_tolerates_empty_orders_payload(self):
+        from scripts.pipeline.shadow_trade import get_status
+
+        with mock.patch("scripts.pipeline.shadow_trade._get_balance", return_value={
+            "total_assets": 0,
+            "available": 0,
+            "position_value": 0,
+            "total_profit": 0,
+            "init_money": 200000,
+        }), mock.patch(
+            "scripts.pipeline.shadow_trade._get_positions",
+            return_value=[],
+        ), mock.patch(
+            "scripts.pipeline.shadow_trade._sync_broker_orders",
+            return_value={"status": "ok", "fetched_count": 0, "synced_count": 0},
+        ), mock.patch(
+            "scripts.pipeline.shadow_trade.load_order_snapshot",
+            return_value={"orders": [], "summary": {}},
+        ), mock.patch(
+            "scripts.pipeline.shadow_trade._mx_health_snapshot",
+            return_value={"status": "ok"},
+        ), mock.patch(
+            "scripts.pipeline.shadow_trade.get_strategy",
+            return_value={},
+        ):
+            snapshot = get_status()
+
+        self.assertEqual(snapshot["positions"], [])
+        self.assertEqual(snapshot["order_sync"]["status"], "ok")
 
 
 if __name__ == "__main__":

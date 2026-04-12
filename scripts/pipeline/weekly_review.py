@@ -6,7 +6,7 @@ pipeline/weekly_review.py — 周报生成（周日 20:00 执行）
   1. 读取结构化活动摘要（load_activity_summary）
   2. 统计：本周买入次数 + 卖出次数 + P&L + 胜率 + 盈亏比
   3. 计算：核心池变化
-  4. 输出到 vault/03-复盘/周/YYYY-W##.md
+  4. 输出到 vault/03-分析/周复盘/YYYY-W##.md
   5. Discord 推送周报
 
 用法（CLI）：
@@ -386,7 +386,7 @@ def run() -> dict:
                 if code and name:
                     stock_name_map.setdefault(code, name)
 
-            reports_dir = Path(vault.vault_path) / "04-选股" / "筛选结果"
+            reports_dir = Path(vault.vault_path) / vault.screening_results_dir
             if reports_dir.exists():
                 reports = sorted(reports_dir.glob("核心池_评分报告_*.md"), key=lambda p: p.stat().st_mtime)
                 if len(reports) >= 2:
@@ -441,7 +441,7 @@ def run() -> dict:
             vault, stats, core_pool_changes, trade_events, year, week_num, shadow_advisories, trade_review
         )
 
-        review_dir = Path(vault.vault_path) / "03-复盘" / "周"
+        review_dir = Path(vault.vault_path) / vault.weekly_review_dir
         review_dir.mkdir(parents=True, exist_ok=True)
         review_path = review_dir / f"{week_str}.md"
         with open(review_path, 'w', encoding='utf-8') as f:
