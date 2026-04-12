@@ -3,9 +3,3 @@
 
 # Obsidian config (local to each clone)
 .obsidian/
-
-# Pipeline-generated runtime data (not tracked)
-01-状态/
-02-运行/
-03-分析/
-04-决策/

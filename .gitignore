@@ -22,11 +22,6 @@ data/backtest/
 venv312/
 venv/
 .idea/
-# trade-vault 运行时数据（pipeline 生成，每次不同）
-trade-vault/01-状态/
-trade-vault/02-运行/
-trade-vault/03-分析/
-trade-vault/04-决策/
 # Obsidian config（本地配置）
 trade-vault/.obsidian/
 .obsidian/
