@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts.utils.config_loader import clear_config_cache
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "cli_contracts"
+
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "cli_contracts"
 
 
 def _load_fixture(name: str) -> dict:
@@ -17,15 +19,23 @@ def _load_fixture(name: str) -> dict:
 
 class CLIJsonContractTests(unittest.TestCase):
     def setUp(self):
+        clear_config_cache()
         self._old_db_path = os.environ.get("TRADE_STATE_DB_PATH")
+        self._old_discord_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
         self._tmpdir = tempfile.TemporaryDirectory()
         os.environ["TRADE_STATE_DB_PATH"] = str(Path(self._tmpdir.name) / "trade_state.sqlite3")
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
 
     def tearDown(self):
+        clear_config_cache()
         if self._old_db_path is None:
             os.environ.pop("TRADE_STATE_DB_PATH", None)
         else:
             os.environ["TRADE_STATE_DB_PATH"] = self._old_db_path
+        if self._old_discord_webhook is None:
+            os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        else:
+            os.environ["DISCORD_WEBHOOK_URL"] = self._old_discord_webhook
         self._tmpdir.cleanup()
 
     def _run_main(self, argv: list[str], patches: list[mock._patch]) -> dict:
