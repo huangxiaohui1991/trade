@@ -16,7 +16,7 @@
 REPO_ROOT="/absolute/path/to/trade"
 HERMES_SCRIPT="$REPO_ROOT/scripts/hermes_cron.sh"
 LOG_DIR="$REPO_ROOT/data"
-PYTHON_HOME="/Users/hxh/.venv/akshare"
+PYTHON_HOME="$REPO_ROOT/.venv"
 
 # 盘前摘要 — 周一到周五 8:25
 25 8 * * 1-5 /bin/bash $HERMES_SCRIPT morning >> $LOG_DIR/cron_morning.log 2>&1

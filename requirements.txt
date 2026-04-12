@@ -1,0 +1,10 @@
+aiohttp==3.13.5
+akshare==1.18.54
+baostock==0.8.9
+httpx==0.28.1
+numpy==2.4.4
+openai==2.31.0
+pandas==3.0.2
+PyYAML==6.0.3
+requests==2.33.1
+rich==14.3.3

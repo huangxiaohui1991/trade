@@ -6,12 +6,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
-# 使用 Python 3.12 虚拟环境
-PYTHON="$REPO_ROOT/venv312/bin/python3.12"
+# 使用仓库内统一虚拟环境（由 pyenv 3.12.13 创建）
+PYTHON="$REPO_ROOT/.venv/bin/python"
 
 if [ ! -f "$PYTHON" ]; then
-    echo "错误：未找到 Python 3.12 虚拟环境 ($PYTHON)" >&2
-    echo "请运行：brew install python@3.12 && python3.12 -m venv venv312 && source venv312/bin/activate && pip install akshare pandas rich prompt-toolkit openai" >&2
+    echo "错误：未找到项目虚拟环境 ($PYTHON)" >&2
+    echo "请运行：pyenv exec python -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
     exit 1
 fi
 

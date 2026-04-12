@@ -31,12 +31,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VAULT_PATH="${AStockVault:-$REPO_ROOT}"
-PYTHON="${HOME}/.venv/akshare314/bin/python"
+PYTHON="$REPO_ROOT/.venv/bin/python"
 
 # 确保 vault 的 scripts 在 PYTHONPATH
-export PYTHONPATH="${VAULT_PATH}:${HOME}/.venv/akshare314/lib/python3.14/site-packages"
+export PYTHONPATH="${VAULT_PATH}${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="${HOME}/.local/bin:$PATH"
 export AStockVault="$VAULT_PATH"
+
+if [[ ! -x "$PYTHON" ]]; then
+    echo "错误：未找到项目虚拟环境 ($PYTHON)"
+    echo "请先运行：pyenv exec python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
 
 # 加载项目 .env 文件（MX_APIKEY 等）
 if [[ -f "$REPO_ROOT/.env" ]]; then

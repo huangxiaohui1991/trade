@@ -6,6 +6,8 @@ __pycache__/
 *.db
 .env
 .venv/
+.venv312/
+.venv314/
 miaoxiang/
 筛选结果/
 cron.log
