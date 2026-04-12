@@ -43,6 +43,7 @@ VAULT_LAYOUT = {
     "core_pool_path": "01-状态/池子/核心池.md",
     "watch_pool_path": "01-状态/池子/观察池.md",
     "today_decision_path": "04-决策/今日决策.md",
+    "signal_snapshot_dir": "02-运行/信号快照",
 }
 
 
@@ -695,6 +696,147 @@ class ObsidianVault:
         """
         relative_path = self.get_journal_path(date)
         self.write(relative_path, content)
+
+    def get_signal_snapshot_path(self, date: str) -> str:
+        """返回某天的信号快照路径。"""
+        return os.path.join(self.signal_snapshot_dir, f"{date}.md")
+
+    def render_signal_snapshot(self, bundle: dict) -> str:
+        """渲染信号快照 markdown。"""
+        bundle = bundle or {}
+        market = bundle.get("market_snapshot", {}) or {}
+        pool = bundle.get("pool_snapshot", {}) or {}
+        decision = bundle.get("today_decision", {}) or {}
+        candidates = bundle.get("scored_candidates", []) or []
+        status = bundle.get("status", "missing")
+        snapshot_date = bundle.get("snapshot_date", "")
+        missing = bundle.get("missing_components", [])
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: signal_snapshot",
+            f"date: {snapshot_date}",
+            f"status: {status}",
+            f"tags: [信号快照, 自动更新]",
+            "---",
+            "",
+            f"# 信号快照 · {snapshot_date}",
+            "",
+            f"> 状态: **{status}**"
+        ]
+
+        if missing:
+            lines.append(f"> 缺失组件: {', '.join(missing)}")
+
+        # 大盘信号
+        market_signal = market.get("signal", "") or decision.get("market_signal", "")
+        signal_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}.get(market_signal, "⚪")
+        signal_text = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}.get(market_signal, market_signal)
+        lines.extend([
+            "",
+            "## 大盘信号",
+            "",
+            f"| 指标 | 数值 |",
+            "|------|------|",
+            f"| 整体信号 | {signal_emoji} {signal_text} |",
+        ])
+
+        indices = market.get("indices") or {}
+        if isinstance(indices, dict) and indices:
+            lines.extend(["| 指数 | 最新 | 涨跌% | 信号 |", "|------|------|------|------|"])
+            for name, info in list(indices.items())[:5]:
+                if isinstance(info, dict):
+                    close = info.get("close", info.get("price", 0))
+                    chg = info.get("change_pct", info.get("chg_pct", 0))
+                    sig = info.get("signal", "")
+                    lines.append(f"| {name} | {close:.2f} | {chg:+.2f}% | {sig} |")
+        else:
+            lines.append("| 暂无指数数据 | — | — | — |")
+
+        # 今日决策
+        action = decision.get("action", decision.get("decision", ""))
+        lines.extend([
+            "",
+            "## 今日决策",
+            "",
+            f"| 项目 | 数值 |",
+            "|------|------|",
+            f"| 决策动作 | {action or '—'} |",
+            f"| 市场信号 | {market_signal or '—'} |",
+        ])
+        reasons = decision.get("reasons", []) or []
+        if reasons:
+            lines.append("| 原因 | " + "；".join(str(r) for r in reasons[:3]) + " |")
+        risk_state = decision.get("risk", {}).get("state", "") if isinstance(decision.get("risk"), dict) else ""
+        if risk_state:
+            lines.append(f"| 风控状态 | {risk_state} |")
+
+        # 池子摘要
+        summary = pool.get("summary", {}) or {}
+        lines.extend([
+            "",
+            "## 池子摘要",
+            "",
+            f"| 类别 | 数量 |",
+            "|------|------|",
+            f"| 核心池 | {int(summary.get('core_count', summary.get('core', 0) or 0))} |",
+            f"| 观察池 | {int(summary.get('watch_count', summary.get('watch', 0) or 0))} |",
+            f"| 其他 | {int(summary.get('other_count', summary.get('avoid', 0) or 0))} |",
+        ])
+
+        # 候选股 Top5
+        top = sorted(candidates, key=lambda c: float(c.get("total_score", c.get("score", 0)) or 0) if isinstance(c.get("total_score"), (int, float)) else 0, reverse=True)[:5]
+        if top:
+            lines.extend([
+                "",
+                "## 候选股 Top5",
+                "",
+                "| 排名 | 代码 | 名称 | 总分 | 技术 | 基本 | 资金 | 舆情 | 否决 |",
+                "|------|------|------|------|------|------|------|------|------|",
+            ])
+            for i, c in enumerate(top, 1):
+                total = c.get("total_score", c.get("score", 0)) or 0
+                tech = c.get("technical_score", 0) or 0
+                fund = c.get("fundamental_score", 0) or 0
+                flow = c.get("flow_score", 0) or 0
+                sent = c.get("sentiment_score", 0) or 0
+                veto = "⚠️" if c.get("veto_triggered") else "✅"
+                name = c.get("name", c.get("code", ""))
+                code = c.get("code", "")
+                lines.append(f"| {i} | {code} | {name} | {float(total):.1f} | {float(tech):.1f} | {float(fund):.1f} | {float(flow):.1f} | {float(sent):.1f} | {veto} |")
+        else:
+            lines.extend([
+                "",
+                "## 候选股 Top5",
+                "",
+                "_暂无候选股数据_",
+            ])
+
+        lines.extend([
+            "",
+            "---",
+            "",
+            f"> 本页由 `load_daily_signal_snapshot_bundle()` 自动投影生成。",
+            f"> history_group_id: `{bundle.get('history_group_id', '') or '<auto>'}`",
+        ])
+        return "\n".join(lines)
+
+    def write_signal_snapshot(self, date_str: str) -> str:
+        """
+        写入信号快照。从 SQLite 加载当日信号束并渲染到 vault。
+
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+
+        Returns:
+            写入文件的绝对路径
+        """
+        from scripts.state.service import load_daily_signal_snapshot_bundle
+        bundle = load_daily_signal_snapshot_bundle(date_str)
+        relative_path = self.get_signal_snapshot_path(date_str)
+        self.write(relative_path, self.render_signal_snapshot(bundle))
+        return self._full_path(relative_path)
 
 
 if __name__ == "__main__":

@@ -1762,6 +1762,7 @@ def status_today(sync_state: bool = True) -> dict:
         vault = ObsidianVault()
         vault.write_account_overview(portfolio_snapshot, paper_portfolio_snapshot)
         vault.write_today_decision(today_decision)
+        vault.write_signal_snapshot(today.get("date", datetime.now().strftime("%Y-%m-%d")))
     except Exception:
         pass
     pipelines = today.get("pipelines", {})

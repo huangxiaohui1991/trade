@@ -637,6 +637,10 @@ def run() -> dict:
                 "weekday": weekday,
             },
         )
+
+        _logger.info(">> 写入信号快照...")
+        vault.write_signal_snapshot(today_str)
+
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
             if not isinstance(info, dict):
