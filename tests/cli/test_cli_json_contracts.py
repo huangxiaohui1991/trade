@@ -21,10 +21,12 @@ class CLIJsonContractTests(unittest.TestCase):
     def setUp(self):
         clear_config_cache()
         self._old_db_path = os.environ.get("TRADE_STATE_DB_PATH")
-        self._old_discord_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+        self._old_discord_vars = {
+            k: os.environ.pop(k, None)
+            for k in ("DISCORD_WEBHOOK_URL", "DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "DISCORD_DM_USER_ID")
+        }
         self._tmpdir = tempfile.TemporaryDirectory()
         os.environ["TRADE_STATE_DB_PATH"] = str(Path(self._tmpdir.name) / "trade_state.sqlite3")
-        os.environ.pop("DISCORD_WEBHOOK_URL", None)
 
     def tearDown(self):
         clear_config_cache()
@@ -32,10 +34,11 @@ class CLIJsonContractTests(unittest.TestCase):
             os.environ.pop("TRADE_STATE_DB_PATH", None)
         else:
             os.environ["TRADE_STATE_DB_PATH"] = self._old_db_path
-        if self._old_discord_webhook is None:
-            os.environ.pop("DISCORD_WEBHOOK_URL", None)
-        else:
-            os.environ["DISCORD_WEBHOOK_URL"] = self._old_discord_webhook
+        for k, v in self._old_discord_vars.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         self._tmpdir.cleanup()
 
     def _run_main(self, argv: list[str], patches: list[mock._patch]) -> dict:
@@ -109,6 +112,7 @@ class CLIJsonContractTests(unittest.TestCase):
                 "discord_webhook": {
                     "ok": checks["discord_webhook"]["ok"],
                     "configured": checks["discord_webhook"]["configured"],
+                    "mode": checks["discord_webhook"]["mode"],
                 },
                 "daily_state": {
                     "ok": checks["daily_state"]["ok"],

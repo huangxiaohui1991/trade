@@ -18,7 +18,8 @@
     },
     "discord_webhook": {
       "ok": false,
-      "configured": false
+      "configured": false,
+      "mode": ""
     },
     "daily_state": {
       "ok": true,
