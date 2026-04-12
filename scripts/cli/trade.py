@@ -10,6 +10,7 @@
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import json
 import logging
@@ -28,6 +29,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.engine.composite import build_today_decision
+from scripts.engine.blacklist import check_stock as blacklist_check
+from scripts.engine.data_engine import get_realtime as _get_realtime, get_market_index as _get_market_index
+from scripts.engine.financial import get_financial
+from scripts.engine.flow import get_fund_flow
+from scripts.engine.market_timer import get_signal as _market_signal, get_detail as _market_detail, get_position_multiplier as _market_multiplier
+from scripts.engine.risk_model import calc_stop_loss, calc_take_profit, check_risk as _check_risk, check_portfolio_risk as _check_portfolio_risk, calc_position_size, should_exit as _should_exit
+from scripts.engine.scorer import batch_score as _batch_score, score as _score
+from scripts.engine.technical import get_technical, normalize_code as _normalize_code, get_stock_name as _get_stock_name
+from scripts.pipeline.shadow_trade import (
+    buy_new_picks as _shadow_buy, check_stop_signals as _shadow_check_stops,
+    generate_report as _shadow_generate_report, get_status as _shadow_status,
+    paper_trade_consistency_snapshot as _shadow_consistency,
+    reconcile_trade_state as _shadow_reconcile,
+)
 from scripts.backtest import (
     compare_backtest_history,
     diagnose_signal_snapshot,
@@ -67,7 +82,7 @@ from scripts.state import (
     sync_portfolio_state,
 )
 from scripts.utils.cache import CACHE_DIR
-from scripts.utils.config_loader import get_notification, get_strategy
+from scripts.utils.config_loader import get_notification, get_stocks, get_strategy
 from scripts.utils.discord_push import render_condition_order_reminder, send_condition_order_reminder
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.run_context import (
@@ -2211,6 +2226,103 @@ def main():
     orch_parser.add_argument("--pool", choices=["core", "watch", "all"], default="all")
     orch_parser.add_argument("--universe", choices=["tracked", "market"], default="tracked")
 
+    # ── data: data retrieval ──────────────────────────────────────────────
+    data_parser = sub.add_parser("data", help="Query market / technical / financial / flow data")
+    data_sub = data_parser.add_subparsers(dest="action", required=True)
+    data_tech = data_sub.add_parser("technical", help="Get technical indicators (MA, RSI, momentum)")
+    data_tech.add_argument("code", help="Stock code (6 digits)")
+    data_tech.add_argument("--days", type=int, default=60, help="Historical days (default: 60)")
+
+    data_fin = data_sub.add_parser("financial", help="Get fundamental data (ROE, revenue growth, cash flow)")
+    data_fin.add_argument("code", help="Stock code (6 digits)")
+
+    data_flow = data_sub.add_parser("flow", help="Get fund flow data (main force net inflow, northbound)")
+    data_flow.add_argument("code", help="Stock code (6 digits)")
+    data_flow.add_argument("--days", type=int, default=5, help="Historical days (default: 5)")
+
+    data_rt = data_sub.add_parser("realtime", help="Get realtime quotes (price, change_pct)")
+    data_rt.add_argument("codes", nargs="+", help="Stock codes (one or more)")
+
+    data_idx = data_sub.add_parser("market-index", help="Get market index status (MA20/MA60, GREEN/RED signal)")
+
+    # ── score: scoring ─────────────────────────────────────────────────────
+    score_parser = sub.add_parser("score", help="Score one or more stocks")
+    score_sub = score_parser.add_subparsers(dest="action", required=True)
+    score_single = score_sub.add_parser("single", help="Score a single stock")
+    score_single.add_argument("code", help="Stock code (6 digits)")
+    score_single.add_argument("--name", default=None, help="Stock name (auto-resolved if omitted)")
+
+    score_batch = score_sub.add_parser("batch", help="Score a batch of stocks from code list")
+    score_batch.add_argument("--codes", default=None, help="Comma-separated codes (e.g. 000001,600036)")
+    score_batch.add_argument("--pool", choices=["core", "watch", "all"], default=None, help="Score all stocks in a pool")
+
+    score_pool = score_sub.add_parser("pool", help="Score all stocks in core/watch/all pool")
+    score_pool.add_argument("--pool", choices=["core", "watch", "all"], default="core")
+
+    # ── risk: risk management ──────────────────────────────────────────────
+    risk_parser = sub.add_parser("risk", help="Risk checks: blacklist, stop-loss, position sizing")
+    risk_sub = risk_parser.add_subparsers(dest="action", required=True)
+    risk_check = risk_sub.add_parser("check", help="Full blacklist + risk check for one stock")
+    risk_check.add_argument("code", help="Stock code (6 digits)")
+    risk_check.add_argument("--name", default=None, help="Stock name")
+
+    risk_portfolio = risk_sub.add_parser("portfolio",
+        help="Portfolio-level risk: exposure, position limit, weekly buy limit")
+    risk_portfolio.add_argument("--exposure", type=float, required=True, help="Current total exposure (¥)")
+    risk_portfolio.add_argument("--week-buys", type=int, required=True, help="Number of buys this week")
+    risk_portfolio.add_argument("--holding-count", type=int, required=True, help="Number of current holdings")
+    risk_portfolio.add_argument("--proposed", type=float, default=0, help="Proposed new position amount (¥)")
+
+    risk_pos = risk_sub.add_parser("position-size", help="Calculate position size (4% risk formula)")
+    risk_pos.add_argument("--capital", type=float, required=True, help="Total capital (¥)")
+    risk_pos.add_argument("--price", type=float, required=True, help="Entry price (¥)")
+    risk_pos.add_argument("--risk-pct", type=float, default=4.0, help="Risk percentage (default: 4%)")
+
+    risk_stop = risk_sub.add_parser("stop-loss", help="Calculate dynamic stop-loss price")
+    risk_stop.add_argument("--cost", type=float, required=True, help="Cost basis price (¥)")
+    risk_stop.add_argument("--ma20", type=float, default=0, help="MA20 price (¥)")
+    risk_stop.add_argument("--style", default="momentum", choices=["momentum", "ma", "trailing"],
+        help="Stop-loss style (default: momentum)")
+    risk_stop.add_argument("--entry-day-low", type=float, default=0, help="Entry day low price (¥)")
+    risk_stop.add_argument("--highest-price", type=float, default=0, help="Highest price since entry (¥)")
+
+    risk_exit = risk_sub.add_parser("should-exit",
+        help="Check if a position should trigger exit (stop-loss / take-profit)")
+    risk_exit.add_argument("code", help="Stock code (6 digits)")
+    risk_exit.add_argument("--price", type=float, required=True, help="Current price (¥)")
+    risk_exit.add_argument("--ma20", type=float, default=0, help="MA20 price (¥)")
+    risk_exit.add_argument("--ma60", type=float, default=0, help="MA60 price (¥)")
+    risk_exit.add_argument("--highest-price", type=float, default=0, help="Highest price since entry (¥)")
+    risk_exit.add_argument("--ma5", type=float, default=0, help="MA5 price (¥)")
+    risk_exit.add_argument("--ma10", type=float, default=0, help="MA10 price (¥)")
+
+    # ── market: market timing ──────────────────────────────────────────────
+    market_parser = sub.add_parser("market", help="Market timing signal (GREEN/YELLOW/RED/CLEAR)")
+    market_sub = market_parser.add_subparsers(dest="action", required=True)
+    market_sub.add_parser("signal", help="Get market timing signal")
+    market_sub.add_parser("detail", help="Get per-index market detail (close, MA20, MA60, streaks)")
+    market_sub.add_parser("multiplier", help="Get position multiplier (GREEN=1.0, YELLOW=0.5, RED/CLEAR=0.0)")
+
+    # ── shadow: paper trading ───────────────────────────────────────────────
+    shadow_parser = sub.add_parser("shadow", help="Shadow/paper trading operations")
+    shadow_sub = shadow_parser.add_subparsers(dest="action", required=True)
+    shadow_sub.add_parser("status", help="Get full paper trading status (balance, positions, orders)")
+
+    shadow_stops = shadow_sub.add_parser("check-stops", help="Check and execute stop-loss / take-profit signals")
+    shadow_stops.add_argument("--dry-run", action="store_true", help="Simulate without executing")
+
+    shadow_buy = shadow_sub.add_parser("buy-new-picks", help="Execute simulated buy for core pool new entries")
+    shadow_buy.add_argument("--dry-run", action="store_true", help="Simulate without executing")
+
+    shadow_recon = shadow_sub.add_parser("reconcile", help="Reconcile paper trade state and fix drift")
+    shadow_recon.add_argument("--apply", action="store_true", help="Apply fixes (default: dry-run)")
+    shadow_recon.add_argument("--window", type=int, default=180, help="Lookback window in days (default: 180)")
+
+    shadow_cons = shadow_sub.add_parser("consistency", help="Check consistency between event stream and broker state")
+    shadow_cons.add_argument("--window", type=int, default=180, help="Lookback window in days (default: 180)")
+
+    shadow_sub.add_parser("report", help="Generate paper trading report to Obsidian vault")
+
     args = parser.parse_args(argv)
     args.json = json_output
 
@@ -2236,6 +2348,181 @@ def main():
                     result = run_pipeline(args.pipeline, args)
                 elif args.command == "orchestrate":
                     result = orchestrate_workflow(args.workflow, args)
+
+                # ── data ───────────────────────────────────────────────────────
+                elif args.command == "data":
+                    if args.action == "technical":
+                        code = _normalize_code(args.code)
+                        result = {
+                            "command": "data", "action": "technical",
+                            "code": code, "days": args.days,
+                            **get_technical(code, days=args.days),
+                        }
+                    elif args.action == "financial":
+                        code = _normalize_code(args.code)
+                        result = {
+                            "command": "data", "action": "financial",
+                            "code": code, **get_financial(code),
+                        }
+                    elif args.action == "flow":
+                        code = _normalize_code(args.code)
+                        result = {
+                            "command": "data", "action": "flow",
+                            "code": code, "days": args.days,
+                            **get_fund_flow(code, days=args.days),
+                        }
+                    elif args.action == "realtime":
+                        codes = [_normalize_code(c) for c in args.codes]
+                        result = _get_realtime(codes)
+                        result["command"] = "data"
+                        result["action"] = "realtime"
+                    elif args.action == "market-index":
+                        result = _get_market_index()
+                        result["command"] = "data"
+                        result["action"] = "market-index"
+
+                # ── score ──────────────────────────────────────────────────────
+                elif args.command == "score":
+                    if args.action == "single":
+                        code = _normalize_code(args.code)
+                        name = args.name or _get_stock_name(code)
+                        result = _score(code, name=name)
+                        result["command"] = "score"
+                        result["action"] = "single"
+                        result["code"] = code
+                    elif args.action == "batch":
+                        stocks = []
+                        if args.codes:
+                            for c in args.codes.split(","):
+                                code = _normalize_code(c.strip())
+                                if code:
+                                    name = _get_stock_name(code)
+                                    stocks.append({"code": code, "name": name})
+                        elif args.pool:
+                            cfg = get_stocks()
+                            pool_key = {"core": "core_pool", "watch": "watch_pool", "all": "core_pool"}.get(args.pool, "core_pool")
+                            for item in cfg.get(pool_key, []):
+                                code = _normalize_code(str(item.get("code", "")))
+                                if code:
+                                    stocks.append({"code": code, "name": str(item.get("name", ""))})
+                            if args.pool == "all":
+                                for item in cfg.get("watch_pool", []):
+                                    code = _normalize_code(str(item.get("code", "")))
+                                    if code:
+                                        stocks.append({"code": code, "name": str(item.get("name", ""))})
+                        if not stocks:
+                            result = {"command": "score", "action": "batch", "status": "error", "error": "no stocks provided"}
+                        else:
+                            scored = _batch_score(stocks)
+                            result = {"command": "score", "action": "batch", "pool": args.pool, "stocks": stocks, "results": scored, "count": len(scored)}
+                    elif args.action == "pool":
+                        cfg = get_stocks()
+                        pool_key = {"core": "core_pool", "watch": "watch_pool", "all": "core_pool"}.get(args.pool, "core_pool")
+                        stocks = []
+                        for item in cfg.get(pool_key, []):
+                            code = _normalize_code(str(item.get("code", "")))
+                            if code:
+                                stocks.append({"code": code, "name": str(item.get("name", ""))})
+                        if args.pool == "all":
+                            for item in cfg.get("watch_pool", []):
+                                code = _normalize_code(str(item.get("code", "")))
+                                if code:
+                                    stocks.append({"code": code, "name": str(item.get("name", ""))})
+                        scored = _batch_score(stocks)
+                        result = {"command": "score", "action": "pool", "pool": args.pool, "results": scored, "count": len(scored)}
+
+                # ── risk ───────────────────────────────────────────────────────
+                elif args.command == "risk":
+                    if args.action == "check":
+                        code = _normalize_code(args.code)
+                        name = args.name or _get_stock_name(code)
+                        bl_result = blacklist_check(code, name)
+                        result = {
+                            "command": "risk", "action": "check",
+                            "code": code, "name": name,
+                            "blacklist": dataclasses.asdict(bl_result),
+                        }
+                    elif args.action == "portfolio":
+                        result = _check_risk(
+                            current_exposure=args.exposure,
+                            this_week_buys=args.week_buys,
+                            holding_count=args.holding_count,
+                            proposed_amount=args.proposed,
+                        )
+                        result["command"] = "risk"
+                        result["action"] = "portfolio"
+                    elif args.action == "position-size":
+                        result = calc_position_size(total_capital=args.capital, price=args.price, risk_pct=args.risk_pct)
+                        result["command"] = "risk"
+                        result["action"] = "position-size"
+                    elif args.action == "stop-loss":
+                        result = calc_stop_loss(
+                            cost=args.cost, ma20=args.ma20 or 0,
+                            style=args.style, entry_day_low=args.entry_day_low or 0,
+                            ma60=0, highest_price=args.highest_price or 0,
+                        )
+                        result["command"] = "risk"
+                        result["action"] = "stop-loss"
+                    elif args.action == "should-exit":
+                        code = _normalize_code(args.code)
+                        should, reason = _should_exit(
+                            position={"code": code},
+                            current_price=args.price,
+                            ma20=args.ma20 or 0, ma60=args.ma60 or 0,
+                            highest_price=args.highest_price or 0,
+                            ma5=args.ma5 or 0, ma10=args.ma10 or 0,
+                        )
+                        result = {
+                            "command": "risk", "action": "should-exit",
+                            "code": code, "price": args.price,
+                            "should_exit": should, "reason": reason,
+                        }
+
+                # ── market ─────────────────────────────────────────────────────
+                elif args.command == "market":
+                    if args.action == "signal":
+                        sig = _market_signal()
+                        result = {"command": "market", "action": "signal", "signal": sig}
+                    elif args.action == "detail":
+                        result = _market_detail()
+                        result["command"] = "market"
+                        result["action"] = "detail"
+                    elif args.action == "multiplier":
+                        mult = _market_multiplier()
+                        sig = _market_signal()
+                        result = {"command": "market", "action": "multiplier", "multiplier": mult, "signal": sig}
+
+                # ── shadow ──────────────────────────────────────────────────────
+                elif args.command == "shadow":
+                    if args.action == "status":
+                        result = _shadow_status()
+                        result["command"] = "shadow"
+                        result["action"] = "status"
+                    elif args.action == "check-stops":
+                        result = {"triggers": _shadow_check_stops(dry_run=args.dry_run)}
+                        result["command"] = "shadow"
+                        result["action"] = "check-stops"
+                        result["dry_run"] = args.dry_run
+                    elif args.action == "buy-new-picks":
+                        result = {"buys": _shadow_buy(dry_run=args.dry_run)}
+                        result["command"] = "shadow"
+                        result["action"] = "buy-new-picks"
+                        result["dry_run"] = args.dry_run
+                    elif args.action == "reconcile":
+                        result = _shadow_reconcile(apply=args.apply, window=args.window)
+                        result["command"] = "shadow"
+                        result["action"] = "reconcile"
+                        result["apply"] = args.apply
+                        result["window"] = args.window
+                    elif args.action == "consistency":
+                        result = _shadow_consistency(window=args.window)
+                        result["command"] = "shadow"
+                        result["action"] = "consistency"
+                        result["window"] = args.window
+                    elif args.action == "report":
+                        report = _shadow_generate_report()
+                        result = {"command": "shadow", "action": "report", "report": report}
+
                 elif args.command == "state":
                     result = state_command(args.action, args)
                 elif args.command == "backtest":
@@ -2846,27 +3133,99 @@ def main():
                 print(f"modified: {result.get('modified_count', 0)} orders for {result.get('code', '')} → ¥{result.get('new_price', 0):.2f}")
             elif action == "list":
                 print(f"orders: {result.get('order_count', 0)}")
-        elif result.get("command") == "backtest":
+
+        # ── data / score / risk / market / shadow ───────────────────────────
+        elif result.get("command") == "data":
             action = result.get("action", "")
-            print(f"backtest {action}: {result.get('status', 'ok')}")
-            summary = result.get("summary", {})
-            if summary:
-                print(f"  closed_trades={summary.get('closed_trade_count', 0)} "
-                      f"win_rate={summary.get('win_rate', 0)}% "
-                      f"total_pnl={summary.get('total_realized_pnl', 0)} "
-                      f"max_drawdown={summary.get('max_drawdown_pct', 'N/A')}")
-                print(f"  open_positions={summary.get('open_position_count', 0)} "
-                      f"ending_cash={summary.get('ending_cash', 0)}")
-            if result.get("closed_trades"):
-                print("  逐笔交易:")
-                for t in result["closed_trades"]:
-                    print(f"    {t['entry_date']} 买入 {t['code']} {t['name']} @¥{t['entry_price']} "
-                          f"→ {t['exit_date']} @¥{t['exit_price']} "
-                          f"PnL={t['realized_pnl']:+.2f} ({t['exit_reason']})")
-        else:
-            print(f"run {result.get('pipeline', 'unknown')}: {result.get('status', 'ok')}")
-            print(f"run_id: {result.get('run_id', 'N/A')}")
-            print(f"result_path: {result['result_path']}")
+            print(f"data {action}: ok")
+            if action == "technical":
+                print(f"  code={result.get('code')} ma5={result.get('ma5')} ma10={result.get('ma10')} "
+                      f"ma20={result.get('ma20')} ma60={result.get('ma60')} "
+                      f"rsi={result.get('rsi_14')} above_ma20={result.get('above_ma20')}")
+            elif action == "financial":
+                print(f"  code={result.get('code')} roe={result.get('roe')} "
+                      f"revenue_growth={result.get('revenue_growth')} source={result.get('source')}")
+            elif action == "flow":
+                print(f"  code={result.get('code')} main_net={result.get('main_net_inflow')} "
+                      f"outflow={result.get('main_outflow')} source={result.get('source')}")
+            elif action == "realtime":
+                for code, data in result.get("data", {}).items():
+                    print(f"  {code}: price={data.get('price')} chg={data.get('change_pct')}% source={data.get('source')}")
+            elif action == "market-index":
+                sig = result.get("signal", "")
+                print(f"  signal={sig} above_ma20={result.get('above_ma20')} "
+                      f"close={result.get('close')} ma20={result.get('ma20')}")
+
+        elif result.get("command") == "score":
+            action = result.get("action", "")
+            print(f"score {action}: {result.get('status', 'ok')}")
+            if result.get("status") == "error":
+                print(f"  error: {result.get('error')}")
+            elif action == "single":
+                r = result
+                print(f"  {r.get('code')} {r.get('name')} score={r.get('total_score', 0):.2f} "
+                      f"decision={r.get('decision', 'N/A')} "
+                      f"ma_score={r.get('scores', {}).get('technical', {}).get('ma_score', 'N/A')} "
+                      f"fund_score={r.get('scores', {}).get('fundamental', {}).get('fund_score', 'N/A')}")
+            elif action in ("batch", "pool"):
+                scored = result.get("results", [])
+                print(f"  stocks={len(scored)}")
+                for r in scored[:5]:
+                    print(f"  {r.get('code')} {r.get('name')} score={r.get('total_score', 0):.2f} decision={r.get('decision', 'N/A')}")
+                if len(scored) > 5:
+                    print(f"  ... and {len(scored) - 5} more")
+
+        elif result.get("command") == "risk":
+            action = result.get("action", "")
+            print(f"risk {action}: {result.get('status', 'ok')}")
+            if action == "check":
+                bl = result.get("blacklist", {})
+                print(f"  {result.get('code')} {result.get('name')} blacklist={bl.get('is_blacklist')}")
+                if bl.get("reasons"):
+                    print(f"  reasons: {', '.join(bl.get('reasons', []))}")
+            elif action == "portfolio":
+                print(f"  exposure_ok={result.get('exposure_ok')} "
+                      f"single_position_ok={result.get('single_position_ok')} "
+                      f"weekly_limit_ok={result.get('weekly_limit_ok')} "
+                      f"can_buy={result.get('can_buy')}")
+            elif action == "position-size":
+                print(f"  shares={result.get('shares')} amount={result.get('amount'):.2f} risk={result.get('risk_amount'):.2f}")
+            elif action == "stop-loss":
+                print(f"  dynamic={result.get('dynamic_stop')} absolute={result.get('absolute_stop')} "
+                      f"style={result.get('style')}")
+            elif action == "should-exit":
+                print(f"  should_exit={result.get('should_exit')} reason={result.get('reason')}")
+
+        elif result.get("command") == "market":
+            action = result.get("action", "")
+            if action == "signal":
+                print(f"market signal: {result.get('signal')}")
+            elif action == "detail":
+                print(f"market signal={result.get('signal')} close={result.get('close')} "
+                      f"above_ma20={result.get('above_ma20')} above_ma60_days={result.get('above_ma60_days', 0)}")
+            elif action == "multiplier":
+                print(f"market multiplier={result.get('multiplier')} (signal={result.get('signal')})")
+
+        elif result.get("command") == "shadow":
+            action = result.get("action", "")
+            print(f"shadow {action}: ok")
+            if action == "status":
+                pos = result.get("positions", [])
+                print(f"  balance={result.get('balance')} positions={len(pos)}")
+            elif action == "check-stops":
+                triggers = result.get("triggers", [])
+                print(f"  triggers={len(triggers)} dry_run={result.get('dry_run')}")
+                for t in triggers:
+                    print(f"  [{t.get('code')}] {t.get('name')} {t.get('trigger_type')} @ ¥{t.get('trigger_price')}")
+            elif action == "buy-new-picks":
+                buys = result.get("buys", [])
+                print(f"  buys={len(buys)} dry_run={result.get('dry_run')}")
+            elif action == "reconcile":
+                print(f"  drift={result.get('drift')} apply={result.get('apply')}")
+            elif action == "consistency":
+                print(f"  consistent={result.get('consistent')} drift={result.get('drift')}")
+            elif action == "report":
+                print(f"  report_length={len(result.get('report', ''))} chars")
 
 
 if __name__ == "__main__":
