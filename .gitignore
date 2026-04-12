@@ -21,3 +21,5 @@ data/backtest/
 每日快照/
 venv312/
 venv/
+.idea/
+trade-vault/

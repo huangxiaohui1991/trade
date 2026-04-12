@@ -437,6 +437,169 @@ def _render_backtest_report(action: str, payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_backtest_html_report(action: str, payload: dict[str, Any]) -> str:
+    """
+    生成回测结果 HTML 报告（自包含，Chart.js CDN）。
+    支持 sweep 参数表格热力图、关键指标卡、trade 分布。
+    """
+    parameters = payload.get("parameters", {}) or {}
+    score_summary = payload.get("score_summary", {}) or {}
+    rows = payload.get("rows", []) or []
+    trades = payload.get("closed_trades", []) or []
+
+    # 提取关键指标
+    total_pnl = score_summary.get("total_realized_pnl", payload.get("total_realized_pnl", 0))
+    win_rate = score_summary.get("win_rate", score_summary.get("mean_win_rate", 0))
+    max_dd = score_summary.get("max_drawdown_pct", payload.get("worst_max_drawdown_pct", 0))
+    trade_count = score_summary.get("closed_trade_count", len(trades))
+
+    # Sweep 表格数据
+    sweep_rows_json = "[]"
+    if rows:
+        headers = list(rows[0].keys()) if rows else []
+        sweep_rows_json = json.dumps({"headers": headers, "rows": rows})
+
+    # Trades 数据
+    trades_json = "[]"
+    if trades:
+        t_headers = ["code", "name", "entry_date", "exit_date", "entry_price", "exit_price", "pnl", "pnl_pct", "holding_days"]
+        trades_json = json.dumps({"headers": t_headers, "rows": trades})
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>回测报告 · {action}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; background: #f7f8fa; color: #333; }}
+  .card {{ background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
+  .metric {{ background: #f0f4ff; border-radius: 6px; padding: 1rem; text-align: center; }}
+  .metric .value {{ font-size: 1.8rem; font-weight: 700; color: #1a1a2e; }}
+  .metric .label {{ font-size: 0.8rem; color: #666; margin-top: 0.25rem; }}
+  .positive {{ color: #10b981; }} .negative {{ color: #ef4444; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+  th {{ background: #1a1a2e; color: white; padding: 0.5rem; text-align: left; position: sticky; top: 0; }}
+  td {{ padding: 0.4rem 0.5rem; border-bottom: 1px solid #eee; }}
+  tr:hover {{ background: #f9fafb; }}
+  .pnl-pos {{ color: #10b981; }} .pnl-neg {{ color: #ef4444; }}
+  canvas {{ max-height: 300px; }}
+  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }}
+  @media (max-width: 768px) {{ .chart-grid {{ grid-template-columns: 1fr; }} }}
+  h2 {{ font-size: 1.1rem; color: #1a1a2e; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2 style="border:none; margin-bottom:1rem;">回测报告 · {action}</h2>
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="value {'positive' if total_pnl >= 0 else 'negative'}">{total_pnl:,.0f}</div>
+      <div class="label">总收益 (¥)</div>
+    </div>
+    <div class="metric">
+      <div class="value">{win_rate:.1f}%</div>
+      <div class="label">胜率</div>
+    </div>
+    <div class="metric">
+      <div class="value {'negative' if max_dd < 0 else ''}">{max_dd:.1f}%</div>
+      <div class="label">最大回撤</div>
+    </div>
+    <div class="metric">
+      <div class="value">{trade_count}</div>
+      <div class="label">成交次数</div>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid">
+  <div class="card">
+    <h2>收益分布</h2>
+    <canvas id="pnlChart"></canvas>
+  </div>
+  <div class="card">
+    <h2>持仓时长分布</h2>
+    <canvas id="holdingChart"></canvas>
+  </div>
+</div>
+
+<div class="card">
+  <h2>参数 Sweep 结果（{len(rows)} 组）</h2>
+  <div style="max-height:400px; overflow:auto;">
+  <table id="sweepTable">
+    <thead id="sweepHead"></thead>
+    <tbody id="sweepBody"></tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>成交明细（{len(trades)} 条）</h2>
+  <div style="max-height:400px; overflow:auto;">
+  <table id="tradeTable">
+    <thead id="tradeHead"></thead>
+    <tbody id="tradeBody"></tbody>
+  </table>
+  </div>
+</div>
+
+<script>
+const sweepData = {sweep_rows_json};
+const tradeData = {trades_json};
+
+function buildTable(headers, rows, headId, bodyId) {{
+  const head = document.getElementById(headId);
+  const body = document.getElementById(bodyId);
+  if (!head || !body) return;
+  head.innerHTML = '<tr>' + headers.map(h => '<th>' + h + '</th>').join('') + '</tr>';
+  body.innerHTML = rows.slice(0, 200).map(row => '<tr>' +
+    headers.map(h => {{
+      const v = row[h];
+      const cls = typeof v === 'number' && v < 0 ? 'pnl-neg' : '';
+      return '<td class="' + cls + '">' + (v ?? '') + '</td>';
+    }}).join('') + '</tr>').join('');
+}}
+buildTable(sweepData.headers || [], sweepData.rows || [], 'sweepHead', 'sweepBody');
+buildTable(tradeData.headers || [], tradeData.rows || [], 'tradeHead', 'tradeBody');
+
+// PnL distribution chart
+const pnlCtx = document.getElementById('pnlChart');
+if (pnlCtx) {{
+  const pnls = (tradeData.rows || []).map(t => t.pnl || 0);
+  new Chart(pnlCtx, {{
+    type: 'bar',
+    data: {{
+      labels: pnls.map((_, i) => i + 1),
+      datasets: [{{
+        label: '每笔收益',
+        data: pnls,
+        backgroundColor: pnls.map(p => p >= 0 ? '#10b981' : '#ef4444'),
+      }}]
+    }},
+    options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}
+  }});
+}}
+
+// Holding days chart
+const holdCtx = document.getElementById('holdingChart');
+if (holdCtx) {{
+  const days = (tradeData.rows || []).map(t => t.holding_days || 0);
+  new Chart(holdCtx, {{
+    type: 'bar',
+    data: {{
+      labels: days.map((_, i) => i + 1),
+      datasets: [{{ label: '持仓天数', data: days, backgroundColor: '#6366f1' }}]
+    }},
+    options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}
+  }});
+}}
+</script>
+</body>
+</html>"""
+    return html
+
+
 def _persist_backtest_outputs(action: str, payload: dict[str, Any]) -> tuple[str, str]:
     BACKTEST_REPORT_DIR.mkdir(parents=True, exist_ok=True)
     parameters = payload.get("parameters", {}) or {}
