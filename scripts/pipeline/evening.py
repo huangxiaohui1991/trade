@@ -642,6 +642,9 @@ def run() -> dict:
         _logger.info(">> 写入信号快照...")
         vault.write_signal_snapshot(today_str)
 
+        _logger.info(">> 更新候选池总览...")
+        vault.write_candidate_pool(today_str)
+
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
             if not isinstance(info, dict):

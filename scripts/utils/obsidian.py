@@ -980,6 +980,193 @@ class ObsidianVault:
         self.write(relative_path, content)
         return self._full_path(relative_path)
 
+    def get_candidate_pool_path(self) -> str:
+        """返回候选池总览路径（每日快照则传入日期）。"""
+        return os.path.join(self.candidate_pool_dir, "候选池总览.md")
+
+    def render_candidate_pool(self, pool_entries: list[dict], score_history: list[dict]) -> str:
+        """
+        渲染候选池总览 markdown。
+
+        Args:
+            pool_entries: 当前池条目列表（来自 load_pool_snapshot）
+            score_history: 每日评分列表，每项含 snapshot_date + candidates
+        """
+        # 构建近 N 天分数映射
+        TREND_DAYS = 5
+        score_by_code: dict[str, list[tuple[str, float]]] = {}
+        for day_data in score_history[-TREND_DAYS:]:
+            date = day_data.get("snapshot_date", "")
+            candidates = day_data.get("candidates", []) or []
+            for c in candidates:
+                code = str(c.get("code", "")).strip()
+                if not code:
+                    continue
+                score = float(c.get("total_score", c.get("score", 0)) or 0)
+                score_by_code.setdefault(code, []).append((date, score))
+
+        # 按 bucket + score 排序
+        BUY_THRESHOLD = 7.0
+        WATCH_UPPER = 5.5
+        WATCH_LOWER = 4.5
+
+        edge_buy, edge_watch, core_stable, watch_stable, veto_list, avoid_list = [], [], [], [], [], []
+
+        for entry in pool_entries:
+            code = str(entry.get("code", "")).strip()
+            name = str(entry.get("name", code)).strip()
+            bucket = str(entry.get("bucket", "")).strip()
+            score = float(entry.get("total_score", 0) or 0)
+            veto_triggered = bool(entry.get("veto_triggered", False))
+            veto_signals = entry.get("veto_signals", []) or []
+            if isinstance(veto_signals, str):
+                veto_signals = [veto_signals]
+            metadata = entry.get("metadata", {}) or {}
+            added_date = metadata.get("added_date", entry.get("added_date", ""))
+
+            # 分数趋势
+            history = score_by_code.get(code, [])
+            if len(history) >= 2:
+                latest = history[-1][1] if history else 0
+                prev = history[-2][1] if len(history) > 1 else latest
+                delta = latest - prev
+                trend_icon = "📈" if delta > 0.3 else ("📉" if delta < -0.3 else "➡️")
+                trend_text = f"{trend_icon} {delta:+.1f}（{len(history)}天）"
+            elif len(history) == 1:
+                trend_text = f"📍 首次出现在 {history[0][0]}"
+            else:
+                trend_text = "❓ 无历史"
+
+            row = {
+                "code": code,
+                "name": name,
+                "bucket": bucket,
+                "score": score,
+                "veto": veto_triggered,
+                "veto_signals": veto_signals,
+                "trend": trend_text,
+                "added_date": added_date,
+            }
+
+            if veto_triggered:
+                veto_list.append(row)
+            elif bucket == "core":
+                if WATCH_UPPER <= score < BUY_THRESHOLD:
+                    edge_buy.append(row)
+                else:
+                    core_stable.append(row)
+            elif bucket == "watch":
+                if WATCH_LOWER <= score < WATCH_UPPER:
+                    edge_watch.append(row)
+                else:
+                    watch_stable.append(row)
+            else:
+                avoid_list.append(row)
+
+        def render_bucket_table(rows: list[dict], title: str) -> list[str]:
+            if not rows:
+                return []
+            lines = ["", f"### {title}", ""]
+            lines.extend([
+                "| 代码 | 名称 | 评分 | 否决 | 趋势 | 入池日期 |",
+                "|------|------|------|------|------|------|",
+            ])
+            for r in rows:
+                veto_flag = "⚠️ " + " ".join(r["veto_signals"]) if r["veto"] else "✅"
+                lines.append(f"| {r['code']} | {r['name']} | {r['score']:.1f} | {veto_flag} | {r['trend']} | {r['added_date'] or '—'} |")
+            return lines
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: candidate_pool_overview",
+            "tags: [候选池, 自动更新]",
+            "---",
+            "",
+            "# 候选池总览",
+            "",
+            f"> 统计日期: {datetime.now().strftime('%Y-%m-%d')} | 统计周期: 近 {TREND_DAYS} 天评分趋势",
+        ]
+
+        # 摘要
+        all_stocks = pool_entries or []
+        lines.extend([
+            "",
+            "## 池子摘要",
+            "",
+            f"| 类别 | 数量 |",
+            "|------|------|",
+            f"| 核心池·稳定 | {len(core_stable)} |",
+            f"| 核心池·买入边缘 | {len(edge_buy)} |",
+            f"| 观察池·稳定 | {len(watch_stable)} |",
+            f"| 观察池·边缘 | {len(edge_watch)} |",
+            f"| 否决池 | {len(veto_list)} |",
+            f"| 规避 | {len(avoid_list)} |",
+            "",
+            "> 买入边缘：核心池评分 5.5–6.9，距买入阈值 < 2 分",
+            "> 观察边缘：观察池评分 4.5–5.4，接近但未达买入线",
+        ])
+
+        for section_rows, title in [
+            (core_stable, "核心池·稳定（评分 ≥ 7.0 或 稳定）"),
+            (edge_buy, "核心池·买入边缘（评分 5.5–6.9）"),
+            (watch_stable, "观察池·稳定（评分 ≥ 5.5）"),
+            (edge_watch, "观察池·边缘（评分 4.5–5.4）"),
+            (veto_list, "否决池（veto_triggered = True）"),
+            (avoid_list, "规避池"),
+        ]:
+            lines.extend(render_bucket_table(section_rows, title))
+
+        lines.extend([
+            "",
+            "---",
+            "",
+            f"> 本页由 `render_candidate_pool()` 自动投影生成。",
+            f"> 数据来源: pool_snapshot_history（近 {TREND_DAYS} 天趋势）",
+        ])
+        return "\n".join(lines)
+
+    def write_candidate_pool(self, snapshot_date: str) -> str:
+        """
+        写入候选池总览。从 SQLite 加载近期评分历史并渲染。
+
+        Args:
+            snapshot_date: 日期字符串，格式 YYYY-MM-DD
+
+        Returns:
+            写入文件的绝对路径
+        """
+        from scripts.state.service import (
+            load_pool_snapshot_history,
+            load_candidate_snapshot_history,
+        )
+        import sqlite3
+
+        # 当前池条目
+        pool_bundle = load_pool_snapshot_history(snapshot_date=snapshot_date, limit=1)
+        pool_latest = pool_bundle.get("latest", {}) or {}
+        entries = pool_latest.get("entries", []) or []
+
+        # 近 5 天评分历史
+        TREND_DAYS = 5
+        score_history = []
+        for days_ago in range(TREND_DAYS):
+            from datetime import timedelta
+            date_offset = datetime.now() - timedelta(days=days_ago)
+            date_str = date_offset.strftime("%Y-%m-%d")
+            bundle = load_candidate_snapshot_history(snapshot_date=date_str, limit=1)
+            latest = bundle.get("latest", {}) or {}
+            if latest:
+                score_history.append({
+                    "snapshot_date": date_str,
+                    "candidates": latest.get("candidates", []) or [],
+                })
+
+        content = self.render_candidate_pool(entries, score_history)
+        relative_path = self.get_candidate_pool_path()
+        self.write(relative_path, content)
+        return self._full_path(relative_path)
+
 
 if __name__ == "__main__":
     # 简单测试
