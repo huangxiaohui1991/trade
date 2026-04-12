@@ -323,11 +323,10 @@ class MarketTimer:
         cache_key = symbol.replace("/", "_")
         index_name = _INDEX_NAME_BY_SYMBOL.get(symbol, symbol)
         market_code = _INDICES.get(index_name, {}).get("market_code", "")
-        # MX 优先：查指数历史数据
+        # MX 优先：查指数历史数据（TTL 6h）
         try:
-            from scripts.mx.mx_data import MXData
-            mx = MXData()
-            result = mx.query(f"{index_name} 近80个交易日收盘价")
+            from scripts.mx.mx_data import _cached_mx_query, TTL_HIST
+            result = _cached_mx_query(f"{index_name} 近80个交易日收盘价", TTL_HIST)
             data = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
             dto_list = data.get("dataTableDTOList", [])
 

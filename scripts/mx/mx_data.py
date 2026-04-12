@@ -12,6 +12,7 @@ mx_data — 妙想金融数据查询
   python -m scripts.mx.mx_data "贵州茅台近三年净利润"
 """
 
+import hashlib
 import os
 import sys
 import json
@@ -26,6 +27,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from scripts.mx.client import MXBaseClient, _PROJECT_ROOT as ROOT
 from scripts.utils.logger import get_logger
+from scripts.utils.cache import load_json_cache, save_json_cache
 
 _logger = get_logger("mx.data")
 OUTPUT_DIR = ROOT / "data" / "mx_output"
@@ -280,6 +282,61 @@ class MXData(MXBaseClient):
 
         desc_path.write_text("\n".join(description_lines), encoding="utf-8")
         return file_path, desc_path
+
+
+# ---------------------------------------------------------------------------
+# MX Data 缓存 TTL（秒）
+# ---------------------------------------------------------------------------
+# 股票名称：几乎不变，缓存 24h
+TTL_NAME = 24 * 3600
+# 日线历史数据：日频变化，收盘后有效，缓存 6h
+TTL_HIST = 6 * 3600
+# 基本面（ROE/营收/现金流）：季频，缓存 4h
+TTL_FINANCIAL = 4 * 3600
+# 资金流向：日内可能变化，缓存 2h
+TTL_FLOW = 2 * 3600
+# 实时行情：分钟级，缓存 1h
+TTL_REALTIME = 1 * 3600
+
+
+# ---------------------------------------------------------------------------
+# 缓存查询辅助函数
+# ---------------------------------------------------------------------------
+
+def _query_cache_key(query: str) -> str:
+    """生成查询字符串的 MD5 哈希作为缓存 key（避免文件系统路径问题）"""
+    return hashlib.md5(query.strip().encode("utf-8")).hexdigest()[:32]
+
+
+def _cached_mx_query(query: str, ttl_seconds: int) -> Dict[str, Any]:
+    """
+    带缓存的 mx_data 查询。
+
+    读缓存 → 命中则返回；未命中则调 API → 成功写入缓存后返回。
+    失败返回空 dict（status != 0），使调用方 parse_result 自然走 error 分支。
+
+    Args:
+        query: 妙想查询语句
+        ttl_seconds: 缓存有效期
+
+    Returns:
+        API 返回的 dict；失败或缓存未命中返回 {"status": -1, "message": str}
+    """
+    cache_key = _query_cache_key(query)
+    cached = load_json_cache("mx_data", cache_key, max_age_seconds=ttl_seconds)
+    if cached is not None:
+        _logger.debug(f"[mx_data cache hit] ttl={ttl_seconds}s key={cache_key[:8]} query={query[:40]}")
+        return cached.get("data", {})
+
+    try:
+        mx = MXData()
+        result = mx.query(query)
+        save_json_cache("mx_data", cache_key, result)
+        _logger.info(f"[mx_data cache miss→saved] ttl={ttl_seconds}s key={cache_key[:8]} query={query[:40]}")
+        return result
+    except Exception as e:
+        _logger.debug(f"[mx_data cache miss→api failed] {e}")
+        return {"status": -1, "message": str(e)}
 
 
 def main():

@@ -150,14 +150,13 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
         "cached_at": None,
     }
 
-    # ── Source 0: 妙想 mx_data API（优先）────────────────────────────────────
+    # ── Source 0: 妙想 mx_data API（优先，TTL 2h）────────────────────────────
     result["sources_tried"].append("mx_data")
     try:
-        from scripts.mx.mx_data import MXData
+        from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_FLOW
         from scripts.engine.technical import get_stock_name
         name = get_stock_name(code)
-        mx = MXData()
-        mx_result = mx.query(f"{name} 主力资金流向 近5日")
+        mx_result = _cached_mx_query(f"{name} 主力资金流向 近5日", TTL_FLOW)
         tables, _, _, err = MXData.parse_result(mx_result)
 
         if not err and tables:

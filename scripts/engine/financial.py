@@ -201,16 +201,15 @@ def _tencent_hist(code: str, days: int = 60) -> "pd.DataFrame | None":
 
 def _try_mx_financial(code: str, name: str) -> dict:
     """
-    通过妙想 mx_data API 获取基本面数据（优先数据源）。
+    通过妙想 mx_data API 获取基本面数据（优先数据源，TTL 4h）。
     成功返回标准 dict，失败返回 None。
     """
     try:
-        from scripts.mx.mx_data import MXData
-        mx = MXData()
+        from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_FINANCIAL
 
-        # 查询 ROE + 营收 + 现金流
+        # 查询 ROE + 营收 + 现金流（带缓存，TTL 4h）
         query = f"{name} 最近一年ROE 营收增长率 经营现金流"
-        result = mx.query(query)
+        result = _cached_mx_query(query, TTL_FINANCIAL)
         tables, _, _, err = MXData.parse_result(result)
 
         if err or not tables:

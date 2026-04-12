@@ -129,17 +129,16 @@ def get_realtime(codes: list) -> dict:
         result["stale"] = True
         result["source_chain"].append("eastmoney_realtime_failed")
 
-        # fallback 1: 妙想 mx_data API
+        # fallback 1: 妙想 mx_data API（TTL 1h）
         try:
-            from scripts.mx.mx_data import MXData
-            mx = MXData()
+            from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_REALTIME
             for code in codes:
                 code = normalize_code(code)
                 if code in result["data"]:
                     continue
                 try:
                     name = get_stock_name(code)
-                    mx_result = mx.query(f"{name} 最新价 涨跌幅")
+                    mx_result = _cached_mx_query(f"{name} 最新价 涨跌幅", TTL_REALTIME)
                     tables, _, _, err = MXData.parse_result(mx_result)
                     if not err and tables:
                         for row in tables[0].get("rows", []):

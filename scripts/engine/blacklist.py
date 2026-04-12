@@ -83,11 +83,10 @@ def check_st_risk(code: str) -> BlacklistResult:
     """检查是否 ST/*ST/退市风险（MX优先 → akshare fallback）"""
     result = BlacklistResult(code=code)
 
-    # MX 优先：查股票名称判断 ST
+    # MX 优先：查股票名称判断 ST（TTL 24h）
     try:
-        from scripts.mx.mx_data import MXData
-        mx = MXData()
-        mx_result = mx.query(f"{code} 名称")
+        from scripts.mx.mx_data import _cached_mx_query, TTL_NAME
+        mx_result = _cached_mx_query(f"{code} 名称", TTL_NAME)
         data = mx_result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
         tags = data.get("entityTagDTOList", [])
         if tags:

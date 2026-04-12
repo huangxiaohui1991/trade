@@ -72,11 +72,10 @@ def get_stock_name(code: str) -> str:
     if code in _name_cache:
         return _name_cache[code]
 
-    # MX 优先：从妙想查询股票名称
+    # MX 优先：从妙想查询股票名称（TTL 24h，几乎不变）
     try:
-        from scripts.mx.mx_data import MXData
-        mx = MXData()
-        result = mx.query(f"{code}最新价")
+        from scripts.mx.mx_data import _cached_mx_query, TTL_NAME
+        result = _cached_mx_query(f"{code}最新价", TTL_NAME)
         dto_list = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {}).get("dataTableDTOList", [])
         if dto_list:
             tag = dto_list[0].get("entityTagDTO", {})
@@ -114,13 +113,12 @@ def _get_hist_data(code: str, days: int = 120) -> pd.DataFrame:
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
 
-    # Source 0: 妙想 mx_data API（优先）
+    # Source 0: 妙想 mx_data API（优先，TTL 6h）
     try:
-        from scripts.mx.mx_data import MXData
+        from scripts.mx.mx_data import _cached_mx_query, TTL_HIST
         name = _name_cache.get(code, code)
-        mx = MXData()
         query = f"{name if name != code else code}近{days + 60}个交易日每天的收盘价和成交量"
-        result = mx.query(query)
+        result = _cached_mx_query(query, TTL_HIST)
         data = result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
         dto_list = data.get("dataTableDTOList", [])
 

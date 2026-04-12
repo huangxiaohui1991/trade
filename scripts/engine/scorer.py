@@ -591,15 +591,11 @@ def _get_mx_financial_supplement(code: str, name: str) -> dict[str, Any]:
     优先 MX mx_data，失败则 fallback 到 get_financial()（MX → 东财 → 新浪）。
     返回 {"revenue_growth": float, "cash_flow_positive": bool}
     """
-    # 1. 先试 MX 快速查询
+    # 1. 先试 MX 快速查询（TTL 4h）
     parsed = {}
     try:
-        from scripts.mx.mx_data import MXData
-        mx = MXData()
-        try:
-            result = mx.query(f"{name} 最近一期营收同比增长率 经营活动现金流净额")
-        except Exception as e:
-            raise DataSourceError(str(e)) from e
+        from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_FINANCIAL
+        result = _cached_mx_query(f"{name} 最近一期营收同比增长率 经营活动现金流净额", TTL_FINANCIAL)
         tables, _, _, err = MXData.parse_result(result)
         if not err and tables:
             for table in tables:
@@ -650,12 +646,8 @@ def _check_earnings_bomb(code: str, name: str) -> bool:
     业绩暴雷检测：查最近业绩预告/快报，净利润同比下滑>30%或由盈转亏 → True（暴雷）。
     """
     try:
-        from scripts.mx.mx_data import MXData
-        mx = MXData()
-        try:
-            result = mx.query(f"{name} 最近一期净利润同比增长率")
-        except Exception as e:
-            raise DataSourceError(str(e)) from e
+        from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_FINANCIAL
+        result = _cached_mx_query(f"{name} 最近一期净利润同比增长率", TTL_FINANCIAL)
         tables, _, _, err = MXData.parse_result(result)
         if err or not tables:
             return False
