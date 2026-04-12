@@ -2459,7 +2459,7 @@ def main():
                         result = calc_stop_loss(
                             cost=args.cost, ma20=args.ma20 or 0,
                             style=args.style, entry_day_low=args.entry_day_low or 0,
-                            ma60=0, highest_price=args.highest_price or 0,
+                            ma60=0,
                         )
                         result["command"] = "risk"
                         result["action"] = "stop-loss"
