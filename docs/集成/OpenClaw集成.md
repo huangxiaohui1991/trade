@@ -351,3 +351,78 @@ fixture JSON 结构：
   }
 }
 ```
+
+## 数据查询 / 评分 / 风控 / 模拟盘 CLI
+
+Agent 需要直接查询数据或执行风控时（不在 orchestrate workflow 内）：
+
+### 数据查询
+
+```bash
+# 技术指标（均线、RSI、动量）
+bin/trade data technical 000001 --days 60 --json
+
+# 基本面（ROE、营收增长率、经营现金流）
+bin/trade data financial 000001 --json
+
+# 资金流向（主力净流入、北向资金）
+bin/trade data flow 000001 --days 5 --json
+
+# 实时行情（价格、涨跌幅）
+bin/trade data realtime 000001 600036 --json
+
+# 大盘指数状态
+bin/trade data market-index --json
+```
+
+### 评分
+
+```bash
+# 单股评分
+bin/trade score single 000001 --json
+
+# 批量评分（代码列表）
+bin/trade score batch --codes 000001,600036 --json
+
+# 核心池全部评分
+bin/trade score pool --pool core --json
+```
+
+### 风控
+
+```bash
+# 黑名单 + 风险检查
+bin/trade risk check 000001 --json
+
+# 组合风控（总仓位暴露、周买入次数、持仓数限制）
+bin/trade risk portfolio --exposure 100000 --week-buys 2 --holding-count 5 --proposed 50000 --json
+
+# 仓位计算（4% 风险公式）
+bin/trade risk position-size --capital 450000 --price 18.50 --risk-pct 4 --json
+
+# 止损价格计算
+bin/trade risk stop-loss --cost 18.00 --ma20 17.50 --style momentum --highest-price 20.00 --json
+
+# 是否应该离场
+bin/trade risk should-exit 000001 --price 17.00 --ma20 17.50 --highest-price 20.00 --json
+```
+
+### 市场时钟
+
+```bash
+bin/trade market signal --json      # GREEN / YELLOW / RED / CLEAR
+bin/trade market detail --json      # 各指数详细数据
+bin/trade market multiplier --json   # 仓位系数
+```
+
+### 模拟盘（Shadow Trade）
+
+```bash
+bin/trade shadow status --json
+bin/trade shadow check-stops --dry-run --json
+bin/trade shadow buy-new-picks --dry-run --json
+bin/trade shadow reconcile --json
+bin/trade shadow reconcile --apply --json
+bin/trade shadow consistency --window 180 --json
+bin/trade shadow report --json
+```

@@ -57,6 +57,14 @@
 - `bin/trade orchestrate <workflow> --json`
 
 除非用户明确要求单步重跑，否则不要优先使用 `bin/trade run <pipeline> --json`。
+
+当你需要直接查询数据时（不在 workflow 内），使用以下命令：
+
+- 数据查询：`bin/trade data technical <code>`、`bin/trade data financial <code>`、`bin/trade data flow <code>`、`bin/trade data realtime <code> [code...]`、`bin/trade data market-index`
+- 评分：`bin/trade score single <code>`、`bin/trade score batch --codes <c1,c2>`、`bin/trade score pool --pool core|watch|all`
+- 风控：`bin/trade risk check <code>`、`bin/trade risk portfolio --exposure N --week-buys N --holding-count N`、`bin/trade risk position-size --capital N --price N`、`bin/trade risk stop-loss --cost N --ma20 N`、`bin/trade risk should-exit <code> --price N`
+- 市场时钟：`bin/trade market signal`、`bin/trade market detail`、`bin/trade market multiplier`
+- 模拟盘：`bin/trade shadow status`、`bin/trade shadow check-stops --dry-run`、`bin/trade shadow buy-new-picks --dry-run`、`bin/trade shadow reconcile`、`bin/trade shadow consistency --window N`
 ```
 
 ## 推荐调用顺序模板
