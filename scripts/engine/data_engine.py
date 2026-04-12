@@ -93,6 +93,51 @@ def get_realtime(codes: list) -> dict:
     if not codes:
         return result
 
+    # 优先：MX 缓存数据（延迟低、稳定）
+    try:
+        from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_REALTIME
+        from scripts.engine.technical import normalize_code, get_stock_name
+        for code in codes:
+            code = normalize_code(code)
+            if code in result["data"]:
+                continue
+            try:
+                name = get_stock_name(code)
+                mx_result = _cached_mx_query(f"{name} 最新价 涨跌幅", TTL_REALTIME)
+                tables, _, _, err = MXData.parse_result(mx_result)
+                if not err and tables:
+                    for row in tables[0].get("rows", []):
+                        price_val = None
+                        chg_val = 0
+                        for k, v in row.items():
+                            v_str = str(v).strip().replace(",", "").replace("%", "")
+                            try:
+                                num = float(v_str) if v_str and v_str not in ("", "-", "—") else None
+                            except (ValueError, TypeError):
+                                num = None
+                            if num is None:
+                                continue
+                            if "最新" in k or "收盘" in k or "价" in k:
+                                price_val = num
+                            elif "涨跌幅" in k:
+                                chg_val = num
+                        if price_val:
+                            result["data"][code] = {
+                                "code": code,
+                                "name": name,
+                                "price": price_val,
+                                "change_pct": chg_val,
+                                "source": "mx_data",
+                            }
+                            result["source_chain"].append("mx_data")
+                            break
+            except Exception:
+                pass
+        if any(code in result["data"] for code in codes):
+            result["source_chain"].insert(0, "mx_data")
+    except Exception as e_mx:
+        _logger.warning(f"[get_realtime] MX 优先查询失败: {e_mx}")
+
     # 东财实时行情接口（批量）
     try:
         df = ak.stock_zh_a_spot_em()
@@ -129,50 +174,7 @@ def get_realtime(codes: list) -> dict:
         result["stale"] = True
         result["source_chain"].append("eastmoney_realtime_failed")
 
-        # fallback 1: 妙想 mx_data API（TTL 1h）
-        try:
-            from scripts.mx.mx_data import MXData, _cached_mx_query, TTL_REALTIME
-            for code in codes:
-                code = normalize_code(code)
-                if code in result["data"]:
-                    continue
-                try:
-                    name = get_stock_name(code)
-                    mx_result = _cached_mx_query(f"{name} 最新价 涨跌幅", TTL_REALTIME)
-                    tables, _, _, err = MXData.parse_result(mx_result)
-                    if not err and tables:
-                        for row in tables[0].get("rows", []):
-                            price_val = None
-                            chg_val = 0
-                            for k, v in row.items():
-                                v_str = str(v).strip().replace(",", "").replace("%", "")
-                                try:
-                                    num = float(v_str) if v_str and v_str not in ("", "-", "—") else None
-                                except (ValueError, TypeError):
-                                    num = None
-                                if num is None:
-                                    continue
-                                if "最新" in k or "收盘" in k or "价" in k:
-                                    price_val = num
-                                elif "涨跌幅" in k:
-                                    chg_val = num
-                            if price_val:
-                                result["data"][code] = {
-                                    "code": code,
-                                    "name": name,
-                                    "price": price_val,
-                                    "change_pct": chg_val,
-                                    "source": "mx_data",
-                                }
-                                result["source_chain"].append("mx_data")
-                                break
-                except Exception:
-                    pass
-        except Exception as e2:
-            _logger.warning(f"[get_realtime] MX fallback 失败: {e2}")
-            result["source_chain"].append("mx_data_failed")
-
-        # fallback 2: 腾讯实时行情
+        # fallback: 腾讯实时行情
         try:
             from scripts.engine.financial import _tencent_realtime
             for code in codes:
@@ -204,7 +206,7 @@ def get_realtime(codes: list) -> dict:
         except Exception as e2:
             _logger.info(f"[get_realtime] 腾讯 fallback 失败: {e2}")
 
-        # fallback 3: 历史日线
+        # fallback 2: 历史日线
         for code in codes:
             code = normalize_code(code)
             try:

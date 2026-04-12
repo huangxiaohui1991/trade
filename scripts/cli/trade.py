@@ -2273,10 +2273,10 @@ def main():
     risk_portfolio.add_argument("--holding-count", type=int, required=True, help="Number of current holdings")
     risk_portfolio.add_argument("--proposed", type=float, default=0, help="Proposed new position amount (¥)")
 
-    risk_pos = risk_sub.add_parser("position-size", help="Calculate position size (4% risk formula)")
+    risk_pos = risk_sub.add_parser("position-size", help="Calculate position size (4%% risk formula)")
     risk_pos.add_argument("--capital", type=float, required=True, help="Total capital (¥)")
     risk_pos.add_argument("--price", type=float, required=True, help="Entry price (¥)")
-    risk_pos.add_argument("--risk-pct", type=float, default=4.0, help="Risk percentage (default: 4%)")
+    risk_pos.add_argument("--risk-pct", type=float, default=4.0, help="Risk percentage (default: 4%%)")
 
     risk_stop = risk_sub.add_parser("stop-loss", help="Calculate dynamic stop-loss price")
     risk_stop.add_argument("--cost", type=float, required=True, help="Cost basis price (¥)")
