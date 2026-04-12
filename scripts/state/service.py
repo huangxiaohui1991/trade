@@ -305,6 +305,22 @@ CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_entries_lookup
 CREATE INDEX IF NOT EXISTS idx_pool_snapshot_history_lookup
   ON pool_snapshot_history(snapshot_date, history_group_id, updated_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS capital_balance_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,
+  as_of_date TEXT NOT NULL,
+  cash_value REAL NOT NULL DEFAULT 0,
+  total_capital REAL NOT NULL DEFAULT 0,
+  total_market_value REAL NOT NULL DEFAULT 0,
+  exposure REAL NOT NULL DEFAULT 0,
+  source TEXT DEFAULT '',
+  updated_at TEXT NOT NULL,
+  UNIQUE(scope, as_of_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_capital_balance_history_date
+  ON capital_balance_history(as_of_date, scope);
+
 CREATE INDEX IF NOT EXISTS idx_pool_snapshot_history_entries_lookup
   ON pool_snapshot_history_entries(snapshot_id, bucket, total_score DESC, code);
 """
@@ -621,6 +637,96 @@ def _replace_portfolio_scope_snapshot(
                 _json_dumps(balance.get("metadata", {})),
             ),
         )
+
+
+def save_daily_capital_snapshot(date_str: str | None = None, scopes: list[str] | None = None) -> None:
+    """
+    收盘后保存当日资产快照到历史表。
+
+    Args:
+        date_str: 快照日期，默认今天
+        scopes: 要记录的 scope 列表，默认 cn_a_system + hk_legacy
+    """
+    if date_str is None:
+        date_str = _today_str()
+    if scopes is None:
+        scopes = [PRIMARY_SCOPE, SECONDARY_SCOPE]
+
+    snapshot = load_portfolio_snapshot()
+    balances = snapshot.get("balances", [])
+
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        for balance in balances:
+            scope = balance.get("scope", "")
+            if scope not in scopes:
+                continue
+            conn.execute(
+                """
+                INSERT INTO capital_balance_history(
+                  scope, as_of_date, cash_value, total_capital, total_market_value,
+                  exposure, source, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope, as_of_date) DO UPDATE SET
+                  cash_value = excluded.cash_value,
+                  total_capital = excluded.total_capital,
+                  total_market_value = excluded.total_market_value,
+                  exposure = excluded.exposure,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    scope,
+                    date_str,
+                    round(balance.get("cash_value", 0.0), 2),
+                    round(balance.get("total_capital", 0.0), 2),
+                    round(balance.get("total_market_value", 0.0), 2),
+                    round(balance.get("exposure", 0.0), 4),
+                    balance.get("source", "evening_pipeline"),
+                    _now_ts(),
+                ),
+            )
+        conn.commit()
+
+
+def get_capital_for_date(date_str: str, scope: str = "merged") -> dict:
+    """
+    查询指定日期的资产快照。
+
+    Args:
+        date_str: 日期字符串，如 "2026-04-13"
+        scope: "merged"（实盘=A股+港股）、"cn_a_system"、"hk_legacy"
+
+    Returns:
+        {"total_capital": float, "cash_value": float, "total_market_value": float, "found": bool}
+    """
+    result = {"total_capital": 0.0, "cash_value": 0.0, "total_market_value": 0.0, "found": False}
+    if scope == "merged":
+        merged = get_capital_for_date(date_str, "cn_a_system")
+        if not merged["found"]:
+            merged = {"total_capital": 0.0, "cash_value": 0.0, "total_market_value": 0.0, "found": False}
+        hk = get_capital_for_date(date_str, "hk_legacy")
+        if not hk["found"]:
+            hk = {"total_capital": 0.0, "cash_value": 0.0, "total_market_value": 0.0, "found": False}
+        result["cash_value"] = merged.get("cash_value", 0.0) + hk.get("cash_value", 0.0)
+        result["total_market_value"] = merged.get("total_market_value", 0.0) + hk.get("total_market_value", 0.0)
+        result["total_capital"] = merged.get("total_capital", 0.0) + hk.get("total_capital", 0.0)
+        result["found"] = merged["found"] or hk["found"]
+        return result
+
+    with _connect() as conn:
+        _ensure_bootstrapped(conn)
+        row = conn.execute(
+            "SELECT cash_value, total_capital, total_market_value FROM capital_balance_history "
+            "WHERE scope = ? AND as_of_date = ?",
+            (scope, date_str),
+        ).fetchone()
+        if row:
+            result["cash_value"] = row[0]
+            result["total_capital"] = row[1]
+            result["total_market_value"] = row[2]
+            result["found"] = True
+    return result
 
 
 def _replace_trade_events(conn: sqlite3.Connection, events: Iterable[dict]) -> None:

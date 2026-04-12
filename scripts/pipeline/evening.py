@@ -42,6 +42,7 @@ from scripts.state import (
     load_pool_snapshot,
     load_portfolio_snapshot,
     save_market_snapshot_history,
+    save_daily_capital_snapshot,
 )
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_evening_report
@@ -662,6 +663,9 @@ def run() -> dict:
 
         _logger.info(">> 回填今日交易到日志...")
         backfill_count = _backfill_today_trades(vault, today_str)
+
+        _logger.info(f">> 保存今日资产快照...")
+        save_daily_capital_snapshot(date_str=today_str)
         if backfill_count:
             _logger.info(f"  回填 {backfill_count} 条交易记录")
 

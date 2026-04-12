@@ -246,15 +246,69 @@ class ObsidianVault:
         return rows
 
     def render_account_overview(self, primary_snapshot: dict, paper_snapshot: Optional[dict] = None) -> str:
-        """渲染账户总览 markdown。"""
+        """渲染账户总览 markdown。
+
+        实盘 = cn_a_system（A 股） + hk_legacy（港股）合并计算。
+        """
         primary_snapshot = primary_snapshot or {}
         paper_snapshot = paper_snapshot or {}
-        primary_balance = self._snapshot_balance(primary_snapshot, scope="cn_a_system")
-        primary_positions = primary_snapshot.get("positions", []) if isinstance(primary_snapshot, dict) else []
-        paper_positions = paper_snapshot.get("positions", []) if isinstance(paper_snapshot, dict) else []
-        overview_rows = primary_balance.get("metadata", {}).get("account_overview", []) if isinstance(primary_balance, dict) else []
-        primary_row, primary_issues = self._render_snapshot_row("实盘", primary_snapshot, "cn_a_system")
+
+        # 合并 cn_a_system + hk_legacy 为实盘总览
+        balances = primary_snapshot.get("balances", []) if isinstance(primary_snapshot, dict) else []
+        cn_balance = next((b for b in balances if b.get("scope") == "cn_a_system"), {})
+        hk_balance = next((b for b in balances if b.get("scope") == "hk_legacy"), {})
+        real_balance = {
+            "scope": "实盘合并",
+            "cash_value": cn_balance.get("cash_value", 0.0) + hk_balance.get("cash_value", 0.0),
+            "total_market_value": cn_balance.get("total_market_value", 0.0) + hk_balance.get("total_market_value", 0.0),
+            "total_capital": cn_balance.get("total_capital", 0.0) + hk_balance.get("total_capital", 0.0),
+            "exposure": 0.0,  # 由 _render_snapshot_row 重新计算
+            "source": cn_balance.get("source", ""),
+            "as_of_date": max(
+                str(cn_balance.get("as_of_date", "") or ""),
+                str(hk_balance.get("as_of_date", "") or ""),
+            ) or "—",
+        }
+        # 合并后暴露度 = 总市值 / 总资产
+        if real_balance["total_capital"] > 0:
+            real_balance["exposure"] = round(real_balance["total_market_value"] / real_balance["total_capital"], 4)
+
+        overview_rows = cn_balance.get("metadata", {}).get("account_overview", []) if isinstance(cn_balance, dict) else []
+
+        all_positions = primary_snapshot.get("positions", []) if isinstance(primary_snapshot, dict) else []
+        # 实盘持仓 = cn_a_system + hk_legacy
+        real_positions = [p for p in all_positions if p.get("scope") in ("cn_a_system", "hk_legacy")]
+        paper_positions = [p for p in all_positions if p.get("scope") == "paper_mx"]
+
+        # 传入合成 snapshot（含 balance），避免 _snapshot_balance 取错 scope
+        real_snapshot = {
+            "summary": {
+                "total_capital": real_balance["total_capital"],
+                "cash_value": real_balance["cash_value"],
+                "total_market_value": real_balance["total_market_value"],
+                "current_exposure": real_balance["exposure"],
+                "holding_count": len([p for p in real_positions if int(p.get("shares", 0) or 0) > 0]),
+            },
+            "as_of_date": real_balance["as_of_date"],
+            "balances": [real_balance],
+        }
+        real_row, real_issues = self._render_snapshot_row("实盘", real_snapshot, scope="")
         paper_row, paper_issues = self._render_snapshot_row("模拟盘", paper_snapshot, "paper_mx")
+
+        # 合并 cn_a + hk 的 metadata 补充摘录
+        hk_meta = hk_balance.get("metadata", {}) if isinstance(hk_balance, dict) else {}
+        hk_rows = hk_meta.get("hk_legacy_holdings", [])
+        if hk_rows and isinstance(overview_rows, list):
+            for row in overview_rows:
+                if row.get("项目", "").startswith("港股持仓"):
+                    row["金额"] = f"¥{hk_balance.get('total_market_value', 0):.2f}"
+                    if hk_rows:
+                        row["说明"] = f"{hk_rows[0].get('持有股数', 0)}股 × 成本¥{hk_rows[0].get('平均成本', 0)}"
+        # 更新总资产行
+        for row in overview_rows:
+            if row.get("项目", "").startswith("账户总资产"):
+                row["金额"] = f"约¥{real_balance['total_capital']:.2f}"
+                row["说明"] = f"现金{real_balance['cash_value']:.0f} + 港股市值{real_balance['total_market_value']:.2f}"
 
         lines = [
             "---",
@@ -269,16 +323,16 @@ class ObsidianVault:
             "",
             "| 账户 | 快照日期 | 数据来源 | 数据状态 | 持仓数 | 仓位 | 现金 | 持仓市值 | 总资产 |",
             "|------|----------|----------|----------|--------|------|------|----------|--------|",
-            primary_row,
+            real_row,
             paper_row,
             "",
             "## 数据提示",
             "",
         ]
 
-        if primary_issues or paper_issues:
-            if primary_issues:
-                lines.extend([f"- 实盘: {item}" for item in primary_issues])
+        if real_issues or paper_issues:
+            if real_issues:
+                lines.extend([f"- 实盘: {item}" for item in real_issues])
             if paper_issues:
                 lines.extend([f"- 模拟盘: {item}" for item in paper_issues])
         else:
@@ -304,7 +358,7 @@ class ObsidianVault:
             "## 实盘持仓",
             "",
         ])
-        lines.extend(self._render_positions_table(primary_positions, scope="cn_a_system"))
+        lines.extend(self._render_positions_table(real_positions, scope=""))
         lines.extend([
             "",
             "## 模拟盘持仓",

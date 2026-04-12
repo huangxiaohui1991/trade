@@ -20,7 +20,7 @@ pipeline/weekly_review.py — 周报生成（周日 20:00 执行）
 import os
 import sys
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_cls
 from pathlib import Path
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +37,7 @@ from scripts.utils.discord_push import send_weekly_report
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
 from scripts.engine.trading_record import load_activity_summary
-from scripts.state import load_trade_review
+from scripts.state import load_trade_review, get_capital_for_date
 
 _logger = get_logger("pipeline.weekly_review")
 
@@ -101,10 +101,21 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
     """生成周报 markdown 内容"""
     week_str = f"{year}-W{week_num:02d}"
 
-    # 计算日期范围（本周周一到周五）
-    now = datetime.now()
-    monday = now - timedelta(days=now.weekday())
+    # 计算本周周一到周五（基于 ISO 周）
+    jan4 = date_cls(year, 1, 4)
+    monday = jan4 + timedelta(weeks=week_num - 1, days=-jan4.weekday())
     friday = monday + timedelta(days=4)
+
+    # 查询周初/周末资产（实盘 = A股 + 港股合并）
+    week_start = get_capital_for_date(monday.isoformat(), "merged")
+    week_end = get_capital_for_date(friday.isoformat(), "merged")
+    week_start_str = f"¥{week_start['total_capital']:,.2f}" if week_start["found"] else "¥（无快照）"
+    week_end_str = f"¥{week_end['total_capital']:,.2f}" if week_end["found"] else "¥（无快照）"
+
+    # 计算收益率
+    weekly_return_pct = 0.0
+    if week_start["found"] and week_end["found"] and week_start["total_capital"] > 0:
+        weekly_return_pct = round((week_end["total_capital"] - week_start["total_capital"]) / week_start["total_capital"] * 100, 2)
 
     trade_events = trade_events or stats.get("trade_events", [])
     pnl_abs = _safe_float(stats.get("realized_pnl", stats.get("total_pnl", 0)))
@@ -155,10 +166,10 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         "",
         "| 项目 | 数据 |",
         "|------|------|",
-        f"| 周初资产 | ¥（手动填写） |",
-        f"| 周末资产 | ¥（手动填写） |",
+        f"| 周初资产 | {week_start_str} |",
+        f"| 周末资产 | {week_end_str} |",
         f"| 本周盈亏 | ¥{pnl_abs:+,.2f}（自动统计） |",
-        f"| 收益率 | %（需填写资产后计算） |",
+        f"| 收益率 | {weekly_return_pct:+.2f}% |",
         f"| 主动买入次数 | {buy_count} 次（结构化事件） |",
         f"| 主动卖出次数 | {sell_count} 次（结构化事件） |",
         f"| 交易事件数 | {trade_count} 条（结构化事件） |",
@@ -166,7 +177,7 @@ def _build_weekly_report(vault: ObsidianVault, stats: dict,
         f"| 胜率 | {win_rate:.0f}%（自动统计） |",
         f"| 盈亏比 | {profit_loss_ratio:.2f} |",
         "",
-        "> 周初/周末资产需手动填写（券商APP截图），其余由系统从结构化交易事件自动统计。",
+        "> 周初/周末资产由每日收盘快照自动提取，其余由系统从结构化交易事件自动统计。",
         "",
         "---",
         "",

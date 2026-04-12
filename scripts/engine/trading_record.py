@@ -9,7 +9,11 @@ engine/trading_record.py — 交易记录与 P&L 追踪
   - check_weekly_buy_count：本周已买次数（风控用）
 
 数据存储：data/交易记录/YYYY-MM.csv（每月一个文件）
-格式：股票代码,名称,日期,操作,价格,数量,金额,盈亏,盈亏率,持有天数,卖出原因,记录时间
+格式：股票代码,名称,日期,操作,价格,数量,金额,盈亏,盈亏率,持有天数,卖出原因,记录时间,佣金,印花税,总费用,市场
+
+费率规则（按用户实际券商）：
+  - A股/ETF：佣金 0.12‰，最低 5 元/笔；卖出加收 0.1% 印花税
+  - 港股：佣金 0.12‰，最低 5 元/笔；无印花税
 """
 
 import os
@@ -53,13 +57,65 @@ def _get_record_path(dt: Optional[date] = None) -> Path:
     return TRADE_RECORD_DIR / f"{dt.strftime('%Y-%m')}.csv"
 
 
+def _detect_market(code: str) -> str:
+    """
+    根据股票代码判断市场类型。
+
+    Returns:
+        "HK"  — 港股（如 09927、009927、99927，或含 .HK / HK 后缀）
+        "ETF" — 基金/ETF（以 5 开头，如 512000）
+        "A"   — A股（其他所有）
+    """
+    c = str(code).strip().upper()
+    # 含 HK 标记的视为港股
+    if c.endswith("HK") or ".HK" in c or "_HK" in c:
+        return "HK"
+    # 纯数字码：5 开头 = ETF，其余都走 A 股规则
+    # 港股代码通常 5 位且首位为 9（09927），或首位为 0 但含 HK 标记
+    c_stripped = c.lstrip("0")
+    if c_stripped.startswith("9"):
+        return "HK"
+    if c.startswith("5"):
+        return "ETF"
+    return "A"
+
+
+def _calc_fees(amount: float, market: str, side: str) -> tuple[float, float, float]:
+    """
+    计算交易费用。
+
+    Args:
+        amount: 成交金额（价格 × 股数）
+        market: 市场类型（"A" / "ETF" / "HK"）
+        side:  "BUY" / "SELL"
+
+    Returns:
+        (commission, stamp_duty, total_fee)
+        commission: 佣金，按 0.12‰ 计，最低 5 元
+        stamp_duty: 印花税（仅 A股/ETF 卖出收取 0.1%）
+        total_fee: 佣金 + 印花税
+    """
+    commission_rate = 0.00012  # 0.12‰
+    commission = round(amount * commission_rate, 2)
+    if commission < 5.0:
+        commission = 5.0
+
+    stamp_duty = 0.0
+    if side == "SELL" and market in ("A", "ETF"):
+        stamp_duty = round(amount * 0.001, 2)  # 0.1%
+
+    total_fee = round(commission + stamp_duty, 2)
+    return commission, stamp_duty, total_fee
+
+
 def _ensure_header(path: Path):
     if not path.exists():
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["股票代码", "名称", "日期", "操作",
                              "价格", "数量", "金额", "盈亏", "盈亏率",
-                             "持有天数", "卖出原因", "记录时间"])
+                             "持有天数", "卖出原因", "记录时间",
+                             "佣金", "印花税", "总费用", "市场"])
 
 
 def _holdings_key(code: str) -> str:
@@ -339,8 +395,9 @@ def record_buy(code: str, name: str, price: float, shares: int,
 
     record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     amount = round(price * shares, 2)
-    fee = round(amount * 0.0003, 2)  # 印花税+佣金估算
-    total_cost = round(amount + fee, 2)
+    market = _detect_market(code)
+    commission, stamp_duty, total_fee = _calc_fees(amount, market, "BUY")
+    total_cost = round(amount + total_fee, 2)
 
     _ensure_header(_get_record_path())
     path = _get_record_path()
@@ -355,7 +412,11 @@ def record_buy(code: str, name: str, price: float, shares: int,
             "",  # 盈亏率空白
             "",  # 持有天数空白
             "",  # 卖出原因空白
-            record_time
+            record_time,
+            f"{commission:.2f}",
+            f"{stamp_duty:.2f}",
+            f"{total_fee:.2f}",
+            market,
         ])
 
     # 更新运行时持仓缓存
@@ -380,9 +441,12 @@ def record_buy(code: str, name: str, price: float, shares: int,
 
     return {
         "success": True,
-        "message": f"记录买入 {name}({code}) {shares}股@{price}，持仓价值约{total_cost:.0f}",
+        "message": f"记录买入 {name}({code}) {shares}股@{price}，含佣金{commission:.2f}元，持仓总成本约{total_cost:.0f}",
         "total_cost": total_cost,
-        "fee": fee,
+        "commission": commission,
+        "stamp_duty": stamp_duty,
+        "total_fee": total_fee,
+        "market": market,
     }
 
 
@@ -415,11 +479,12 @@ def record_sell(code: str, name: str, price: float, shares: int,
         return {"success": False, "pnl": 0, "pnl_pct": 0,
                 "message": f"错误：没有找到 {code} 的持仓记录"}
 
-    # 计算盈亏
+    # 计算盈亏（用实际费率扣费）
     buy_cost = holding["cost"]
     sell_amount = round(price * shares, 2)
-    fee = round(sell_amount * 0.0013, 2)  # 印花税0.1%+佣金约0.023%
-    net_proceed = round(sell_amount - fee, 2)
+    market = _detect_market(code)
+    commission, stamp_duty, total_fee = _calc_fees(sell_amount, market, "SELL")
+    net_proceed = round(sell_amount - total_fee, 2)
     cost_basis = round(buy_cost * shares, 2)
     pnl = round(net_proceed - cost_basis, 2)
     pnl_pct = round(pnl / cost_basis * 100, 2) if cost_basis else 0
@@ -445,7 +510,11 @@ def record_sell(code: str, name: str, price: float, shares: int,
             f"{pnl:.2f}", f"{pnl_pct}%",
             hold_days,
             reason,
-            record_time
+            record_time,
+            f"{commission:.2f}",
+            f"{stamp_duty:.2f}",
+            f"{total_fee:.2f}",
+            market,
         ])
 
     # 更新持仓缓存
@@ -457,9 +526,12 @@ def record_sell(code: str, name: str, price: float, shares: int,
 
     msg = (f"记录卖出 {name}({code}) {shares}股@{price}，"
            f"盈亏{'+' if pnl >= 0 else ''}{pnl:.2f}元({pnl_pct}%)，"
+           f"含佣金{commission:.2f}+印花税{stamp_duty:.2f}，"
            f"持有{hold_days}天，原因:{reason}")
     return {"success": True, "pnl": pnl, "pnl_pct": pnl_pct,
-            "hold_days": hold_days, "message": msg}
+            "hold_days": hold_days, "message": msg,
+            "commission": commission, "stamp_duty": stamp_duty, "total_fee": total_fee,
+            "net_proceed": net_proceed, "market": market}
 
 
 def load_all_records() -> list:
