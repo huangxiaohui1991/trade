@@ -134,18 +134,19 @@ def _log_trade(action: str, code: str, name: str, shares: int,
     log_dir = Path(vault.vault_path) / vault.paper_trade_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "交易记录.md"
+    log_relative = f"{vault.paper_trade_dir}/交易记录.md"
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     amount = round(shares * price, 2)
 
-    # 如果文件不存在，写表头
+    # 如果文件不存在，写表头（通过 vault.write 触发自动备份）
     if not log_path.exists():
         header = (
             "# 模拟盘交易记录\n\n"
             "| 时间 | 操作 | 股票 | 代码 | 数量 | 价格 | 金额 | 原因 |\n"
             "|------|------|------|------|------|------|------|------|\n"
         )
-        log_path.write_text(header, encoding="utf-8")
+        vault.write(log_relative, header)
 
     # 追加一行
     reason_text = f"[{reason_code}] {reason}".strip() if reason_code else reason
@@ -1652,16 +1653,15 @@ def generate_report() -> str:
 
     content = "\n".join(lines)
 
-    # 写入 Obsidian
+    # 写入 Obsidian（通过 vault.write 触发自动备份）
     vault = ObsidianVault()
-    report_dir = Path(vault.vault_path) / vault.paper_trade_dir
-    report_dir.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    report_path = report_dir / f"模拟盘_{date_str}.md"
-    report_path.write_text(content, encoding="utf-8")
+    report_relative = f"{vault.paper_trade_dir}/模拟盘_{date_str}.md"
+    vault.write(report_relative, content)
 
+    report_path = f"{vault.vault_path}/{report_relative}"
     _logger.info(f"[shadow] 报告已写入: {report_path}")
-    return str(report_path)
+    return report_path
 
 
 # ---------------------------------------------------------------------------

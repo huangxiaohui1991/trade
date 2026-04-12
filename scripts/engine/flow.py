@@ -18,6 +18,8 @@ import time
 import warnings
 from datetime import datetime
 
+from scripts.utils.exceptions import DataSourceError
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -189,7 +191,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
                 save_json_cache("flow", code, result, meta={"source": "mx_data"})
                 _logger.info(f"[get_fund_flow] MX 成功 code={code} net={main_net/1e6:.1f}M")
                 return result
-    except Exception as e:
+    except DataSourceError as e:
         _logger.info(f"[get_fund_flow] MX 失败 code={code}: {e}")
 
     # ── Source 1: 东财个股资金流向（带 3 次重试）────────────────────────────
@@ -243,7 +245,7 @@ def get_fund_flow(code: str, days: int = 5) -> dict:
             return result
         else:
             _logger.warning(f"[get_fund_flow] 新浪历史数据为空 code={code}")
-    except Exception as e:
+    except DataSourceError as e:
         _logger.warning(f"[get_fund_flow] 新浪历史数据备用失败 code={code}: {e}")
 
     result["error"] = "所有数据源均失败"

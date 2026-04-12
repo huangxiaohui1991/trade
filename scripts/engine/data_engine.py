@@ -35,6 +35,7 @@ warnings.filterwarnings("ignore")
 import akshare as ak
 import pandas as pd
 from scripts.utils.cache import load_json_cache, save_json_cache
+from scripts.utils.exceptions import DataSourceError
 
 try:
     from scripts.utils.logger import get_logger
@@ -123,7 +124,7 @@ def get_realtime(codes: list) -> dict:
             else:
                 result["errors"][code] = "代码不在实时行情列表中"
         save_json_cache("realtime", "latest_snapshot", result["data"], meta={"source": "eastmoney_realtime"})
-    except Exception as e:
+    except DataSourceError as e:
         _logger.warning(f"[get_realtime] 东财实时接口失败: {e}")
         result["stale"] = True
         result["source_chain"].append("eastmoney_realtime_failed")

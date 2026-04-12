@@ -9,17 +9,18 @@ import shutil
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 # 导入 parser 模块的解析函数
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+from scripts.utils.exceptions import VaultError
 from scripts.utils.parser import parse_frontmatter, parse_md_table, parse_portfolio as parse_portfolio_file
 from scripts.engine.scorer import split_veto_signals
 from scripts.utils.config_loader import get_paths
 
 
-VAULT_LAYOUT = {
+VAULT_LAYOUT: dict[str, str] = {
     "system_dir": "00-系统",
     "state_dir": "01-状态",
     "run_dir": "02-运行",
@@ -30,7 +31,6 @@ VAULT_LAYOUT = {
     "pool_dir": "01-状态/池子",
     "journal_dir": "02-运行/日志",
     "paper_trade_dir": "02-运行/模拟盘",
-    "signal_snapshot_dir": "02-运行/信号快照",
     "daily_output_dir": "02-运行/当日输出",
     "weekly_review_dir": "03-分析/周复盘",
     "monthly_review_dir": "03-分析/月复盘",
@@ -137,7 +137,7 @@ class ObsidianVault:
             f.write(content)
 
     @staticmethod
-    def _fmt_currency(value) -> str:
+    def _fmt_currency(value: Optional[float | int | str]) -> str:
         try:
             return f"¥{float(value or 0):,.2f}"
         except (TypeError, ValueError):
@@ -151,7 +151,7 @@ class ObsidianVault:
             return "0.0%"
 
     @staticmethod
-    def _fmt_count(value) -> str:
+    def _fmt_count(value: Optional[float | int | str]) -> str:
         try:
             return str(int(value or 0))
         except (TypeError, ValueError):
@@ -168,7 +168,7 @@ class ObsidianVault:
         return mapping.get(source, source or "—")
 
     @staticmethod
-    def _snapshot_balance(snapshot: dict, scope: str = "") -> dict:
+    def _snapshot_balance(snapshot: dict, scope: str = "") -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             return {}
         balances = snapshot.get("balances", [])
@@ -467,7 +467,7 @@ class ObsidianVault:
         self.write(self.portfolio_path, new_content)
         self.sync_portfolio_state()
 
-    def read_core_pool(self) -> list:
+    def read_core_pool(self) -> list[dict]:
         """
         读取核心池.md
 
@@ -482,7 +482,7 @@ class ObsidianVault:
             return tables[0].get('rows', [])
         return []
 
-    def _render_pool_table(self, entries: list, bucket: str) -> str:
+    def _render_pool_table(self, entries: list[dict], bucket: str) -> str:
         """将结构化 pool entries 渲染成 markdown 表格。"""
         rows = [
             "| # | 股票 | 代码 | 四维总分 | 技术 | 基本面 | 资金 | 舆情 | 通过 | 备注 |",
@@ -833,7 +833,7 @@ class ObsidianVault:
             写入文件的绝对路径
         """
         from scripts.state.service import load_daily_signal_snapshot_bundle
-        bundle = load_daily_signal_snapshot_bundle(date_str)
+        bundle = load_daily_signal_snapshot_bundle(date_str, allow_pool_fallback=True)
         relative_path = self.get_signal_snapshot_path(date_str)
         self.write(relative_path, self.render_signal_snapshot(bundle))
         return self._full_path(relative_path)
@@ -866,8 +866,11 @@ class ObsidianVault:
         for f in all_files:
             try:
                 with open(f, encoding="utf-8") as fp:
-                    data = json.load(fp)
-            except Exception:
+                    try:
+                        data = json.load(fp)
+                    except Exception as e:
+                        raise VaultError(f"Failed to load JSON from {f}: {e}") from e
+            except VaultError:
                 continue
             pipeline = data.get("pipeline", "run")
             started = data.get("started_at", "")

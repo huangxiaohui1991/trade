@@ -2730,14 +2730,30 @@ def _resolve_signal_history_group_id(conn: sqlite3.Connection, snapshot_date: st
     return ""
 
 
-def load_daily_signal_snapshot_bundle(snapshot_date: str, history_group_id: str | None = None) -> dict:
-    """Load a best-effort historical signal bundle for one trading day."""
+def load_daily_signal_snapshot_bundle(
+    snapshot_date: str,
+    history_group_id: str | None = None,
+    *,
+    allow_pool_fallback: bool = False,
+) -> dict:
+    """Load a best-effort historical signal bundle for one trading day.
+
+    Args:
+        snapshot_date: Date string YYYY-MM-DD.
+        history_group_id: Optional group ID to anchor queries.
+        allow_pool_fallback: If True and pool history is empty, fall back to the
+            current live pool state (pool_entries). This is useful for the evening
+            pipeline signal snapshot when the morning pipeline hasn't run.
+    """
     resolved_group_id = ""
     with _connect() as conn:
         resolved_group_id = str(history_group_id or "").strip() or _resolve_signal_history_group_id(conn, snapshot_date)
 
     market = load_market_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
     pool = load_pool_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
+    if not pool and allow_pool_fallback:
+        # Morning pipeline may not have run; use the live pool state.
+        pool = load_pool_snapshot()
     decision = load_decision_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
     candidates = load_candidate_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
 

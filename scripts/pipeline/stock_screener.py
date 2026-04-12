@@ -323,7 +323,7 @@ def _write_market_scan_watchlist(results: list) -> str:
     vault = ObsidianVault()
     report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
-    path = report_dir / f"市场扫描候选_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    relative = f"{vault.screening_results_dir}/市场扫描候选_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
 
     actionable = [r for r in results if not r.get("veto_triggered") and r.get("total_score", 0) >= 5]
     lines = [
@@ -338,16 +338,16 @@ def _write_market_scan_watchlist(results: list) -> str:
     if not actionable:
         lines.append("| — | — | — | — | 本次无满足条件候选 |")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
-    _logger.info(f"  市场扫描候选已写入: {path.name}")
-    return str(path)
+    vault.write(relative, "\n".join(lines))
+    _logger.info(f"  市场扫描候选已写入: {relative}")
+    return f"{vault.vault_path}/{relative}"
 
 
 def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
     vault = ObsidianVault()
     report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
-    path = report_dir / f"池子调整建议_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    relative = f"{vault.screening_results_dir}/池子调整建议_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     meta = meta or {}
     rules = meta.get("rules", {})
 
@@ -380,8 +380,8 @@ def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
             lines.append("| — | — | — | 暂无 |")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return str(path)
+    vault.write(relative, "\n".join(lines))
+    return f"{vault.vault_path}/{relative}"
 
 
 def _sync_to_zixuan(actionable: list) -> None:

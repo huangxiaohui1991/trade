@@ -19,6 +19,8 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Optional
 
+from scripts.utils.exceptions import DataSourceError
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -376,7 +378,7 @@ def get_technical(code: str, days: int = 60) -> dict:
         })
         return result
 
-    except Exception as e:
+    except DataSourceError as e:
         _logger.warning(f"[get_technical] 技术面获取失败 code={code}: {e}")
         result["error"] = str(e)
         result["stale"] = True

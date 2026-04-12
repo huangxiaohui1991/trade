@@ -375,10 +375,9 @@ def run(month: str | None = None) -> dict:
             trading_day_count,
         )
 
-        review_dir = Path(vault.vault_path) / vault.monthly_review_dir
-        review_dir.mkdir(parents=True, exist_ok=True)
-        report_path = review_dir / f"{month}.md"
-        report_path.write_text(report_content, encoding="utf-8")
+        report_relative = f"{vault.monthly_review_dir}/{month}.md"
+        vault.write(report_relative, report_content)
+        report_path = f"{vault.vault_path}/{report_relative}"
         _logger.info(f"  已写入: {report_path}")
 
         update_pipeline_state(
@@ -396,7 +395,7 @@ def run(month: str | None = None) -> dict:
             today_str,
         )
 
-        _logger.info(f"[MONTHLY] 月度复盘完成 → {report_path.name}")
+        _logger.info(f"[MONTHLY] 月度复盘完成 → {report_path}")
 
         return {
             "status": "ok",
