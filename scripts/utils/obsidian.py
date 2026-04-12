@@ -838,6 +838,148 @@ class ObsidianVault:
         self.write(relative_path, self.render_signal_snapshot(bundle))
         return self._full_path(relative_path)
 
+    def get_daily_output_path(self, date: str) -> str:
+        """返回某天的当日输出索引路径。"""
+        return os.path.join(self.daily_output_dir, f"{date}.md")
+
+    def render_daily_output_index(self, date_str: str, runs_dir: str) -> str:
+        """
+        渲染当日运行输出索引 markdown。
+
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+            runs_dir: data/runs 的绝对路径
+        """
+        import json
+        from pathlib import Path
+
+        runs_path = Path(runs_dir) / date_str
+        if not runs_path.exists():
+            return ""
+
+        all_files = sorted(runs_path.glob("*.json"), key=lambda p: p.name)
+        if not all_files:
+            return ""
+
+        # 按 pipeline 分组，每组取最新一个 run
+        latest_by_pipeline: dict[str, dict] = {}
+        for f in all_files:
+            try:
+                with open(f, encoding="utf-8") as fp:
+                    data = json.load(fp)
+            except Exception:
+                continue
+            pipeline = data.get("pipeline", "run")
+            started = data.get("started_at", "")
+            if pipeline not in latest_by_pipeline or started > latest_by_pipeline[pipeline].get("started_at", ""):
+                latest_by_pipeline[pipeline] = data
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: daily_output_index",
+            f"date: {date_str}",
+            "tags: [当日输出, 自动更新]",
+            "---",
+            "",
+            f"# 当日输出 · {date_str}",
+            "",
+            f"共 {len(all_files)} 个运行记录，{len(latest_by_pipeline)} 个 pipeline。",
+            "",
+            "## Pipeline 运行状态",
+            "",
+            "| Pipeline | 状态 | 运行时长 | 开始时间 | 关键指标 |",
+            "|------|------|------|------|------|",
+        ]
+
+        # 映射 pipeline 中文名
+        pipeline_names = {
+            "morning": "盘前",
+            "noon": "午间",
+            "evening": "收盘",
+            "scoring": "评分",
+            "screener": "选股",
+            "sentiment": "舆情",
+            "hk_monitor": "港股监控",
+            "hk": "港股监控",
+            "weekly": "周报",
+            "monthly": "月报",
+        }
+
+        for pipeline in sorted(latest_by_pipeline.keys()):
+            data = latest_by_pipeline[pipeline]
+            status = data.get("status", "unknown")
+            status_icon = {"success": "✅", "warning": "⚠️", "error": "❌", "skipped": "⏭️", "blocked": "🚫"}.get(status, "❓")
+            duration = data.get("duration_seconds", 0) or 0
+            started = data.get("started_at", "")[:16] if data.get("started_at") else "—"
+            details = data.get("details", {}) or {}
+
+            # 提取关键 KPI
+            kpi_parts = []
+            result = data.get("result", {}) or {}
+            if "market_signal" in result:
+                kpi_parts.append(f"信号:{result['market_signal']}")
+            if "candidate_count" in details:
+                kpi_parts.append(f"候选:{details['candidate_count']}")
+            if "actionable_count" in details:
+                kpi_parts.append(f"可操作:{details['actionable_count']}")
+            if "market_signal" in details:
+                kpi_parts.append(f"信号:{details['market_signal']}")
+            if "signal" in result:
+                kpi_parts.append(f"信号:{result['signal']}")
+            if "open_count" in details:
+                kpi_parts.append(f"开仓:{details['open_count']}")
+            if "filled_count" in details:
+                kpi_parts.append(f"成交:{details['filled_count']}")
+            if "pool_actions_count" in details:
+                kpi_parts.append(f"池调整:{details['pool_actions_count']}")
+
+            kpi = " | ".join(kpi_parts) if kpi_parts else "—"
+            name_cn = pipeline_names.get(pipeline, pipeline)
+            lines.append(f"| {name_cn} | {status_icon} {status} | {duration:.1f}s | {started} | {kpi} |")
+
+        # 交叉链接
+        journal_link = f"[[{date_str}]]"
+        decision_link = "[[今日决策]]"
+        account_link = "[[账户总览]]"
+        signal_link = f"[[{date_str}]]"
+        pool_link = "[[核心池]]"
+
+        lines.extend([
+            "",
+            "## 相关文件",
+            "",
+            f"- 日志: {journal_link}",
+            f"- 今日决策: {decision_link}",
+            f"- 账户总览: {account_link}",
+            f"- 信号快照: {signal_link}",
+            f"- 核心池: {pool_link}",
+            "",
+            "---",
+            "",
+            f"> 本页由 `render_daily_output_index()` 自动投影生成。",
+            f"> 数据来源: `data/runs/{date_str}/` ({len(all_files)} 个 JSON)",
+        ])
+        return "\n".join(lines)
+
+    def write_daily_output_index(self, date_str: str, runs_dir: str) -> str:
+        """
+        写入当日输出索引。从 data/runs/ 聚合当日所有运行结果。
+
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+            runs_dir: data/runs 的绝对路径
+
+        Returns:
+            写入文件的绝对路径
+        """
+        content = self.render_daily_output_index(date_str, runs_dir)
+        if not content:
+            return ""
+        relative_path = self.get_daily_output_path(date_str)
+        self.write(relative_path, content)
+        return self._full_path(relative_path)
+
 
 if __name__ == "__main__":
     # 简单测试

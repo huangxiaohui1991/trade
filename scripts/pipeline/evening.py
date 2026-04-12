@@ -48,6 +48,7 @@ from scripts.utils.discord_push import send_evening_report
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
+from scripts.utils.run_context import RUNS_DIR
 
 _logger = get_logger("pipeline.evening")
 
@@ -802,6 +803,9 @@ def run() -> dict:
             },
             today_str,
         )
+
+        _logger.info(">> 写入当日输出索引...")
+        vault.write_daily_output_index(today_str, str(RUNS_DIR))
 
         return {
             "market_data": market_data,
