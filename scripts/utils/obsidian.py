@@ -1167,6 +1167,305 @@ class ObsidianVault:
         self.write(relative_path, content)
         return self._full_path(relative_path)
 
+    def get_stock_explanation_path(self, code: str) -> str:
+        """返回某只股票的个股解释路径。"""
+        return os.path.join(self.stock_explain_dir, f"{code}.md")
+
+    def _parse_technical_detail(self, detail: str) -> dict:
+        """解析技术面 detail 字符串，返回结构化 dict。"""
+        result = {"金叉": False, "量比": 0.0, "RSI": 0.0, "排列": 0.0, "动量": 0.0}
+        if not detail:
+            return result
+        import re
+        gc = re.search(r"金叉:([\d.]+)/1(.)", detail)
+        if gc:
+            result["金叉"] = gc.group(2) == "✓"
+        vr = re.search(r"量比:([\d.]+)/0\.5\(([\d.]+)\)", detail)
+        if vr:
+            result["量比"] = float(vr.group(2))
+        rsi = re.search(r"RSI:[\d.]+/0\.5\((\d+)\)", detail)
+        if rsi:
+            result["RSI"] = float(rsi.group(1))
+        arr = re.search(r"排列:([\d.]+)/0\.5", detail)
+        if arr:
+            result["排列"] = float(arr.group(1))
+        mom = re.search(r"动量:([\d.]+)/0\.5", detail)
+        if mom:
+            result["动量"] = float(mom.group(1))
+        return result
+
+    def _interpret_technical(self, parsed: dict) -> list[str]:
+        lines = []
+        gc = parsed.get("金叉", False)
+        vr = parsed.get("量比", 0.0)
+        rsi = parsed.get("RSI", 0.0)
+        arr = parsed.get("排列", 0.0)
+        mom = parsed.get("动量", 0.0)
+        if gc:
+            lines.append("- 🟢 已出现 5/20 日均线金叉（短期趋势向上）")
+        else:
+            lines.append("- ⚪ 未出现金叉（需等待均线交叉信号）")
+        if vr >= 1.5:
+            lines.append(f"- 🟢 量比 {vr:.1f}x，成交量活跃（>1.5x 为放量）")
+        elif vr >= 1.0:
+            lines.append(f"- 🟡 量比 {vr:.1f}x，成交量正常")
+        else:
+            lines.append(f"- 🔴 量比 {vr:.1f}x，成交量偏少")
+        if rsi > 70:
+            lines.append(f"- 🔴 RSI {rsi:.0f}，处于超买区域（>70）")
+        elif rsi < 30:
+            lines.append(f"- 🟢 RSI {rsi:.0f}，处于超卖区域，有反弹可能")
+        else:
+            lines.append(f"- 🟡 RSI {rsi:.0f}，处于正常区间（30-70）")
+        if arr >= 0.5:
+            lines.append("- 🟢 均线多头排列（短期 > 中期 > 长期）")
+        if mom >= 0.3:
+            lines.append("- 🟢 近期有正向动量")
+        return lines
+
+    def _interpret_fundamental(self, detail: str) -> list[str]:
+        """解析基本面 detail，返回中文解读。"""
+        lines = []
+        if not detail or "数据错误" in str(detail):
+            lines.append("- ❌ 基本面数据获取失败")
+            return lines
+        import re
+        roe_m = re.search(r"ROE:([\d.]+)/1", detail)
+        rev_m = re.search(r"营收:([\d.]+)/1", detail)
+        cf_m = re.search(r"现金流:([\d.]+)/1", detail)
+        miss_m = re.search(r"缺失:(\S+)", detail)
+        if roe_m:
+            roe = float(roe_m.group(1))
+            if roe >= 1.0:
+                lines.append(f"- 🟢 ROE {roe:.0%}，盈利能力优秀（≥15%）")
+            elif roe >= 0.7:
+                lines.append(f"- 🟡 ROE {roe:.0%}，盈利能力良好（10-15%）")
+            elif roe >= 0.4:
+                lines.append(f"- 🟡 ROE {roe:.0%}，盈利能力一般（5-10%）")
+            else:
+                lines.append(f"- 🔴 ROE {roe:.0%}，盈利能力偏弱（<5%）")
+        if rev_m:
+            rev = float(rev_m.group(1))
+            if rev >= 1.0:
+                lines.append(f"- 🟢 营收增长 {rev:.0%}，增速强劲（≥20%）")
+            elif rev >= 0.7:
+                lines.append(f"- 🟡 营收增长 {rev:.0%}，增速稳健")
+            elif rev > 0:
+                lines.append(f"- 🟡 营收增长 {rev:.0%}，增速较低")
+            else:
+                lines.append(f"- 🔴 营收增长 {rev:.0%}，营收下滑")
+        if cf_m:
+            cf = float(cf_m.group(1))
+            if cf >= 0.5:
+                lines.append("- 🟢 经营现金流为正，财务健康")
+            else:
+                lines.append("- 🔴 经营现金流为负或数据缺失")
+        if miss_m:
+            lines.append(f"- ⚠️ 数据缺失: {miss_m.group(1)}")
+        return lines
+
+    def _interpret_veto(self, veto_signals: list) -> list[str]:
+        """将否决信号列表转为中文说明。"""
+        VETO_MAP = {
+            "below_ma20": "股价位于 20 日均线下方，当前趋势偏弱",
+            "limit_up_today": "今日涨停，追高风险极大",
+            "consecutive_outflow": "连续资金净流出，上涨动力不足",
+            "consecutive_outflow_warn": "资金连续流出，疑似洗盘（警告）",
+            "red_market": "大盘整体下跌，逆势操作风险高",
+            "ma20_trend_down": "20 日均线趋势向下，中期趋势偏弱",
+            "earnings_bomb": "近期业绩暴雷（净利润同比大幅下降）",
+            "low_liquidity": "流动性不足（大单成交稀疏）",
+            "score_error": "评分计算异常",
+        }
+        lines = []
+        for sig in veto_signals:
+            msg = VETO_MAP.get(str(sig), f"否决信号: {sig}")
+            if sig == "consecutive_outflow_warn":
+                lines.append(f"- ⚠️ {msg}")
+            else:
+                lines.append(f"- 🔴 {msg}")
+        return lines
+
+    def render_stock_explanation(self, candidate: dict) -> str:
+        """
+        渲染单只股票的评分解释 markdown。
+
+        Args:
+            candidate: 评分候选股对象（来自 batch_score 输出）
+        """
+        code = str(candidate.get("code", "")).strip()
+        name = str(candidate.get("name", code)).strip()
+        total = float(candidate.get("total_score", 0) or 0)
+        tech = float(candidate.get("technical_score", 0) or 0)
+        fund = float(candidate.get("fundamental_score", 0) or 0)
+        flow = float(candidate.get("flow_score", 0) or 0)
+        sent = float(candidate.get("sentiment_score", 0) or 0)
+        veto_triggered = bool(candidate.get("veto_triggered", False))
+        veto_signals = candidate.get("veto_signals", []) or []
+        if isinstance(veto_signals, str):
+            veto_signals = [veto_signals]
+        bucket = candidate.get("bucket", "")
+        recommendation = candidate.get("recommendation", "")
+
+        # 推荐信号
+        REC_MAP = {"buy": "🟢 建议买入", "watch": "🟡 观察", "avoid": "🔴 建议规避", "manual_review": "⚠️ 人工复查"}
+        rec_text = REC_MAP.get(str(recommendation), recommendation or "—")
+
+        # 评分条
+        MAX_SCORE = 10.0
+        bar_len = 20
+        def score_bar(score: float, max_s: float = MAX_SCORE) -> str:
+            filled = int(round(score / max_s * bar_len))
+            return "█" * filled + "░" * (bar_len - filled)
+
+        lines = [
+            "---",
+            f"updated_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "type: stock_explanation",
+            f"code: {code}",
+            f"bucket: {bucket}",
+            f"total_score: {total}",
+            "tags: [个股解释, 自动更新]",
+            "---",
+            "",
+            f"# {name}（{code}）评分解释",
+            "",
+            f"> 推荐信号: **{rec_text}** | 池分类: **{bucket or '—'}**",
+            "",
+            "## 综合评分",
+            "",
+            f"| 总分 | {score_bar(total)} | {total:.1f} / {MAX_SCORE} |",
+            "",
+            f"| 维度 | 评分 | 状态 | 满分 |",
+            "|------|------|------|------|",
+            f"| 技术面 | {tech:.1f} | {self._score_emoji(tech, 3.0)} | 3.0 |",
+            f"| 基本面 | {fund:.1f} | {self._score_emoji(fund, 3.0)} | 3.0 |",
+            f"| 资金面 | {flow:.1f} | {self._score_emoji(flow, 2.0)} | 2.0 |",
+            f"| 舆情面 | {sent:.1f} | {self._score_emoji(sent, 2.0)} | 2.0 |",
+        ]
+
+        # 技术面解读
+        tech_detail = candidate.get("technical_detail", "") or ""
+        if "数据错误" in tech_detail:
+            lines.extend(["", "## 技术面解读", "", "❌ 技术面数据获取失败，无法解读。"])
+        else:
+            parsed = self._parse_technical_detail(tech_detail)
+            tech_lines = self._interpret_technical(parsed)
+            lines.extend(["", "## 技术面解读", ""])
+            lines.extend(tech_lines if tech_lines else ["- 无明显技术信号"])
+
+        # 基本面解读
+        fund_detail = candidate.get("fundamental_detail", "") or ""
+        lines.extend(["", "## 基本面解读", ""])
+        fund_lines = self._interpret_fundamental(fund_detail)
+        lines.extend(fund_lines if fund_lines else ["- 无基本面数据"])
+
+        # 资金面
+        flow_detail = candidate.get("flow_detail", "") or ""
+        if flow_detail and "数据错误" not in flow_detail:
+            lines.extend(["", "## 资金面解读", ""])
+            lines.append(f"- 资金评分: {flow:.1f}/2.0")
+            if "净流入" in flow_detail or "inflow" in flow_detail.lower():
+                lines.append("- 🟢 主力资金呈净流入")
+            elif "净流出" in flow_detail or "outflow" in flow_detail.lower():
+                lines.append("- 🔴 主力资金呈净流出")
+            else:
+                lines.append(f"- 🟡 资金流向详情: {flow_detail[:100]}")
+        else:
+            lines.extend(["", "## 资金面解读", "", "- 无资金流向数据"])
+
+        # 舆情
+        sent_detail = candidate.get("sentiment_detail", "") or ""
+        if sent_detail and "数据错误" not in sent_detail:
+            lines.extend(["", "## 舆情解读", ""])
+            if sent >= 1.5:
+                lines.append(f"- 🟢 舆情正面，评分 {sent:.1f}/2.0")
+            elif sent >= 1.0:
+                lines.append(f"- 🟡 舆情中性，评分 {sent:.1f}/2.0")
+            else:
+                lines.append(f"- 🔴 舆情偏负面，评分 {sent:.1f}/2.0")
+        else:
+            lines.extend(["", "## 舆情解读", "", "- 无舆情数据"])
+
+        # 否决信号
+        if veto_triggered and veto_signals:
+            veto_lines = self._interpret_veto(veto_signals)
+            lines.extend(["", "## 否决信号（触发一票否决）", ""])
+            lines.extend(veto_lines)
+        elif veto_signals:
+            veto_lines = self._interpret_veto(veto_signals)
+            lines.extend(["", "## 警告信号（仅预警，不否决）", ""])
+            lines.extend(veto_lines)
+
+        # 原始 detail
+        if any([tech_detail, fund_detail, flow_detail, sent_detail]):
+            lines.extend([
+                "",
+                "## 原始评分明细",
+                "",
+                "```",
+            ])
+            if tech_detail:
+                lines.append(f"[技术] {tech_detail}")
+            if fund_detail:
+                lines.append(f"[基本] {fund_detail}")
+            if flow_detail:
+                lines.append(f"[资金] {flow_detail}")
+            if sent_detail:
+                lines.append(f"[舆情] {sent_detail}")
+            lines.extend(["```", ""])
+
+        lines.extend([
+            "---",
+            "",
+            f"> 本页由 `render_stock_explanation()` 自动投影生成。",
+            f"> 更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        ])
+        return "\n".join(lines)
+
+    def _score_emoji(self, score: float, max_score: float) -> str:
+        ratio = score / max_score if max_score > 0 else 0
+        if ratio >= 0.8:
+            return "🟢 强"
+        elif ratio >= 0.5:
+            return "🟡 中"
+        elif ratio > 0:
+            return "🟠 弱"
+        else:
+            return "⚫ 无"
+
+    def write_stock_explanations(self, candidates: list[dict], scope: str = "core") -> list[str]:
+        """
+        批量写入个股解释。对所有有 detail 的候选股生成解释文件。
+
+        Args:
+            candidates: 评分结果列表
+            scope: 池分类，用于过滤（如 "core", "watch", "all"）
+
+        Returns:
+            写入文件的绝对路径列表
+        """
+        if scope != "all":
+            candidates = [c for c in candidates if str(c.get("bucket", "")).strip() == scope]
+        paths = []
+        for c in candidates:
+            code = str(c.get("code", "")).strip()
+            if not code:
+                continue
+            # 只对有 detail 的股票生成解释
+            has_detail = any([
+                c.get("technical_detail"), c.get("fundamental_detail"),
+                c.get("flow_detail"), c.get("sentiment_detail"),
+            ])
+            has_score = float(c.get("total_score", 0) or 0) > 0
+            if not (has_score or has_detail):
+                continue
+            content = self.render_stock_explanation(c)
+            relative_path = self.get_stock_explanation_path(code)
+            self.write(relative_path, content)
+            paths.append(self._full_path(relative_path))
+        return paths
+
 
 if __name__ == "__main__":
     # 简单测试

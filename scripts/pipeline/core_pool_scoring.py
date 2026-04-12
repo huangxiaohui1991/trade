@@ -201,6 +201,11 @@ def run() -> list:
         except Exception as e:
             _logger.warning(f"  更新池子投影失败: {e}")
 
+        _logger.info(">> 生成个股评分解释...")
+        explain_paths = vault.write_stock_explanations(scores, scope="all")
+        if explain_paths:
+            _logger.info(f"  已写入 {len(explain_paths)} 个个股解释文件")
+
         _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
 
         update_pipeline_state(
