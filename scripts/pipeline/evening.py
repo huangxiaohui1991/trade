@@ -310,8 +310,9 @@ def _enrich_today_journal(vault: ObsidianVault, today_str: str,
             content += "\n" + enrichment
         _logger.info(f"  已追加 enrichment: {journal_path.name}")
 
-    with open(journal_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+    # 写入通过 vault.write() 以触发自动备份
+    journal_relative = str(journal_path.relative_to(Path(vault.vault_path)))
+    vault.write(journal_relative, content)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -496,7 +497,7 @@ def _backfill_today_trades(vault: ObsidianVault, today_str: str) -> int:
     empty_row = "|  |  |  |  |  |  | 首次买入/加仓/止盈/止损 |"
     if empty_row in content:
         content = content.replace(empty_row, "\n".join(trade_lines))
-        journal_full_path.write_text(content, encoding="utf-8")
+        vault.write(vault.get_journal_path(today_str), content)
         _logger.info(f"  已回填 {len(trade_lines)} 条交易到 {today_str}.md")
         return len(trade_lines)
 
@@ -517,7 +518,7 @@ def _backfill_today_trades(vault: ObsidianVault, today_str: str) -> int:
             if next_section == -1:
                 next_section = len(rest)
             content = content[:after_sep] + "\n" + "\n".join(trade_lines) + "\n" + rest[next_section:]
-            journal_full_path.write_text(content, encoding="utf-8")
+            vault.write(vault.get_journal_path(today_str), content)
             _logger.info(f"  已回填 {len(trade_lines)} 条交易到 {today_str}.md")
             return len(trade_lines)
 
@@ -539,8 +540,7 @@ def _create_tomorrow_journal(vault: ObsidianVault, tomorrow_date: str, plan_cont
             content = content[:idx] + plan_content
         else:
             content += "\n---\n\n" + plan_content
-        with open(journal_full_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        vault.write(journal_rel_path, content)
         _logger.info(f"  已更新: {journal_full_path.name}")
         return
 
@@ -602,8 +602,7 @@ market_status:
 
 {plan_content}
 """
-    with open(journal_full_path, 'w', encoding='utf-8') as f:
-        f.write(journal_content)
+    vault.write(journal_rel_path, journal_content)
     _logger.info(f"  已创建: {journal_full_path.name}")
 
 
@@ -625,6 +624,8 @@ def run() -> dict:
 
         _logger.info(">> 大盘数据")
         market_data = load_market_snapshot(refresh=True)
+        # 强制使用今天日期覆盖（周末/节假日时 market_data.as_of_date 是上一个交易日）
+        market_data["as_of_date"] = today_str
         market_history_group_id = _market_history_group_id(today_str, "close")
         save_market_snapshot_history(
             market_data,
@@ -638,12 +639,6 @@ def run() -> dict:
                 "weekday": weekday,
             },
         )
-
-        _logger.info(">> 写入信号快照...")
-        vault.write_signal_snapshot(today_str)
-
-        _logger.info(">> 更新候选池总览...")
-        vault.write_candidate_pool(today_str)
 
         market_indices = market_data.get("indices") or market_data.get("market") or {}
         for name, info in market_indices.items():
@@ -809,6 +804,12 @@ def run() -> dict:
 
         _logger.info(">> 写入当日输出索引...")
         vault.write_daily_output_index(today_str, str(RUNS_DIR))
+
+        _logger.info(">> 写入信号快照...")
+        vault.write_signal_snapshot(today_str)
+
+        _logger.info(">> 更新候选池总览...")
+        vault.write_candidate_pool(today_str)
 
         return {
             "market_data": market_data,

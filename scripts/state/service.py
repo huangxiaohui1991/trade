@@ -938,13 +938,9 @@ def _project_pool_markdown(snapshot: dict) -> dict:
     core_content = _render_pool_markdown("核心池", ["核心池", "选股"], snapshot.get("core_pool", []), snapshot_date)
     watch_content = _render_pool_markdown("观察池", ["观察池", "选股"], snapshot.get("watch_pool", []), snapshot_date)
 
-    core_path = Path(vault.vault_path) / vault.core_pool_path
-    watch_path = Path(vault.vault_path) / vault.watch_pool_path
-    core_path.parent.mkdir(parents=True, exist_ok=True)
-    watch_path.parent.mkdir(parents=True, exist_ok=True)
-    core_path.write_text(core_content, encoding="utf-8")
-    watch_path.write_text(watch_content, encoding="utf-8")
-    return {"core_pool_path": str(core_path), "watch_pool_path": str(watch_path)}
+    vault.write(vault.core_pool_path, core_content)
+    vault.write(vault.watch_pool_path, watch_content)
+    return {"core_pool_path": vault._full_path(vault.core_pool_path), "watch_pool_path": vault._full_path(vault.watch_pool_path)}
 
 
 def _bootstrap_pool_entries() -> list[dict]:
