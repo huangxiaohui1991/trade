@@ -15,6 +15,7 @@ from pathlib import Path
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.runtime_state import RUNTIME_DIR
 from scripts.engine.scorer import data_quality_review_reason, normalize_data_quality, split_veto_signals
+from scripts.state.reason_codes import VETO_LABEL_MAP
 
 
 POOL_STATE_PATH = RUNTIME_DIR / "pool_state.json"
@@ -113,9 +114,11 @@ def _build_note(hard_veto: list, warning_signals: list, bucket: str,
         return fallback
     parts = []
     if hard_veto:
-        parts.append(f"veto:{','.join(hard_veto)}")
+        labels = [VETO_LABEL_MAP.get(s, s) for s in hard_veto]
+        parts.append("veto:" + ",".join(labels))
     if warning_signals:
-        parts.append(f"预警:{','.join(warning_signals)}")
+        labels = [VETO_LABEL_MAP.get(s, s) for s in warning_signals]
+        parts.append("预警:" + ",".join(labels))
     if data_quality == "degraded":
         parts.append("⚠️数据降级")
     elif data_quality == "error":
@@ -135,15 +138,28 @@ def _normalize_missing_fields(value) -> list[str]:
     return [str(value).strip()] if str(value).strip() else []
 
 
+def _get_pool_thresholds() -> tuple[float, float]:
+    """从策略配置读取池子阈值，避免硬编码。"""
+    try:
+        pool_cfg = get_strategy().get("pool_management", {})
+        return (
+            float(pool_cfg.get("watch_min_score", 5)),
+            float(pool_cfg.get("promote_min_score", 7)),
+        )
+    except Exception:
+        return 5.0, 7.0
+
+
 def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = "") -> dict:
     score = _safe_score(entry.get("total_score", 0))
     hard_veto, warning_signals = split_veto_signals(entry.get("veto_signals", []))
+    watch_min_score, promote_min_score = _get_pool_thresholds()
     bucket = _normalize_bucket(
         entry.get("bucket"),
         score,
         bool(entry.get("veto_triggered", False)) or bool(hard_veto),
-        5.0,
-        7.0,
+        watch_min_score,
+        promote_min_score,
     )
     note = str(entry.get("note", "") or "").strip()
     metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
