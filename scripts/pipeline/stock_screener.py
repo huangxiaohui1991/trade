@@ -41,6 +41,7 @@ from scripts.state import (
 )
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.pool_manager import evaluate_pool_actions, load_pool_snapshot, save_pool_snapshot
@@ -223,13 +224,6 @@ def _fallback_tracked_candidates(stocks_cfg: dict, blacklist: set, current_snaps
     candidates = _dedupe_candidates(candidates)
     _logger.info(f"[fallback] 候选股票: {len(candidates)} 只")
     return candidates
-
-
-def _safe_float(value, default=0.0) -> float:
-    try:
-        return float(value) if value is not None and value != "" else default
-    except (ValueError, TypeError):
-        return default
 
 
 def _fallback_market_candidates(strategy_cfg: dict, blacklist: set) -> list:

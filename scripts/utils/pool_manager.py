@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.runtime_state import RUNTIME_DIR
 from scripts.engine.scorer import data_quality_review_reason, normalize_data_quality, split_veto_signals
@@ -20,17 +21,6 @@ from scripts.state.reason_codes import VETO_LABEL_MAP
 
 POOL_STATE_PATH = RUNTIME_DIR / "pool_state.json"
 WARNING_ONLY_SIGNALS = {"consecutive_outflow_warn"}
-
-
-def _safe_float(value, default=0.0) -> float:
-    try:
-        if value in [None, ""]:
-            return default
-        if isinstance(value, str):
-            value = value.replace("**", "").replace(",", "").strip()
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _load_state() -> dict:

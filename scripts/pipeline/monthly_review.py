@@ -37,6 +37,7 @@ from scripts.state import (
     load_trade_review,
     load_pool_action_history,
 )
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.logger import get_logger
@@ -44,15 +45,6 @@ from scripts.utils.runtime_state import update_pipeline_state
 from scripts.utils.trading_calendar import trading_days_in_month
 
 _logger = get_logger("pipeline.monthly_review")
-
-
-def _safe_float(v, default=0.0):
-    try:
-        if isinstance(v, str):
-            v = v.replace(",", "").replace("¥", "").strip()
-        return float(v) if v not in [None, ""] else default
-    except (ValueError, TypeError):
-        return default
 
 
 def _iso_week(d: date) -> str:

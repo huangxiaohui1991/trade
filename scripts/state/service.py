@@ -22,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover - same behavior as config_loader
     yaml = None
 
+from scripts.utils.common import _safe_float, _safe_int
 from scripts.utils.config_loader import clear_config_cache, get_stocks, get_strategy
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.logger import get_logger
@@ -454,33 +455,6 @@ def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    if value in (None, ""):
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    cleaned = str(value).strip()
-    if not cleaned:
-        return default
-    negative = "亏" in cleaned and "-" not in cleaned
-    cleaned = cleaned.replace(",", "")
-    cleaned = re.sub(r"[^\d.\-]", "", cleaned)
-    if cleaned in ("", "-", ".", "-."):
-        return default
-    try:
-        number = float(cleaned)
-    except ValueError:
-        return default
-    return -abs(number) if negative else number
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
 
 
 def _dedupe(values: list[str]) -> list[str]:

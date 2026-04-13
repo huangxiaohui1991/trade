@@ -35,6 +35,7 @@ from scripts.engine.scorer import (
     score as score_stock,
 )
 from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
+from scripts.utils.common import _safe_float, _safe_int
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
@@ -544,26 +545,6 @@ def _submit_shadow_order(
         )
 
     return trade_result, order
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        if value in [None, ""]:
-            return default
-        if isinstance(value, str):
-            value = value.replace("¥", "").replace("%", "").replace(",", "").strip()
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        if value in [None, ""]:
-            return default
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
 
 
 def _parse_date(value) -> date | None:

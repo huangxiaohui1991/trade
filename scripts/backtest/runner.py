@@ -10,6 +10,7 @@ from typing import Any
 
 from scripts.engine.composite import build_today_decision
 from scripts.state import audit_state, load_market_snapshot, load_pool_snapshot, load_trade_review
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -50,13 +51,6 @@ def _status_from_components(*components: str) -> str:
     if any(component in {"warning", "block"} for component in normalized):
         return "warning"
     return "ok"
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
 
 
 def _date_in_range(value: str, start: date, end: date) -> bool:

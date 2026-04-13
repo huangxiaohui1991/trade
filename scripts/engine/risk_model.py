@@ -27,21 +27,11 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 
 _logger = get_logger("risk_model")
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        if value in [None, ""]:
-            return default
-        if isinstance(value, str):
-            value = value.replace("¥", "").replace("%", "").replace(",", "").strip()
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _parse_trade_date(value) -> date | None:

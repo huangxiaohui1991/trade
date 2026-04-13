@@ -26,6 +26,8 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
+from scripts.utils.common import _safe_float, _safe_int
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJECT_ROOT)
 
@@ -120,26 +122,6 @@ def _ensure_header(path: Path):
 
 def _holdings_key(code: str) -> str:
     return code.strip()
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        if value in [None, ""]:
-            return default
-        if isinstance(value, str):
-            value = value.replace("¥", "").replace(",", "").replace("%", "").strip()
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        if value in [None, ""]:
-            return default
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
 
 
 def _normalize_trade_event(event: dict, scope: str = DEFAULT_ACTIVITY_SCOPE) -> dict:

@@ -14,6 +14,7 @@ from typing import Optional, Any
 # 导入 parser 模块的解析函数
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+from scripts.utils.common import _safe_float
 from scripts.utils.exceptions import VaultError
 from scripts.utils.parser import parse_frontmatter, parse_md_table, parse_portfolio as parse_portfolio_file
 from scripts.engine.scorer import split_veto_signals
@@ -676,14 +677,6 @@ class ObsidianVault:
         tables = parse_md_table(content)
         if not tables:
             return
-
-        def _safe_float(value, default=0.0) -> float:
-            try:
-                if isinstance(value, str):
-                    value = value.replace("**", "").replace(",", "").strip()
-                return float(value) if value not in [None, ""] else default
-            except (TypeError, ValueError):
-                return default
 
         # 建立代码到新评分的映射，兼容 code / 代码 两种字段
         score_map = {}

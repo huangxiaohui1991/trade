@@ -30,6 +30,7 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_stocks
 from scripts.utils.parser import parse_md_table
 from scripts.utils.obsidian import ObsidianVault
@@ -40,16 +41,6 @@ from scripts.engine.trading_record import load_activity_summary
 from scripts.state import load_trade_review, get_capital_for_date
 
 _logger = get_logger("pipeline.weekly_review")
-
-
-def _safe_float(v, default=0.0):
-    """安全转换为浮点数"""
-    try:
-        if isinstance(v, str):
-            v = v.replace("**", "").replace(",", "").strip()
-        return float(v) if v not in [None, ""] else default
-    except (ValueError, TypeError):
-        return default
 
 
 def _extract_report_scores(report_path: Path) -> dict:

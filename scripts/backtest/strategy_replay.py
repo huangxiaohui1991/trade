@@ -25,12 +25,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
+from scripts.utils.common import _safe_float
 
 
 def _parse_date(value: str) -> date:

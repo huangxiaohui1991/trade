@@ -17,6 +17,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 
@@ -25,13 +26,6 @@ _logger = get_logger("stock_classifier")
 STYLE_SLOW_BULL = "slow_bull"
 STYLE_MOMENTUM = "momentum"
 STYLE_UNKNOWN = "unknown"
-
-
-def _safe_float(v, default: float = 0.0) -> float:
-    try:
-        return float(v) if v not in (None, "") else default
-    except (TypeError, ValueError):
-        return default
 
 
 def calc_ma20_slope(closes: list[float], lookback: int = 10) -> float:
