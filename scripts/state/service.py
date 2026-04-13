@@ -3151,6 +3151,32 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
                 "data_quality": data_quality,
                 "data_missing_fields": data_missing_fields,
             }
+            veto_signals_list = list(entry.get("veto_signals", []))
+            _WARNING_ONLY = {"consecutive_outflow_warn"}
+            _VETO_LABEL_MAP = {
+                "consecutive_outflow": "连续资金净流出",
+                "ma20_trend_down": "MA20 趋势向下",
+                "score_error": "评分计算异常",
+                "fundamental_red_flag": "基本面红旗",
+                "fund_flow_negative": "资金流向负面",
+                "sentiment_negative": "舆情负面",
+                "price_limit_down": "跌停",
+                "too_expensive": "价格过贵",
+            }
+            hard_veto = [s for s in veto_signals_list if s not in _WARNING_ONLY]
+            warning_sigs = [s for s in veto_signals_list if s in _WARNING_ONLY]
+            existing_note = str(entry.get("note", "")).strip()
+            if existing_note and existing_note not in (bucket for bucket in ("核心池", "观察池", "规避")):
+                final_note = existing_note
+            elif hard_veto:
+                labels = [_VETO_LABEL_MAP.get(s, s) for s in hard_veto]
+                final_note = "veto:" + ",".join(labels)
+            elif warning_sigs:
+                labels = [_VETO_LABEL_MAP.get(s, s) for s in warning_sigs]
+                final_note = "预警:" + ",".join(labels)
+            else:
+                final_note = existing_note or {"core": "核心池", "watch": "观察池", "avoid": "规避"}.get(bucket, "")
+
             normalized = {
                 "bucket": bucket,
                 "code": code,
@@ -3161,9 +3187,9 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
                 "flow_score": round(_safe_float(entry.get("flow_score", 0)), 1),
                 "sentiment_score": round(_safe_float(entry.get("sentiment_score", 0)), 1),
                 "veto_triggered": bool(entry.get("veto_triggered", False)),
-                "veto_signals": list(entry.get("veto_signals", [])),
+                "veto_signals": veto_signals_list,
                 "passed_text": entry.get("passed_text") or _recommendation_for_entry(entry),
-                "note": str(entry.get("note", "")).strip(),
+                "note": final_note,
                 "source": entry.get("source", metadata.get("source", "unknown")),
                 "added_date": entry.get("added_date", snapshot_date),
                 "snapshot_date": entry.get("snapshot_date", snapshot_date),
