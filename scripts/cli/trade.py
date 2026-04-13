@@ -84,7 +84,13 @@ from scripts.state import (
 )
 from scripts.utils.cache import CACHE_DIR
 from scripts.utils.config_loader import get_notification, get_stocks, get_strategy
-from scripts.utils.discord_push import render_condition_order_reminder, send_condition_order_reminder
+from scripts.utils.discord_push import (
+    _build_embed,
+    _post_embed_to_discord,
+    DISCORD_COLORS,
+    render_condition_order_reminder,
+    send_condition_order_reminder,
+)
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.run_context import (
     LOCK_DIR,
@@ -1389,6 +1395,28 @@ def state_command(action: str, args) -> dict:
             scope=getattr(args, "scope", "paper_mx"),
         )
         result["scope_filter"] = getattr(args, "scope", "paper_mx")
+        # 实盘成交 → Discord 告警卡片
+        if result.get("is_real_trade") and result.get("trade_event_recorded"):
+            filled_order = result.get("order") or {}
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            price = filled_order.get("avg_fill_price") or filled_order.get("trigger_price") or 0
+            shares = filled_order.get("filled_shares") or filled_order.get("requested_shares") or 0
+            embeds = [
+                _build_embed(
+                    title=f"📋 实盘成交确认 — {filled_order.get('name', '')} ({filled_order.get('code', '')})",
+                    description="条件单已触发，请确认是否实际成交",
+                    color=DISCORD_COLORS.get("trade_fill", 0x1565C0),
+                    fields=[
+                        {"name": "方向", "value": filled_order.get("side", ""), "inline": True},
+                        {"name": "价格", "value": f"¥{price:.2f}", "inline": True},
+                        {"name": "数量", "value": f"{shares} 股", "inline": True},
+                        {"name": "类型", "value": filled_order.get("condition_type", ""), "inline": True},
+                        {"name": "下单渠道", "value": filled_order.get("broker", ""), "inline": True},
+                    ],
+                    footer=f"Hermes · order_confirm · {ts}",
+                )
+            ]
+            _post_embed_to_discord(embeds)
     elif action == "remind":
         scope = getattr(args, "scope", "paper_mx")
         pending = pending_condition_order_items(scope=scope)

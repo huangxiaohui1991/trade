@@ -185,6 +185,7 @@ DISCORD_COLORS = {
     "profit_alert": 0x2E7D32,  # 深绿 — 止盈告警
     "hk_alert":  0x880E4F,  # 深红 — 港股告警
     "hk_summary":0x4A148C,  # 紫黑 — 港股汇总
+    "trade_fill": 0x1565C0,  # 蓝色 — 实盘成交确认
     "info":      0x37474F,  # 灰蓝 — 通用信息
 }
 

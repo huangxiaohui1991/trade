@@ -1905,12 +1905,23 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                 )
                 trade_event_recorded = True
 
+    # ── 成交后自动更新持仓（仅模拟盘）─────────────────────────────────
+    portfolio_synced = False
+    if trade_event_recorded and scope == PAPER_SCOPE:
+        try:
+            load_portfolio_snapshot(scope=PAPER_SCOPE)
+            portfolio_synced = True
+        except Exception as sync_exc:
+            LOGGER.warning(f"[apply_order_reply] paper portfolio sync failed: {sync_exc}")
+
     return {
         "status": "ok",
         "reply": parsed,
         "created_order": created_order,
         "matched_order_count": matched_order_count,
         "trade_event_recorded": trade_event_recorded,
+        "portfolio_synced": portfolio_synced,
+        "is_real_trade": scope != PAPER_SCOPE,
         "order": updated_order,
         "db_path": str(_db_path()),
     }
