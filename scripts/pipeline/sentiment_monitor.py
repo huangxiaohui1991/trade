@@ -117,36 +117,37 @@ def _search_news(stock_name: str) -> list[dict]:
     cached = load_json_cache(NEWS_CACHE_NS, stock_name, max_age_seconds=NEWS_CACHE_TTL_SECONDS)
     if cached is not None:
         _logger.info(f"[sentiment] {stock_name} 资讯命中缓存（TTL={NEWS_CACHE_TTL_SECONDS}s）")
-        return cached.get("data", []) if isinstance(cached, dict) else []
+        return _extract_news_items(cached) or []
 
     try:
         result = dispatch_mx_command("mx.search.news", query=f"{stock_name} 最新资讯")
-        items = []
-        if isinstance(result, dict):
-            items = result.get("data", result.get("items", result.get("results", [])))
-            if isinstance(items, list):
-                pass
-            else:
-                content = result.get("content", result.get("text", ""))
-                if content:
-                    items = [{"title": stock_name, "content": str(content), "source": "mx_search"}]
-        elif isinstance(result, str):
-            items = [{"title": stock_name, "content": result, "source": "mx_search"}]
-        if not items:
-            items = []
+        items = _extract_news_items(result)
 
-        # 写入缓存
         if items:
             save_json_cache(NEWS_CACHE_NS, stock_name, items)
             _logger.info(f"[sentiment] {stock_name} 资讯已缓存（{len(items)} 条）")
 
-        return items
+        return items if items else []
     except MXCommandError as exc:
         _logger.info(f"[sentiment] {stock_name} 资讯搜索失败: {exc}")
         return []
     except Exception as exc:
         _logger.warning(f"[sentiment] {stock_name} 资讯搜索异常: {exc}")
         return []
+
+
+def _extract_news_items(obj):
+    """从 MX API 响应（可能深度嵌套）中递归提取新闻列表。"""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for key in ("data", "items", "results", "llmSearchResponse"):
+            if key in obj:
+                val = obj[key]
+                found = _extract_news_items(val)
+                if found is not None:
+                    return found
+    return None
 
 
 def _match_keywords(text: str) -> list[dict]:

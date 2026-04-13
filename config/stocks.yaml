@@ -1,25 +1,9 @@
 core_pool: []
 watch_pool:
-- code: '000612'
-  name: 焦作万方
-  added: '2026-04-10'
-  score: 6.9
-- code: '603619'
-  name: 中曼石油
-  added: '2026-04-10'
-  score: 6.9
-- code: '300249'
-  name: 依米康
-  added: '2026-04-10'
-  score: 6.8
 - code: '600268'
   name: 国电南自
-  added: '2026-04-10'
-  score: 6.6
-- code: '688188'
-  name: 柏楚电子
-  added: '2026-04-10'
-  score: 6.1
+  added: '2026-04-13'
+  score: 6.0
 blacklist:
   permanent: []
   temporary: []

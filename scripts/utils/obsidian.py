@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from scripts.utils.exceptions import VaultError
 from scripts.utils.parser import parse_frontmatter, parse_md_table, parse_portfolio as parse_portfolio_file
 from scripts.engine.scorer import split_veto_signals
+from scripts.state.reason_codes import VETO_LABEL_MAP
 from scripts.utils.config_loader import get_paths
 
 
@@ -555,7 +556,8 @@ class ObsidianVault:
                 status = "❌"
             note = str(entry.get("note", "") or "").strip()
             if not note and warnings:
-                note = f"预警:{','.join(warnings)}"
+                w_labels = [VETO_LABEL_MAP.get(s, s) for s in warnings]
+                note = f"预警:{','.join(w_labels)}"
             rows.append(
                 f"| {idx} | {entry.get('name', '')} | {entry.get('code', '')} | "
                 f"**{score:.1f}** | {float(entry.get('technical_score', 0) or 0):.1f} | "
@@ -623,9 +625,11 @@ class ObsidianVault:
                 reason = str(entry.get("note", "") or "").strip()
                 if not reason:
                     if hard_veto:
-                        reason = f"veto:{','.join(hard_veto)}"
+                        labels = [VETO_LABEL_MAP.get(s, s) for s in hard_veto]
+                        reason = f"veto:{','.join(labels)}"
                     elif warnings:
-                        reason = f"预警:{','.join(warnings)}"
+                        labels = [VETO_LABEL_MAP.get(s, s) for s in warnings]
+                        reason = f"预警:{','.join(labels)}"
                     else:
                         reason = "规避"
                 watch_content += "\n" + f"| {entry.get('name', '')} | {entry.get('code', '')} | {float(entry.get('total_score', 0) or 0):.1f} | {reason} |"
@@ -690,7 +694,8 @@ class ObsidianVault:
 
             if hard_veto:
                 suggestion = "❌"
-                note = "veto:" + ",".join(hard_veto)
+                labels = [VETO_LABEL_MAP.get(s, s) for s in hard_veto]
+                note = "veto:" + ",".join(labels)
             elif total_score >= 7:
                 suggestion = "✅"
                 note = "可买入"
@@ -702,7 +707,8 @@ class ObsidianVault:
                 note = "规避"
 
             if warning_signals and not hard_veto:
-                note = f"预警:{','.join(warning_signals)}"
+                w_labels = [VETO_LABEL_MAP.get(s, s) for s in warning_signals]
+                note = f"预警:{','.join(w_labels)}"
 
             row["四维总分"] = f"{total_score:.1f}"
             if "基本面" in headers:
@@ -1129,7 +1135,11 @@ class ObsidianVault:
                 "|------|------|------|------|------|------|",
             ])
             for r in rows:
-                veto_flag = "⚠️ " + " ".join(r["veto_signals"]) if r["veto"] else "✅"
+                if r["veto"]:
+                    veto_labels = [VETO_LABEL_MAP.get(s, s) for s in r["veto_signals"]]
+                    veto_flag = "⚠️ " + " ".join(veto_labels)
+                else:
+                    veto_flag = "✅"
                 lines.append(f"| {r['code']} | {r['name']} | {r['score']:.1f} | {veto_flag} | {r['trend']} | {r['added_date'] or '—'} |")
             return lines
 

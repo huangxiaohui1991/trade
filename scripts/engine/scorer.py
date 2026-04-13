@@ -964,6 +964,9 @@ def batch_score(stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             tech = get_technical(code, 60)
             tech_s = _score_technical(code, tech)
 
+            if tech is None:
+                raise ScoreError(f"无法获取技术数据（{code}）")
+
             if not tech.get("above_ma20", True):
                 r = {
                     "name": name or tech.get("name", code),
@@ -971,18 +974,18 @@ def batch_score(stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "technical_score": tech_s["score"],
                     "fundamental_score": 0, "flow_score": 0, "sentiment_score": 1.5,
                     "total_score": 0,
-                "technical_detail": tech_s["detail"],
-                "fundamental_detail": "跳过（below_ma20 veto）",
-                "flow_detail": "跳过", "sentiment_detail": "跳过",
-                "veto_signals": ["below_ma20"],
-                "hard_veto_signals": ["below_ma20"],
-                "warning_signals": [],
-                "veto_triggered": True,
-                "weights": weights,
-            }
-            results.append(r)
-            _logger.info(f"[scorer] {r['name']}({code}): 技术{tech_s['score']:.1f} → 总分0.0 ❌ veto:below_ma20")
-            continue
+                    "technical_detail": tech_s["detail"],
+                    "fundamental_detail": "跳过（below_ma20 veto）",
+                    "flow_detail": "跳过", "sentiment_detail": "跳过",
+                    "veto_signals": ["below_ma20"],
+                    "hard_veto_signals": ["below_ma20"],
+                    "warning_signals": [],
+                    "veto_triggered": True,
+                    "weights": weights,
+                }
+                results.append(r)
+                _logger.info(f"[scorer] {r['name']}({code}): 技术{tech_s['score']:.1f} → 总分0.0 ❌ veto:below_ma20")
+                continue
 
             try:
                 r = score(code, name)

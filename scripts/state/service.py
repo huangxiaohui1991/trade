@@ -335,7 +335,64 @@ def _today_str() -> str:
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    # 深拷贝以避免修改原对象，然后替换 DataFrame/Series
+    try:
+        import copy
+        v = copy.deepcopy(value)
+    except Exception:
+        v = value
+    _replace_non_serializable(v)
+    return json.dumps(v, ensure_ascii=False, sort_keys=True)
+
+
+def _replace_non_serializable(obj):
+    """递归将 DataFrame/Series/numpy类型替换为可序列化形式。"""
+    import numpy as np
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (np.ndarray, np.generic)):
+                obj[k] = _numpy_to_python(v)
+            elif hasattr(v, 'to_dict'):
+                obj[k] = v.to_dict()
+            elif isinstance(v, dict):
+                _replace_non_serializable(v)
+            elif isinstance(v, list):
+                _replace_non_serializable_list(v)
+    elif isinstance(obj, list):
+        _replace_non_serializable_list(obj)
+
+
+def _replace_non_serializable_list(obj: list):
+    import numpy as np
+    for i, item in enumerate(obj):
+        if isinstance(item, (np.ndarray, np.generic)):
+            obj[i] = _numpy_to_python(item)
+        elif hasattr(item, 'to_dict'):
+            obj[i] = item.to_dict()
+        elif isinstance(item, dict):
+            _replace_non_serializable(item)
+        elif isinstance(item, list):
+            _replace_non_serializable_list(item)
+
+
+def _numpy_to_python(v) -> str | int | float | list:
+    import numpy as np
+    if isinstance(v, np.ndarray):
+        if v.ndim == 0:
+            return _numpy_scalar_to_python(v.item())
+        return [_numpy_scalar_to_python(x) for x in v.tolist()]
+    if isinstance(v, np.generic):
+        return _numpy_scalar_to_python(v)
+    return v
+
+
+def _numpy_scalar_to_python(v) -> str | int | float:
+    import numpy as np
+    if np.isnan(v): return None
+    if np.isinf(v): return str(v)
+    if isinstance(v, (np.int64, np.int32)): return int(v)
+    if isinstance(v, (np.float64, np.float32)): return float(v)
+    return v
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
