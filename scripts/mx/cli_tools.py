@@ -212,6 +212,22 @@ def _make_cancel_runner(client_cls: Optional[type], cancel_all_default: bool = F
     return runner
 
 
+def _make_llm_judge_runner(client_cls: Optional[type]) -> Callable[..., Any]:
+    def runner(
+        stock_code: str,
+        stock_name: str,
+        title: str,
+        content: str = "",
+        url: str = "",
+        *,
+        client: Any = None,
+    ) -> Any:
+        instance = _ensure_client(client, client_cls)
+        return instance.judge(stock_code, stock_name, title, content, url)
+
+    return runner
+
+
 def _build_specs(include_unavailable: bool = False) -> List[CommandSpec]:
     client_specs = {
         "mx.data.query": ("scripts.mx.mx_data", "MXData"),
@@ -226,6 +242,7 @@ def _build_specs(include_unavailable: bool = False) -> List[CommandSpec]:
         "mx.moni.sell": ("scripts.mx.mx_moni", "MXMoni"),
         "mx.moni.cancel": ("scripts.mx.mx_moni", "MXMoni"),
         "mx.moni.cancel_all": ("scripts.mx.mx_moni", "MXMoni"),
+        "mx.llm.judge": ("scripts.mx.mx_llm_judge", "LLMJudge"),
     }
 
     resolved: Dict[str, Tuple[Optional[type], Optional[str]]] = {
@@ -442,6 +459,29 @@ def _build_specs(include_unavailable: bool = False) -> List[CommandSpec]:
             source_module="scripts.mx.mx_moni",
             source_class="MXMoni",
             runner=_make_cancel_runner(moni_cls, cancel_all_default=True) if moni_cls is not None else _unavailable_runner("mx.moni.cancel_all", moni_err or "module unavailable"),
+        )
+    )
+
+    llm_cls, llm_err = loaded("mx.llm.judge")
+    add_spec(
+        CommandSpec(
+            id="mx.llm.judge",
+            title="LLM 舆情精判",
+            summary="调用 MiniMax LLM 对个股新闻做结构化情感分析。",
+            group="llm",
+            aliases=("llm.judge", "llm.judge"),
+            args=(
+                CommandArgSpec("stock_code", "string", True, "6位股票代码"),
+                CommandArgSpec("stock_name", "string", True, "股票名称"),
+                CommandArgSpec("title", "string", True, "新闻标题"),
+                CommandArgSpec("content", "string", False, "新闻正文", default=""),
+                CommandArgSpec("url", "string", False, "链接", default=""),
+            ),
+            available=llm_cls is not None,
+            availability_note=llm_err or "",
+            source_module="scripts.mx.mx_llm_judge",
+            source_class="LLMJudge",
+            runner=_make_llm_judge_runner(llm_cls) if llm_cls is not None else _unavailable_runner("mx.llm.judge", llm_err or "module unavailable"),
         )
     )
 

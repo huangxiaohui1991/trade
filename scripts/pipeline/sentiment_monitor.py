@@ -31,6 +31,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command
+from scripts.mx.mx_llm_judge import judge as llm_judge
 from scripts.utils.config_loader import get_stocks, get_strategy
 from scripts.utils.discord_push import send_sentiment_batch_alert
 from scripts.utils.cache import load_json_cache, save_json_cache
@@ -278,12 +279,36 @@ def run(dry_run: bool = False) -> dict:
             if not negative_matches:
                 continue
 
-            # 取最高级别
-            highest_level = "warning"
+            # LLM 精判：只对 keyword 命中的项走 LLM，减少 API 调用
+            try:
+                llm_result = llm_judge(
+                    stock_code=code,
+                    stock_name=name,
+                    title=title,
+                    content=content,
+                    url=str(item.get("url", item.get("link", ""))).strip(),
+                )
+            except Exception as exc:
+                _logger.warning(f"[sentiment] LLM判断异常 {name}({code}): {exc}")
+                continue
+
+            # LLM 判断需明确 should_alert 才告警
+            if not llm_result.get("should_alert", False):
+                continue
+
+            # 取 LLM level（high > warning > info），fallback 到 keyword 级别
+            llm_level = llm_result.get("level", "warning")
+            matched_keywords = llm_result.get("risk_keywords", []) or list(
+                {m["keyword"] for m in negative_matches}
+            )
+            if not matched_keywords:
+                matched_keywords = list({m["keyword"] for m in negative_matches})
+
+            # 综合级别：LLM high 或 keyword high 均算 high
+            highest_level = llm_level
             if any(m["level"] == "high" for m in negative_matches):
                 highest_level = "high"
 
-            matched_keywords = list({m["keyword"] for m in negative_matches})
             alert_key = f"{code}:{':'.join(sorted(matched_keywords[:3]))}"
 
             if _is_duplicate(alert_key, history):
@@ -298,7 +323,9 @@ def run(dry_run: bool = False) -> dict:
                 "title": title[:100],
                 "summary": content[:200] if content else "",
                 "matched_keywords": matched_keywords,
-                "sentiment": "negative",
+                "sentiment": llm_result.get("sentiment", "negative"),
+                "llm_reason": llm_result.get("reason", ""),
+                "risk_keywords": llm_result.get("risk_keywords", []),
                 "url": str(item.get("url", item.get("link", ""))).strip(),
                 "alert_key": alert_key,
                 "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),

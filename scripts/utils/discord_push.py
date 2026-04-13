@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Tuple
 
 try:
     import yaml
@@ -883,7 +883,8 @@ def _build_sentiment_batch_embeds(alerts: list[dict], ts: str = "") -> list[dict
     """
     批量舆情提醒 → 单张汇总卡片（多只股票统一推送）。
 
-    alerts 元素：{name, code, level, title, summary, matched_keywords, url}
+    alerts 元素：{name, code, level, title, summary, matched_keywords, llm_reason, risk_keywords, url}
+    每只股票最多展示 2 条告警，优先使用 LLM 关键词和理由。
     """
     if not ts:
         ts = datetime.now().strftime("%H:%M")
@@ -899,10 +900,18 @@ def _build_sentiment_batch_embeds(alerts: list[dict], ts: str = "") -> list[dict
             timestamp=iso_ts,
         )]
 
+    # 按股票聚合，每只最多 2 条
+    stock_map: Dict[str, list[dict]] = {}
+    for alert in alerts:
+        key = alert.get("code", "")
+        if key not in stock_map:
+            stock_map[key] = []
+        if len(stock_map[key]) < 2:
+            stock_map[key].append(alert)
+
     level_colors = {"high": 0xC62828, "warning": 0xFB8C00}
     color = max((level_colors.get(a.get("level", "warning"), 0xFB8C00) for a in alerts), default=0xFB8C00)
 
-    # description: 摘要行
     high_count = sum(1 for a in alerts if a.get("level") == "high")
     warn_count = sum(1 for a in alerts if a.get("level") == "warning")
     desc_parts = []
@@ -911,42 +920,47 @@ def _build_sentiment_batch_embeds(alerts: list[dict], ts: str = "") -> list[dict
     if warn_count:
         desc_parts.append(f"🟡 警示 {warn_count} 条")
     desc_parts.append(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    desc_parts.append(f"共扫描 {len(alerts)} 只股票")
+    desc_parts.append(f"共 {len(stock_map)} 只股票")
 
     fields: list[dict] = []
-    for alert in alerts:
-        name = alert.get("name", "")
-        code = alert.get("code", "")
-        level = alert.get("level", "warning")
-        level_icon = "🔴" if level == "high" else "🟡"
-        title_text = alert.get("title", "")[:80]
-        keywords = alert.get("matched_keywords", [])
-        kw_str = " / ".join(keywords[:3])
-        summary = alert.get("summary", "")[:80]
-        url = alert.get("url", "")
+    for code, stock_alerts in stock_map.items():
+        for alert in stock_alerts:
+            name = alert.get("name", "")
+            level = alert.get("level", "warning")
+            level_icon = "🔴" if level == "high" else "🟡"
+            title_text = alert.get("title", "")[:60]
+            # 优先用 LLM risk_keywords，其次 keyword 匹配
+            keywords = alert.get("risk_keywords") or alert.get("matched_keywords", [])
+            kw_str = " / ".join(keywords[:3]) if keywords else ""
+            summary = alert.get("summary", "")[:60]
+            llm_reason = alert.get("llm_reason", "")
+            url = alert.get("url", "")
 
-        title_line = f"{level_icon} {name}({code})"
-        body_lines = []
-        if title_text:
-            body_lines.append(f"_{title_text}_")
-        if kw_str:
-            body_lines.append(f"`{kw_str}`")
-        if summary:
-            body_lines.append(summary)
-        if url:
-            body_lines.append(f"[原文]({url})")
+            # 股票名行为 field name
+            stock_field_name = f"{level_icon} {name}({code})"
+            body_lines = []
+            if title_text:
+                body_lines.append(f"📰 {title_text}")
+            if llm_reason:
+                body_lines.append(f"💡 {llm_reason}")
+            if kw_str:
+                body_lines.append(f"`⚠️ {kw_str}`")
+            if summary:
+                body_lines.append(summary)
+            if url:
+                body_lines.append(f"[原文]({url})")
 
-        fields.append({
-            "name": title_line,
-            "value": "\n".join(body_lines)[:1024],
-            "inline": False,
-        })
+            fields.append({
+                "name": stock_field_name,
+                "value": "\n".join(body_lines)[:1024],
+                "inline": False,
+            })
 
     return [_build_embed(
         title=f"🔔 舆情监控 — {high_count}🔴 {warn_count}🟡",
         description=" · ".join(desc_parts),
         color=color,
-        fields=fields[:25],  # Discord 单卡最多 25 个 field
+        fields=fields[:25],
         footer=_footer(f"{len(alerts)} 条告警 · Hermes · sentiment", ts),
         author_name="Hermes 交易系统",
         timestamp=iso_ts,
