@@ -483,6 +483,5 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
-    import pandas as pd  # 确保 hist 字段可用
     result = run()
     print(f"\n盘前摘要已推送 Discord")

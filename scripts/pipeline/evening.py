@@ -22,7 +22,6 @@ pipeline/evening.py — 收盘流程（15:35 执行）
 import os
 import sys
 import re
-import shutil
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,7 +33,6 @@ if _PROJECT_ROOT not in sys.path:
 os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
-import pandas as pd
 from scripts.engine.data_engine import DataEngine
 from scripts.state import (
     load_activity_summary,
@@ -201,9 +199,8 @@ def _update_portfolio_prices(vault: ObsidianVault, engine: DataEngine) -> list:
         updated_content
     )
 
-    # 写回（带备份）
+    # 写回（带备份）；sync 在 evening.py 末尾统一执行一次
     vault.write(vault.portfolio_path, updated_content)
-    vault.sync_portfolio_state()
     return changes
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,9 +239,9 @@ def _enrich_today_journal(vault: ObsidianVault, today_str: str,
         shadow_lines.append(line)
 
     # ── C. 大盘信号 ──────────────────────────────────────────────────────────
-    market_indices = market_data.get("indices") or market_data.get("market") or {}
+    indices = market_data.get("indices", {})
     market_lines = []
-    for name, info in market_indices.items():
+    for name, info in indices.items():
         if not isinstance(info, dict) or info.get("error"):
             continue
         close = info.get("close", info.get("price", 0))
@@ -323,9 +320,9 @@ def _generate_tomorrow_plan(vault: ObsidianVault, engine: DataEngine,
     strategy = get_strategy()
     market_timer_cfg = strategy.get("market_timer", {})
 
-    market_indices = market_data.get("indices") or market_data.get("market") or {}
-    sh_info = market_indices.get("上证指数", {})
-    cy_info = market_indices.get("创业板指", {})
+    indices = market_data.get("indices", {})
+    sh_info = indices.get("上证指数", {})
+    cy_info = indices.get("创业板指", {})
 
     signal = market_data.get("signal", market_data.get("market_signal", "CLEAR"))
     green_days = market_timer_cfg.get("green_days", 3)
@@ -641,8 +638,8 @@ def run() -> dict:
             },
         )
 
-        market_indices = market_data.get("indices") or market_data.get("market") or {}
-        for name, info in market_indices.items():
+        indices = market_data.get("indices", {})
+        for name, info in indices.items():
             if not isinstance(info, dict):
                 _logger.warning(f"  {name}: 数据不可用")
                 continue
@@ -753,7 +750,7 @@ def run() -> dict:
                     "chg_pct": info.get("change_pct", info.get("chg_pct", 0)),
                     "signal": info.get("signal", ""),
                 }
-                for name, info in market_indices.items()
+                for name, info in indices.items()
                 if isinstance(info, dict) and not info.get("error")
             },
             "positions": discord_positions,
@@ -837,6 +834,12 @@ def run() -> dict:
         except Exception as pf_exc:
             _logger.warning(f"  舆情预抓取失败（不影响主流程）: {pf_exc}")
 
+        # 全局同步：所有 evening writes 完成后一次性同步到 SQLite
+        try:
+            vault.sync_portfolio_state()
+        except Exception as sync_exc:
+            _logger.warning(f"  组合同步失败: {sync_exc}")
+
         return {
             "market_data": market_data,
             "position_changes": position_changes,
@@ -856,7 +859,6 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
-    import pandas as pd
     result = run()
     print(f"\n收盘报告已推送 Discord")
     print(f"明日日志: {result['tomorrow_date']}.md")

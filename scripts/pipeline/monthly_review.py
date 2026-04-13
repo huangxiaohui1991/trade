@@ -25,16 +25,13 @@ CLI 集成：
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.state import (
-    load_portfolio_snapshot,
-    load_trade_review,
     load_pool_action_history,
 )
 from scripts.utils.common import _safe_float

@@ -30,7 +30,6 @@ warnings.filterwarnings("ignore")
 
 from scripts.engine.data_engine import DataEngine
 from scripts.state import load_market_snapshot, load_portfolio_snapshot, save_market_snapshot_history
-from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.discord_push import send_noon_check
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
@@ -67,7 +66,7 @@ def run() -> dict:
                 "weekday": weekday,
             },
         )
-        indices = market_snapshot.get("indices") or market_snapshot.get("market") or {}
+        indices = market_snapshot.get("indices", {})
         market_info = {}
         for name, info in indices.items():
             if not isinstance(info, dict):

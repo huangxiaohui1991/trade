@@ -8,42 +8,16 @@
   - 将状态持久化到 data/runtime/pool_state.json
 """
 
-import json
 from datetime import datetime
 from pathlib import Path
 
 from scripts.utils.common import _safe_float
 from scripts.utils.config_loader import get_strategy
-from scripts.utils.runtime_state import RUNTIME_DIR
 from scripts.engine.scorer import data_quality_review_reason, normalize_data_quality, split_veto_signals
 from scripts.state.reason_codes import VETO_LABEL_MAP
 
 
-POOL_STATE_PATH = RUNTIME_DIR / "pool_state.json"
 WARNING_ONLY_SIGNALS = {"consecutive_outflow_warn"}
-
-
-def _load_state() -> dict:
-    if not POOL_STATE_PATH.exists():
-        return {"updated_at": "", "codes": {}}
-    try:
-        with open(POOL_STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data.setdefault("codes", {})
-        return data
-    except Exception:
-        return {"updated_at": "", "codes": {}}
-
-
-def load_pool_state() -> dict:
-    return _load_state()
-
-
-def _save_state(state: dict) -> str:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    with open(POOL_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    return str(POOL_STATE_PATH)
 
 
 def _json_safe(value):
@@ -230,69 +204,25 @@ def normalize_pool_snapshot(snapshot) -> dict:
 
 
 def load_pool_snapshot() -> dict:
-    """读取结构化 pool snapshot；优先统一状态接口，否则回退本地 JSON。"""
+    """读取结构化 pool snapshot，统一走 SQLite（经由 runtime_state）。"""
     runtime_load, _ = _runtime_snapshot_io()
     if runtime_load:
         try:
             return normalize_pool_snapshot(runtime_load())
         except Exception:
             pass
-
-    if not POOL_STATE_PATH.exists():
-        return {"entries": [], "metadata": {}, "updated_at": ""}
-    try:
-        with open(POOL_STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return normalize_pool_snapshot(data)
-    except Exception:
-        return {"entries": [], "metadata": {}, "updated_at": ""}
+    return {"entries": [], "metadata": {}, "updated_at": ""}
 
 
 def save_pool_snapshot(entries: list, metadata: dict | None = None) -> str:
-    """写入结构化 pool snapshot；优先统一状态接口，否则落到本地 JSON。"""
-    runtime_load, runtime_save = _runtime_snapshot_io()
+    """写入结构化 pool snapshot，统一走 SQLite（经由 runtime_state）。"""
+    _, runtime_save = _runtime_snapshot_io()
     normalized_entries = [_normalize_entry(item) for item in entries or []]
     metadata = _json_safe(metadata or {})
-    summary = {
-        "core": sum(1 for item in normalized_entries if item.get("bucket") == "core"),
-        "watch": sum(1 for item in normalized_entries if item.get("bucket") == "watch"),
-        "avoid": sum(1 for item in normalized_entries if item.get("bucket") == "avoid"),
-    }
-    payload = {
-        "entries": normalized_entries,
-        "metadata": metadata,
-        "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    payload["summary"] = summary
-
     if runtime_save:
-        try:
-            result = runtime_save(normalized_entries, metadata)
-            if result:
-                return str(result)
-        except Exception:
-            pass
-
-    state = _load_state()
-    state["updated_at"] = payload["updated_at"]
-    state["last_eval_date"] = datetime.now().strftime("%Y-%m-%d")
-    state["last_summary"] = summary
-    state["entries"] = normalized_entries
-    state["metadata"] = metadata
-    state["codes"] = {
-        item["code"]: {
-            "name": item["name"],
-            "last_date": state["last_eval_date"],
-            "last_score": item["total_score"],
-            "last_veto": item["veto_triggered"],
-            "last_veto_signals": item["veto_signals"],
-            "membership": item["bucket"],
-            "updated_at": payload["updated_at"],
-        }
-        for item in normalized_entries
-        if item.get("code")
-    }
-    return _save_state(state)
+        result = runtime_save(normalized_entries, metadata)
+        return str(result)
+    raise RuntimeError("runtime_state.save_pool_snapshot unavailable")
 
 
 def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
@@ -397,10 +327,22 @@ def build_pool_snapshot_entries(results: list, current_snapshot: dict | None = N
     return _merge_snapshot_entries(results, current_snapshot, strategy_cfg, source)
 
 
+def _load_previous_code_state() -> dict:
+    """从 SQLite metadata 读取上次的 code_state（streak 数据）。"""
+    try:
+        runtime_load, _ = _runtime_snapshot_io()
+        if runtime_load:
+            snapshot = runtime_load()
+            return dict(snapshot.get("metadata", {}).get("code_state", {}))
+    except Exception:
+        pass
+    return {}
+
+
 def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: dict | None = None,
                           current_snapshot: dict | None = None, source: str = "") -> tuple[dict, dict]:
     """
-    基于当前结果和历史状态生成严格池子建议。
+    基于当前结果和历史状态生成严格池子建议。Streak 数据统一存储在 SQLite metadata 中。
 
     Returns:
         (suggestions, metadata)
@@ -421,8 +363,7 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
     current_snapshot = normalize_pool_snapshot(current_snapshot or load_pool_snapshot())
     core_codes, watch_codes = _pool_membership_maps(current_snapshot, stocks_cfg or {})
 
-    state = _load_state()
-    code_state = state.setdefault("codes", {})
+    code_state = _load_previous_code_state()
     today = datetime.now().strftime("%Y-%m-%d")
 
     suggestions = {
@@ -539,19 +480,21 @@ def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: 
         source=source or "pool_manager",
     )
 
-    state["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    state["last_eval_date"] = today
-    state["last_summary"] = {
-        key: len(value)
-        for key, value in suggestions.items()
+    # 将 code_state streak 数据写入 SQLite metadata
+    save_payload_meta = {
+        "source": "pool_manager",
+        "code_state": code_state,
+        "last_eval_date": today,
+        "last_summary": {
+            key: len(value)
+            for key, value in suggestions.items()
+        },
     }
-    state["entries"] = snapshot_entries
-    state["snapshot_meta"] = snapshot_meta
-    state_path = _save_state(state)
+    db_path = save_pool_snapshot(snapshot_entries, save_payload_meta)
 
     metadata = {
-        "state_path": state_path,
-        "summary": state["last_summary"],
+        "db_path": db_path,
+        "summary": save_payload_meta["last_summary"],
         "snapshot_entries": snapshot_entries,
         "snapshot_summary": snapshot_meta.get("summary", {}),
         "snapshot_meta": snapshot_meta,

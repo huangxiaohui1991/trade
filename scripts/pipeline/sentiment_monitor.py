@@ -24,7 +24,6 @@ import os
 import sys
 import re
 from datetime import datetime, timedelta
-from pathlib import Path
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
@@ -32,7 +31,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command
 from scripts.mx.mx_llm_judge import judge as llm_judge
-from scripts.utils.config_loader import get_stocks, get_strategy
+from scripts.utils.config_loader import get_stocks
 from scripts.utils.discord_push import send_sentiment_batch_alert
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.logger import get_logger

@@ -113,8 +113,6 @@ def _call_mx_screener(query: str, select_type: str = "A股") -> list:
             else:
                 _logger.warning("[mx-xuangu] 返回结果为空")
             return []
-            _logger.warning("[mx-xuangu] 返回结果为空")
-            return []
         candidates = []
         for row in rows:
             code = (
