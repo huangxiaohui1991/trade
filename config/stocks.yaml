@@ -1,5 +1,4 @@
-core_pool: []
-watch_pool:
+core_pool:
 - code: '300938'
   name: 信测标准
   added: '2026-04-13'
@@ -28,6 +27,7 @@ watch_pool:
   name: 晶晨股份
   added: '2026-04-13'
   score: 6.8
+watch_pool:
 - code: '300967'
   name: 晓鸣股份
   added: '2026-04-13'
