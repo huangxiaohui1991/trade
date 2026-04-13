@@ -98,16 +98,20 @@ def _call_mx_screener(query: str, select_type: str = "A股") -> list:
 
     try:
         rows = []
+        err_msg = ""
         if isinstance(result, dict):
-            rows = (
-                result.get("data", {})
-                .get("data", {})
-                .get("searchDataResultDTO", {})
-                .get("dataTableDTOList", [])
-            )
+            # 使用 MXXuangu.extract_data 统一解析（与 mx_xuangu.py 保持一致）
+            from scripts.mx.mx_xuangu import MXXuangu
+            rows, data_source, err_msg = MXXuangu.extract_data(result)
         elif isinstance(result, list):
             rows = result
+
         if not rows:
+            if err_msg:
+                _logger.warning(f"[mx-xuangu] 解析结果为空: {err_msg}")
+            else:
+                _logger.warning("[mx-xuangu] 返回结果为空")
+            return []
             _logger.warning("[mx-xuangu] 返回结果为空")
             return []
         candidates = []
@@ -507,9 +511,8 @@ def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
     """已跟踪模式：先从 core/watch 取池子，再做命中筛选。"""
     base_candidates, pool_name = _tracked_candidates(pool, stocks_cfg, blacklist, current_snapshot=current_snapshot)
     _logger.info(f">> 候选股票: {len(base_candidates)} 只")
-    if not base_candidates:
-        return [], pool_name, ""
 
+    # 如果有妙想结果，先尝试用妙想过滤已跟踪池
     if default_query:
         mx_results = _call_mx_screener(default_query, select_type)
         if mx_results:
@@ -518,11 +521,17 @@ def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
             _logger.info(f">> mx-screener 初筛: {len(mx_results)} 只通过，候选池命中 {len(candidates)} 只")
             if candidates:
                 return candidates, pool_name, "妙想智能选股"
-            _logger.warning(">> mx 筛选结果为空，fallback")
+            # 妙想有结果但池子未命中：直接用妙想结果（全市场选股）
+            _logger.warning(f">> 妙想返回 {len(mx_results)} 只，但均不在已跟踪池，直接使用妙想结果")
+            mx_candidates = [c for c in mx_results if c.get("code") not in blacklist]
+            return mx_candidates, "综合", "妙想智能选股"
         else:
             _logger.warning(">> mx-screener 调用失败，fallback 到 akshare")
 
-    return _fallback_tracked_candidates(stocks_cfg, blacklist, current_snapshot=current_snapshot), pool_name, "akshare 原生接口"
+    if base_candidates:
+        return _fallback_tracked_candidates(stocks_cfg, blacklist, current_snapshot=current_snapshot), pool_name, "akshare 原生接口"
+
+    return [], pool_name, ""
 
 
 # ---------------------------------------------------------------------------

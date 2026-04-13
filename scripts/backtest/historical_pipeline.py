@@ -209,7 +209,7 @@ def _resolve_strategy_params(overrides: dict | None = None) -> dict:
     params = {
         "use_system_strategy": True,
         "require_entry_signal": True,
-        "entry_mode": "strict",
+        "entry_mode": entry_cfg.get("entry_mode", "hybrid"),
         "entry_volume_ratio_min": entry_cfg.get("volume_ratio_min", 1.5),
         "entry_rsi_max": entry_cfg.get("rsi_max", 70),
         "entry_trend_rsi_max": entry_cfg.get("rsi_max", 70),
@@ -268,7 +268,7 @@ def _resolve_strategy_params(overrides: dict | None = None) -> dict:
     params.update(overrides)
 
     if not preset_sets_entry_requirement and not override_sets_entry_requirement:
-        params["require_entry_signal"] = str(params.get("entry_mode", "strict")).strip().lower() != "score_only"
+        params["require_entry_signal"] = str(params.get("entry_mode", entry_cfg.get("entry_mode", "hybrid"))).strip().lower() != "score_only"
 
     if "stop_loss" not in preset_values and "stop_loss" not in overrides:
         params["stop_loss"] = params.get("momentum_stop_loss", 0.05)
@@ -333,7 +333,7 @@ def _proxy_candidate_snapshot(
         "veto_signals": list(vetoes),
         "entry_signal": entry_signal,
         "entry_reasons": list(entry_reasons),
-        "entry_mode": params.get("entry_mode", "strict"),
+        "entry_mode": params.get("entry_mode", "hybrid"),
         "golden_cross": tech.get("golden_cross", False),
         "close_above_prev": tech.get("close_above_prev", False),
         "deviation_pct": tech.get("deviation_pct"),
@@ -386,7 +386,7 @@ def _merge_history_candidate(
     else:
         merged["entry_reasons"] = []
     merged["veto_signals"] = [str(item).strip() for item in merged.get("veto_signals", proxy_candidate.get("veto_signals", [])) or [] if str(item).strip()]
-    merged["entry_mode"] = str(merged.get("entry_mode", proxy_candidate.get("entry_mode", "")) or proxy_candidate.get("entry_mode", "strict"))
+    merged["entry_mode"] = str(merged.get("entry_mode", proxy_candidate.get("entry_mode", "")) or proxy_candidate.get("entry_mode", "hybrid"))
     merged["style"] = str(merged.get("style", proxy_candidate.get("style", "")) or proxy_candidate.get("style", "momentum"))
     merged["style_confidence"] = float(merged.get("style_confidence", proxy_candidate.get("style_confidence", 0)) or 0)
     merged["snapshot_source"] = "history_signal_snapshot"
@@ -421,7 +421,7 @@ def _entry_signal_for_mode(
     params: dict[str, Any],
 ) -> tuple[bool, list[str]]:
     """Compute entry eligibility using the selected entry mode."""
-    mode = str(params.get("entry_mode", "strict") or "strict").strip().lower()
+    mode = str(params.get("entry_mode", "hybrid") or "hybrid").strip().lower()
     volume_ratio = float(tech.get("volume_ratio") or 0.0)
     rsi = tech.get("rsi")
 
@@ -939,7 +939,7 @@ def build_replay_fixture(
             "start": start,
             "end": end,
             "preset": params.get("preset"),
-            "entry_mode": params.get("entry_mode", "strict"),
+            "entry_mode": params.get("entry_mode", "hybrid"),
             "use_history_snapshots": bool(use_history_snapshots),
             "strategy_source": strategy_source,
             "data_fidelity": data_fidelity,

@@ -22,6 +22,8 @@ screening:
 # 第二步：入场触发信号
 # ---------------------------------------------------------------------------
 entry_signal:
+  # 入场模式：hybrid（MA金叉+趋势+回踩任一），strict（仅金叉），score_only（仅评分）
+  entry_mode: hybrid
   # 基础触发（三条件同时满足）
   ma_cross:
     fast: 10                   # MA10

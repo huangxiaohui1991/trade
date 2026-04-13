@@ -395,6 +395,26 @@ def _numpy_scalar_to_python(v) -> str | int | float:
     return v
 
 
+def _serialize_entry(entry: dict) -> dict:
+    """清理 entry 中不可序列化的对象（如 DataFrame）"""
+    import pandas as pd
+    result = {}
+    for k, v in entry.items():
+        if isinstance(v, pd.DataFrame):
+            result[k] = v.to_dict(orient="records")
+        elif isinstance(v, dict):
+            result[k] = _serialize_entry(v)
+        elif isinstance(v, (list, tuple)):
+            result[k] = [
+                _serialize_entry(i) if isinstance(i, dict) else
+                (i.to_dict(orient="records") if isinstance(i, pd.DataFrame) else i)
+                for i in v
+            ]
+        else:
+            result[k] = v
+    return result
+
+
 def _json_loads(value: str | None, default: Any) -> Any:
     if not value:
         return default
@@ -2750,7 +2770,7 @@ def save_candidate_snapshot_history(
                     str(entry.get("data_quality", "ok")).strip(),
                     str(entry.get("note", "")).strip(),
                     str(entry.get("source", source or metadata.get("source", ""))).strip(),
-                    _json_dumps(entry),
+                    _json_dumps(_serialize_entry(entry)),
                 ),
             )
         return {

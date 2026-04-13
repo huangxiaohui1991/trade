@@ -93,6 +93,23 @@ class ObsidianVault:
         for key, value in VAULT_LAYOUT.items():
             setattr(self, key, value)
 
+        # 自动创建所有必要的子目录
+        self._ensure_directories()
+
+    def _ensure_directories(self) -> None:
+        """确保 VAULT_LAYOUT 中定义的所有目录都存在"""
+        for key, value in VAULT_LAYOUT.items():
+            if key.endswith("_dir"):
+                # 目录直接创建
+                full_path = self._full_path(value)
+                os.makedirs(full_path, exist_ok=True)
+            elif key.endswith("_path"):
+                # 文件路径创建其父目录
+                full_path = self._full_path(value)
+                dir_path = os.path.dirname(full_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
+
     def _full_path(self, relative_path: str) -> str:
         """将相对路径转换为绝对路径"""
         return os.path.join(self.vault_path, relative_path)
