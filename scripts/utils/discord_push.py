@@ -24,6 +24,38 @@ try:
 except ImportError:
     yaml = None  # PyYAML optional; notification.yaml features disabled
 
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+def _discord_escape(text: str) -> str:
+    """
+    转义 Discord Markdown 特殊字符，防止 LLM 生成内容破坏卡片格式。
+
+    Discord embeds 中，以下字符在 value/name/description 里会被解析为 markdown：
+    *  _italic_  (单星号/下划线)
+    *  **bold**
+    *  ``` code block ```
+    *  `inline code`
+    *  > blockquote
+    *  # heading
+    *  | spoiler |
+    *  ~strikethrough~
+    """
+    if not text:
+        return text
+    text = text.replace("\\", "\\\\")
+    text = text.replace("*", "\\*")
+    text = text.replace("_", "\\_")
+    text = text.replace("`", "\\`")
+    text = text.replace(">", "\\>")
+    text = text.replace("#", "\\#")
+    text = text.replace("|", "\\|")
+    text = text.replace("~", "\\~")
+    return text
+
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
@@ -928,21 +960,21 @@ def _build_sentiment_batch_embeds(alerts: list[dict], ts: str = "") -> list[dict
             name = alert.get("name", "")
             level = alert.get("level", "warning")
             level_icon = "🔴" if level == "high" else "🟡"
-            title_text = alert.get("title", "")[:60]
+            title_text = _discord_escape(alert.get("title", ""))[:60]
             # 优先用 LLM risk_keywords，其次 keyword 匹配
             keywords = alert.get("risk_keywords") or alert.get("matched_keywords", [])
-            kw_str = " / ".join(keywords[:3]) if keywords else ""
-            summary = alert.get("summary", "")[:60]
+            kw_str = _discord_escape(" / ".join(keywords[:3])) if keywords else ""
+            summary = _discord_escape(alert.get("summary", ""))[:60]
             llm_reason = alert.get("llm_reason", "")
             url = alert.get("url", "")
 
             # 股票名行为 field name
-            stock_field_name = f"{level_icon} {name}({code})"
+            stock_field_name = f"{level_icon} {_discord_escape(name)}({code})"
             body_lines = []
             if title_text:
                 body_lines.append(f"📰 {title_text}")
             if llm_reason:
-                body_lines.append(f"💡 {llm_reason}")
+                body_lines.append(f"💡 {_discord_escape(llm_reason)}")
             if kw_str:
                 body_lines.append(f"`⚠️ {kw_str}`")
             if summary:
