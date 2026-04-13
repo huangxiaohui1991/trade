@@ -159,7 +159,7 @@ case "$MODE" in
         ;;
     sentiment)
         echo ">> 舆情监控"
-        "$PYTHON" -m scripts.cli.trade run sentiment --json 2>&1
+        "$PYTHON" -m scripts.cli.trade run sentiment 2>&1
         ;;
     hk_monitor)
         echo ">> 港股遗留仓位检查"

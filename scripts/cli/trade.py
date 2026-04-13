@@ -114,7 +114,10 @@ PIPELINES = {
 
 def _run_sentiment(args):
     from scripts.pipeline.sentiment_monitor import run as run_sentiment
-    return run_sentiment(dry_run=getattr(args, "dry_run", False))
+    return run_sentiment(
+        dry_run=getattr(args, "dry_run", False),
+        skip_discord=getattr(args, "skip_discord", False),
+    )
 
 
 def _run_hk_monitor(args):
@@ -2210,6 +2213,7 @@ def main():
     screener.add_argument("--universe", choices=["tracked", "market"], default="tracked")
     sentiment_parser = run_sub.add_parser("sentiment")
     sentiment_parser.add_argument("--dry-run", action="store_true", help="Scan only, no Discord push")
+    sentiment_parser.add_argument("--skip-discord", action="store_true", help="Skip Discord push (write snapshot only)")
     hk_parser = run_sub.add_parser("hk_monitor")
     hk_parser.add_argument("--dry-run", action="store_true", help="Check only, no Discord push")
     monthly_parser = run_sub.add_parser("monthly")

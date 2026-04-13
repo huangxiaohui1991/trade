@@ -219,9 +219,13 @@ def _clean_old_alerts(history: dict):
     history["alerts"] = cleaned
 
 
-def run(dry_run: bool = False) -> dict:
+def run(dry_run: bool = False, skip_discord: bool = False) -> dict:
     """
     执行舆情扫描
+
+    Args:
+        dry_run: True 时不写状态不推 Discord（只返回结果）
+        skip_discord: True 时跳过 Discord 推送，只写快照。
 
     Returns:
         {
@@ -336,14 +340,20 @@ def run(dry_run: bool = False) -> dict:
     if not dry_run and alerts:
         for alert in alerts:
             _record_alert(alert["alert_key"], history)
-        discord_sent = 0
-        discord_failed = 0
-        ok, err = send_sentiment_batch_alert(alerts)
-        if ok:
-            discord_sent = len(alerts)
+
+        if skip_discord:
+            _logger.info("[sentiment] skip_discord=True，跳过 Discord 推送（仅写快照）")
+            discord_sent = 0
+            discord_failed = 0
         else:
-            discord_failed = len(alerts)
-            _logger.warning(f"[sentiment] Discord 批量推送失败: {err}")
+            discord_sent = 0
+            discord_failed = 0
+            ok, err = send_sentiment_batch_alert(alerts)
+            if ok:
+                discord_sent = len(alerts)
+            else:
+                discord_failed = len(alerts)
+                _logger.warning(f"[sentiment] Discord 批量推送失败: {err}")
 
     if not dry_run:
         _save_alert_history(history)
