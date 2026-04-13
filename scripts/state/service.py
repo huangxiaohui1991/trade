@@ -635,10 +635,12 @@ def _write_positions(conn: sqlite3.Connection, positions: Iterable[dict]) -> Non
         )
 
 
-def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -> int:
+def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -> dict[str, dict]:
     """
     根据 trade_events 表重建并覆盖指定 scope 的持仓记录。
-    返回写入的持仓数量。
+
+    Returns:
+        dict of {code: position_dict}，供调用方同步 portfolio.md 用
     """
     from collections import defaultdict
 
@@ -647,20 +649,32 @@ def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -
         (scope,),
     ).fetchall()
 
-    # 按股票聚合：记录最后一笔的 name/market，以及净买入股数和加权成本
-    state: dict[str, dict] = defaultdict(lambda: {"name": "", "Market": "", "net_shares": 0, "cost_sum": 0.0})
+    # 按股票聚合：净持仓、加权成本、最新成交价、加仓次数、首次买入价
+    state: dict[str, dict] = defaultdict(
+        lambda: {"name": "", "market": "", "net_shares": 0, "cost_sum": 0.0,
+                 "current_price": 0.0, "buy_count": 0, "first_buy_price": 0.0}
+    )
     for code, name, market, side, shares, price in rows:
         s = state[code]
-        s["Name"] = name or s["Name"]
-        s["Market"] = market or s["Market"]
-        net = _safe_int(shares) * (1 if side == "buy" else -1)
-        s["net_shares"] += net
+        s["name"] = name or s["name"]
+        s["market"] = market or s["market"]
+        i_shares = _safe_int(shares)
+        f_price = _safe_float(price)
         if side == "buy":
-            s["cost_sum"] += _safe_float(price) * _safe_int(shares)
+            s["net_shares"] += i_shares
+            s["cost_sum"] += f_price * i_shares
+            s["buy_count"] += 1
+            if s["buy_count"] == 1:
+                s["first_buy_price"] = f_price
+        else:
+            s["net_shares"] -= i_shares
+        if f_price > 0:
+            s["current_price"] = f_price
 
     updated_at = _now_ts()
     as_of_date = _today_str()
     count = 0
+    rebuilt: dict[str, dict] = {}
 
     conn.execute("DELETE FROM portfolio_positions WHERE scope = ?", (scope,))
     for code, s in state.items():
@@ -669,6 +683,8 @@ def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -
             continue
         cost_sum = s["cost_sum"]
         avg_cost = round(cost_sum / net_shares, 4) if net_shares > 0 else 0.0
+        current_price = s["current_price"] or avg_cost
+        market_value = round(current_price * net_shares, 2)
         conn.execute(
             """
             INSERT INTO portfolio_positions(
@@ -679,12 +695,12 @@ def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -
             (
                 scope,
                 code,
-                s["Name"],
-                s["Market"],
+                s["name"],
+                s["market"],
                 net_shares,
                 avg_cost,
-                avg_cost,  # current_price 暂无外部数据，用 avg_cost 代替
-                round(avg_cost * net_shares, 2),
+                current_price,
+                market_value,
                 "",
                 "",
                 "trade_events_rebuild",
@@ -693,10 +709,19 @@ def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -
                 "{}",
             ),
         )
+        rebuilt[code] = {
+            "name": s["name"],
+            "shares": net_shares,
+            "avg_cost": avg_cost,
+            "current_price": current_price,
+            "market_value": market_value,
+            "first_buy_price": s["first_buy_price"],
+            "buy_count": s["buy_count"],
+        }
         count += 1
 
     LOGGER.info(f"[state] rebuilt {count} positions for {scope} from trade_events")
-    return count
+    return rebuilt
 
 
 def _replace_portfolio_scope_snapshot(
@@ -1981,8 +2006,44 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                 LOGGER.warning(f"[apply_order_reply] paper portfolio sync failed: {sync_exc}")
         elif scope == PRIMARY_SCOPE:
             try:
+                rebuilt: dict[str, dict] = {}
                 with _connect() as conn:
-                    _rebuild_positions_from_trade_events(conn, scope=PRIMARY_SCOPE)
+                    rebuilt = _rebuild_positions_from_trade_events(conn, scope=PRIMARY_SCOPE)
+                if rebuilt:
+                    vault = ObsidianVault()
+                    portfolio = vault.read_portfolio()
+                    holdings: list[dict] = list(portfolio.get("holdings", []))
+                    existing_codes = {h.get("code") for h in holdings}
+                    # 更新已有仓位的股数/成本/市值，保留其他字段（止损价等）
+                    for h in holdings:
+                        code = h.get("code")
+                        if code in rebuilt:
+                            r = rebuilt[code]
+                            h["持有股数"] = r["shares"]
+                            h["平均成本"] = round(r["avg_cost"], 4)
+                            h["持仓市值"] = round(r["market_value"], 2)
+                            if r["first_buy_price"]:
+                                h["首次买入价"] = r["first_buy_price"]
+                            if r["buy_count"]:
+                                h["加仓次数"] = r["buy_count"] - 1
+                            del rebuilt[code]
+                    # 新增持仓（之前清仓后重新买入的）
+                    for code, r in rebuilt.items():
+                        holdings.append({
+                            "股票": r["name"],
+                            "代码": code,
+                            "首次买入价": r["first_buy_price"],
+                            "加仓次数": max(r["buy_count"] - 1, 0),
+                            "平均成本": round(r["avg_cost"], 4),
+                            "持有股数": r["shares"],
+                            "持仓市值": round(r["market_value"], 2),
+                            "止损价": "待设定",
+                            "绝对止损": "待设定",
+                            "止盈1(15%)": "待设定",
+                            "状态": "",
+                        })
+                    vault.update_portfolio({"holdings": holdings})
+                    vault.sync_portfolio_state()
                 positions_synced = True
             except Exception as sync_exc:
                 LOGGER.warning(f"[apply_order_reply] real portfolio sync failed: {sync_exc}")
