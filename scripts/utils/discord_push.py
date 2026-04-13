@@ -181,6 +181,8 @@ DISCORD_COLORS = {
     "evening":   0x7B1FA2,  # 紫色 — 收盘沉稳
     "weekly":    0x00695C,  # 深青 — 周报专业
     "sentiment": 0xC62828,  # 红色 — 舆情警报
+    "stop_alert": 0xC62828,  # 红色 — 止损告警
+    "profit_alert": 0x2E7D32,  # 深绿 — 止盈告警
     "hk_alert":  0x880E4F,  # 深红 — 港股告警
     "hk_summary":0x4A148C,  # 紫黑 — 港股汇总
     "info":      0x37474F,  # 灰蓝 — 通用信息
@@ -1135,6 +1137,135 @@ def _build_condition_order_embeds(pending: list) -> list[dict]:
         author_name="Hermes 交易系统",
         timestamp=iso_ts,
     )]
+
+
+# ---------------------------------------------------------------------------
+# Embed Builder — 止损/止盈触发告警
+# ---------------------------------------------------------------------------
+
+def _build_stop_alert_embeds(position_changes: list[dict], ts: str = "") -> list[dict]:
+    """
+    止损/止盈触发告警 → 每只触发股票一张红色/绿色卡片。
+
+    position_changes 元素：
+        name, code, new_price, cost_price, shares,
+        stop_loss, absolute_stop, t1_price, triggered: [str]
+    """
+    if not ts:
+        ts = datetime.now().strftime("%H:%M")
+    iso_ts = _now_iso()
+
+    triggered_changes = [c for c in position_changes if c.get("triggered")]
+    if not triggered_changes:
+        return []
+
+    embeds: list[dict] = []
+    embeds.append(_build_embed(
+        title=f"⚠️ 止损/止盈触发告警（{len(triggered_changes)} 只）",
+        description=f"📅 {datetime.now().strftime('%Y-%m-%d')} {ts} · 请尽快确认是否成交",
+        color=DISCORD_COLORS["stop_alert"],
+        footer=_footer("Hermes · stop_alert", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    ))
+
+    for change in triggered_changes:
+        name = change.get("name", "")
+        code = change.get("code", "")
+        new_price = change.get("new_price", 0)
+        cost = change.get("cost_price", 0)
+        shares = change.get("shares", 0)
+        stop_loss = change.get("stop_loss", 0)
+        absolute_stop = change.get("absolute_stop", 0)
+        t1_price = change.get("t1_price", 0)
+        triggered_list = change.get("triggered", [])
+
+        pnl_pct = (new_price / cost - 1) * 100 if cost > 0 else 0
+        pnl_sign = "+" if pnl_pct >= 0 else ""
+        is_loss = pnl_pct < 0
+
+        # 卡片颜色：止损 → 红色，止盈 → 深绿
+        card_color = DISCORD_COLORS["stop_alert"] if is_loss else DISCORD_COLORS["profit_alert"]
+        emoji = "🔴" if is_loss else "🟢"
+        title_type = "止损触发" if is_loss else "止盈触发"
+
+        fields: list[dict] = [
+            {
+                "name": "现价",
+                "value": f"¥{new_price:.2f}（{pnl_sign}{pnl_pct:.2f}%）",
+                "inline": True,
+            },
+            {
+                "name": "成本",
+                "value": f"¥{cost:.2f}",
+                "inline": True,
+            },
+            {
+                "name": "持有",
+                "value": f"{shares} 股",
+                "inline": True,
+            },
+        ]
+
+        # 触发类型
+        type_labels = []
+        for t in triggered_list:
+            if "止损" in t:
+                type_labels.append("🔴 止损")
+            elif "止盈" in t:
+                type_labels.append("🟢 止盈")
+        fields.append({
+            "name": "触发类型",
+            "value": " · ".join(type_labels) if type_labels else " · ".join(triggered_list),
+            "inline": False,
+        })
+
+        # 条件单价格
+        order_lines = []
+        if stop_loss > 0:
+            order_lines.append(f"动态止损：`¥{stop_loss:.2f}`")
+        if absolute_stop > 0:
+            order_lines.append(f"绝对止损：`¥{absolute_stop:.2f}`")
+        if t1_price > 0:
+            order_lines.append(f"止盈(T1)：`¥{t1_price:.2f}`")
+        fields.append({
+            "name": "条件单价格",
+            "value": "\n".join(order_lines),
+            "inline": False,
+        })
+
+        # 确认方式
+        fields.append({
+            "name": "📋 确认方式",
+            "value": (
+                '回复："止损触发了 ' + name + ' 成交¥' + f'{new_price:.2f}"\n'
+                '或："止盈触发了 ' + name + ' 成交¥' + f'{new_price:.2f}"\n'
+                '或："取消止损 ' + name + '" / "取消止盈 ' + name + '"'
+            ),
+            "inline": False,
+        })
+
+        embeds.append(_build_embed(
+            title=f"{emoji} {title_type} — {name}（{code}）",
+            color=card_color,
+            fields=fields,
+            footer=_footer("⚠️ 立即确认是否成交", ts),
+            author_name="Hermes 交易系统",
+            timestamp=iso_ts,
+        ))
+
+    return embeds
+
+
+def send_stop_alert(position_changes: list[dict]) -> Tuple[bool, str]:
+    """
+    发送止损/止盈触发告警卡片。
+    有触发项才发送，平静退出。
+    """
+    embeds = _build_stop_alert_embeds(position_changes)
+    if not embeds:
+        return True, "no_triggered"
+    return _post_embed_to_discord(embeds)
 
 
 # ---------------------------------------------------------------------------

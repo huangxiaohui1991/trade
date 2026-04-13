@@ -45,7 +45,7 @@ from scripts.state import (
     save_daily_capital_snapshot,
 )
 from scripts.utils.obsidian import ObsidianVault
-from scripts.utils.discord_push import send_evening_report
+from scripts.utils.discord_push import send_evening_report, send_stop_alert
 from scripts.utils.config_loader import get_strategy
 from scripts.utils.logger import get_logger
 from scripts.utils.runtime_state import update_pipeline_state
@@ -660,6 +660,17 @@ def run() -> dict:
 
         _logger.info(">> 更新持仓价格...")
         position_changes = _update_portfolio_prices(vault, engine)
+
+        # ── 止损/止盈触发告警（立即推送，不等收盘摘要）────────────
+        triggered_changes = [c for c in position_changes if c.get("triggered")]
+        if triggered_changes:
+            _logger.warning(f"⚠️ 检测到 {len(triggered_changes)} 只触发止损/止盈，立即推送告警卡片")
+            stop_ok, stop_err = send_stop_alert(position_changes)
+            if stop_ok:
+                _logger.info(">> 止损/止盈告警卡片推送成功")
+            else:
+                _logger.warning(f">> 止损/止盈告警卡片推送失败: {stop_err}")
+        # ──────────────────────────────────────────────────────────
 
         _logger.info(">> 回填今日交易到日志...")
         backfill_count = _backfill_today_trades(vault, today_str)
