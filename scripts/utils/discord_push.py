@@ -879,6 +879,80 @@ def _build_sentiment_embeds(data: dict) -> list[dict]:
     )]
 
 
+def _build_sentiment_batch_embeds(alerts: list[dict], ts: str = "") -> list[dict]:
+    """
+    批量舆情提醒 → 单张汇总卡片（多只股票统一推送）。
+
+    alerts 元素：{name, code, level, title, summary, matched_keywords, url}
+    """
+    if not ts:
+        ts = datetime.now().strftime("%H:%M")
+    iso_ts = _now_iso()
+
+    if not alerts:
+        return [_build_embed(
+            title="🔔 舆情监控 — 无告警",
+            description="本次扫描未发现负面舆情",
+            color=DISCORD_COLORS["info"],
+            footer=_footer("Hermes · sentiment", ts),
+            author_name="Hermes 交易系统",
+            timestamp=iso_ts,
+        )]
+
+    level_colors = {"high": 0xC62828, "warning": 0xFB8C00}
+    color = max((level_colors.get(a.get("level", "warning"), 0xFB8C00) for a in alerts), default=0xFB8C00)
+
+    # description: 摘要行
+    high_count = sum(1 for a in alerts if a.get("level") == "high")
+    warn_count = sum(1 for a in alerts if a.get("level") == "warning")
+    desc_parts = []
+    if high_count:
+        desc_parts.append(f"🔴 高危 {high_count} 条")
+    if warn_count:
+        desc_parts.append(f"🟡 警示 {warn_count} 条")
+    desc_parts.append(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    desc_parts.append(f"共扫描 {len(alerts)} 只股票")
+
+    fields: list[dict] = []
+    for alert in alerts:
+        name = alert.get("name", "")
+        code = alert.get("code", "")
+        level = alert.get("level", "warning")
+        level_icon = "🔴" if level == "high" else "🟡"
+        title_text = alert.get("title", "")[:80]
+        keywords = alert.get("matched_keywords", [])
+        kw_str = " / ".join(keywords[:3])
+        summary = alert.get("summary", "")[:80]
+        url = alert.get("url", "")
+
+        title_line = f"{level_icon} {name}({code})"
+        body_lines = []
+        if title_text:
+            body_lines.append(f"_{title_text}_")
+        if kw_str:
+            body_lines.append(f"`{kw_str}`")
+        if summary:
+            body_lines.append(summary)
+        if url:
+            body_lines.append(f"[原文]({url})")
+
+        fields.append({
+            "name": title_line,
+            "value": "\n".join(body_lines)[:1024],
+            "inline": False,
+        })
+
+    return [_build_embed(
+        title=f"🔔 舆情监控 — {high_count}🔴 {warn_count}🟡",
+        description=" · ".join(desc_parts),
+        color=color,
+        fields=fields[:25],  # Discord 单卡最多 25 个 field
+        footer=_footer(f"{len(alerts)} 条告警 · Hermes · sentiment", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
+
+
 # ---------------------------------------------------------------------------
 # Embed Builder — 港股遗留仓位
 # ---------------------------------------------------------------------------
@@ -1130,6 +1204,16 @@ def send_sentiment_alert(data: dict) -> Tuple[bool, str]:
       sentiment: positive / negative / neutral
     """
     embeds = _build_sentiment_embeds(data)
+    return _post_embed_to_discord(embeds)
+
+
+def send_sentiment_batch_alert(alerts: list[dict]) -> Tuple[bool, str]:
+    """
+    批量舆情提醒 → 单张汇总卡片（统一推送，不碎片化）。
+
+    alerts 元素：{name, code, level, title, summary, matched_keywords, url}
+    """
+    embeds = _build_sentiment_batch_embeds(alerts)
     return _post_embed_to_discord(embeds)
 
 

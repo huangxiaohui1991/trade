@@ -32,7 +32,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command
 from scripts.utils.config_loader import get_stocks, get_strategy
-from scripts.utils.discord_push import send_sentiment_alert
+from scripts.utils.discord_push import send_sentiment_batch_alert
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.logger import get_logger
 
@@ -305,22 +305,18 @@ def run(dry_run: bool = False) -> dict:
             }
             alerts.append(alert)
 
-            # Discord 推送
-            if not dry_run:
-                _record_alert(alert_key, history)
-                ok, err = send_sentiment_alert({
-                    "matched_keywords": matched_keywords,
-                    "source": f"{name}({code})",
-                    "title": title[:100],
-                    "summary": content[:200] if content else "",
-                    "url": alert.get("url", ""),
-                    "sentiment": "negative",
-                })
-                if ok:
-                    discord_sent += 1
-                else:
-                    discord_failed += 1
-                    _logger.warning(f"[sentiment] Discord 推送失败: {err}")
+    # 扫描完毕，一次性推送合并卡片
+    if not dry_run and alerts:
+        for alert in alerts:
+            _record_alert(alert["alert_key"], history)
+        discord_sent = 0
+        discord_failed = 0
+        ok, err = send_sentiment_batch_alert(alerts)
+        if ok:
+            discord_sent = len(alerts)
+        else:
+            discord_failed = len(alerts)
+            _logger.warning(f"[sentiment] Discord 批量推送失败: {err}")
 
     if not dry_run:
         _save_alert_history(history)
