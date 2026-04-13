@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 池子状态管理
 
@@ -55,7 +56,7 @@ def _safe_score(value, default=0.0) -> float:
         return default
 
 
-def _normalize_bucket(bucket: str | None, score: float, hard_veto: bool,
+def _normalize_bucket(bucket: Optional[str], score: float, hard_veto: bool,
                       watch_min_score: float, promote_min_score: float) -> str:
     bucket = str(bucket or "").strip().lower()
     if bucket in {"core", "watch", "avoid"}:
@@ -163,7 +164,7 @@ def _normalize_entry(entry: dict, fallback_bucket: str = "avoid", source: str = 
     return normalized
 
 
-def _pool_membership_maps(snapshot: dict | None, stocks_cfg: dict | None = None) -> tuple[set, set]:
+def _pool_membership_maps(snapshot: Optional[dict], stocks_cfg: Optional[dict] = None) -> tuple[set, set]:
     snapshot = snapshot or {}
     entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
     core_codes = {str(item.get("code", "")).strip() for item in entries if str(item.get("bucket", "")).strip() == "core"}
@@ -214,7 +215,7 @@ def load_pool_snapshot() -> dict:
     return {"entries": [], "metadata": {}, "updated_at": ""}
 
 
-def save_pool_snapshot(entries: list, metadata: dict | None = None) -> str:
+def save_pool_snapshot(entries: list, metadata: Optional[dict] = None) -> str:
     """写入结构化 pool snapshot，统一走 SQLite（经由 runtime_state）。"""
     _, runtime_save = _runtime_snapshot_io()
     normalized_entries = [_normalize_entry(item) for item in entries or []]
@@ -225,8 +226,8 @@ def save_pool_snapshot(entries: list, metadata: dict | None = None) -> str:
     raise RuntimeError("runtime_state.save_pool_snapshot unavailable")
 
 
-def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
-                            strategy_cfg: dict | None = None, source: str = "") -> tuple[list, dict]:
+def _merge_snapshot_entries(results: list, current_snapshot: Optional[dict],
+                            strategy_cfg: Optional[dict] = None, source: str = "") -> tuple[list, dict]:
     """把最新评分结果合并到现有 snapshot，并输出结构化条目。"""
     current_snapshot = normalize_pool_snapshot(current_snapshot)
     strategy_cfg = strategy_cfg or get_strategy()
@@ -321,8 +322,8 @@ def _merge_snapshot_entries(results: list, current_snapshot: dict | None,
     return entries, metadata
 
 
-def build_pool_snapshot_entries(results: list, current_snapshot: dict | None = None,
-                                strategy_cfg: dict | None = None, source: str = "") -> tuple[list, dict]:
+def build_pool_snapshot_entries(results: list, current_snapshot: Optional[dict] = None,
+                                strategy_cfg: Optional[dict] = None, source: str = "") -> tuple[list, dict]:
     """对外的 snapshot 合并入口。"""
     return _merge_snapshot_entries(results, current_snapshot, strategy_cfg, source)
 
@@ -339,8 +340,8 @@ def _load_previous_code_state() -> dict:
     return {}
 
 
-def evaluate_pool_actions(results: list, stocks_cfg: dict | None, strategy_cfg: dict | None = None,
-                          current_snapshot: dict | None = None, source: str = "") -> tuple[dict, dict]:
+def evaluate_pool_actions(results: list, stocks_cfg: Optional[dict], strategy_cfg: Optional[dict] = None,
+                          current_snapshot: Optional[dict] = None, source: str = "") -> tuple[dict, dict]:
     """
     基于当前结果和历史状态生成严格池子建议。Streak 数据统一存储在 SQLite metadata 中。
 

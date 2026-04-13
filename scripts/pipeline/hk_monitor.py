@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 pipeline/hk_monitor.py — 港股遗留仓位自动监控
 
@@ -46,7 +47,7 @@ HK_RULES = {
 # 数据获取
 # ---------------------------------------------------------------------------
 
-def _fetch_hk_price(code: str) -> float | None:
+def _fetch_hk_price(code: str) -> Optional[float]:
     """获取港股最新价格，MX → akshare fallback"""
     # 尝试 MX
     try:

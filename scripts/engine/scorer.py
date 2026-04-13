@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import warnings
-from typing import Optional, Any
+from typing import Optional, Union, Optional, Any
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -356,7 +356,7 @@ def apply_veto(tech_data: dict[str, Any], flow_data: dict[str, Any], strategy: d
     return veto_signals
 
 
-def split_veto_signals(veto_signals: list[str] | None) -> tuple[list[str], list[str]]:
+def split_veto_signals(veto_signals: Optional[list[str]]) -> tuple[list[str], list[str]]:
     """将硬性 veto 和仅预警信号分开。"""
     hard_veto = []
     warnings = []
@@ -439,7 +439,7 @@ def get_recommendation(score_result: dict[str, Any]) -> str:
     return "❌ 规避" + ("（流出预警）" if warnings else "")
 
 
-def score(code: str, name: str | None = None) -> dict[str, Any]:
+def score(code: str, name: Optional[str] = None) -> dict[str, Any]:
     """
     对单个股票进行四维评分
 

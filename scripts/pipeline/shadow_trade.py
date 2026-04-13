@@ -20,6 +20,7 @@ pipeline/shadow_trade.py — 影子交易引擎
 import os
 import sys
 from datetime import date, datetime
+from typing import Optional, Union
 from pathlib import Path
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -116,7 +117,7 @@ def _mx_dispatch(command: str, **kwargs) -> dict:
         raise
 
 
-def _query_mx(command: str, *, fallback: list | dict | None = None, **kwargs):
+def _query_mx(command: str, *, fallback: Optional[Union[list, dict]] = None, **kwargs):
     try:
         return _mx_dispatch(command, **kwargs)
     except MXCommandError:
@@ -125,7 +126,7 @@ def _query_mx(command: str, *, fallback: list | dict | None = None, **kwargs):
 
 def _log_trade(action: str, code: str, name: str, shares: int,
                price: float, reason: str = "", reason_code: str = "",
-               source: str = "shadow_trade", metadata: dict | None = None) -> None:
+               source: str = "shadow_trade", metadata: Optional[dict] = None) -> None:
     """
     记录模拟盘交易到 Obsidian 交易日志。
     追加到 02-运行/模拟盘/交易记录.md
@@ -238,7 +239,7 @@ def _normalize_order_status(value) -> str:
     return "placed"
 
 
-def _normalize_order_type(value, use_market_price: bool | None = None) -> str:
+def _normalize_order_type(value, use_market_price: Optional[bool] = None) -> str:
     text = str(value or "").strip().lower()
     if use_market_price is True:
         return "market"
@@ -546,7 +547,7 @@ def _submit_shadow_order(
     return trade_result, order
 
 
-def _parse_date(value) -> date | None:
+def _parse_date(value) -> Optional[date]:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -647,7 +648,7 @@ def _build_open_position_context(trade_events: list) -> dict:
     }
 
 
-def _load_history_points_since(code: str, open_date: date | None, today: date | None = None) -> list:
+def _load_history_points_since(code: str, open_date: Optional[date], today: Optional[date] = None) -> list:
     if not code or not open_date:
         return []
 
@@ -683,10 +684,10 @@ def _load_history_points_since(code: str, open_date: date | None, today: date | 
     return points
 
 
-def _build_advisory_signals(position: dict, trade_context: dict | None = None,
-                            history_points: list | None = None,
-                            risk_cfg: dict | None = None,
-                            today: date | None = None) -> dict:
+def _build_advisory_signals(position: dict, trade_context: Optional[dict] = None,
+                            history_points: Optional[list] = None,
+                            risk_cfg: Optional[dict] = None,
+                            today: Optional[date] = None) -> dict:
     risk_cfg = risk_cfg or get_strategy().get("risk", {})
     today = today or datetime.now().date()
 
@@ -763,9 +764,9 @@ def _build_advisory_signals(position: dict, trade_context: dict | None = None,
 
 
 def _build_shadow_position_view(raw_position: dict, risk_cfg: dict,
-                                trade_context_map: dict | None = None,
-                                history_cache: dict | None = None,
-                                today: date | None = None) -> dict:
+                                trade_context_map: Optional[dict] = None,
+                                history_cache: Optional[dict] = None,
+                                today: Optional[date] = None) -> dict:
     # MX API 用分单位（costPrice=19340→¥19.34，price=1930→¥19.30）
     _price_dec = int(raw_position.get("priceDec", 2))
     _cost_dec  = int(raw_position.get("costPriceDec", 3))

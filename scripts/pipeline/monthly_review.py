@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 pipeline/monthly_review.py — 月度复盘自动生成
 
@@ -309,7 +310,7 @@ def _build_report(month_str: str, real_stats: dict, paper_stats: dict,
 # 主入口
 # ---------------------------------------------------------------------------
 
-def run(month: str | None = None) -> dict:
+def run(month: Optional[str] = None) -> dict:
     """
     生成月度复盘报告。
 

@@ -246,10 +246,12 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         return {"entries": [], "summary": {"core_count": 0, "watch_count": 0}}
 
     def _make_state_with_streak(self, codes: dict[str, dict]) -> dict:
-        """Build pool_state fixture. Seeds prev state with today's date so the
+        """Build code_state fixture. Seeds prev state with today's date so the
         streak logic increments from the existing value instead of resetting."""
         today = datetime.now().strftime("%Y-%m-%d")
-        return {"updated_at": today, "last_eval_date": today, "codes": codes}
+        for code_data in codes.values():
+            code_data["last_date"] = today
+        return codes
 
     def test_evaluate_pool_actions_promotes_watch_to_core(self):
         """观察池股票连续高分时建议晋级核心池。"""
@@ -299,8 +301,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value=state_with_streak),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value=state_with_streak),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,
@@ -346,8 +348,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value=state_with_streak),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value=state_with_streak),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,
@@ -369,8 +371,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value={"codes": {}}),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value={}),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,
@@ -397,8 +399,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value={"codes": {}}),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value={}),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,
@@ -425,8 +427,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value={"codes": {}}),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value={}),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,
@@ -453,8 +455,8 @@ class EvaluatePoolActionsTests(unittest.TestCase):
         with (
             mock.patch("scripts.utils.pool_manager.load_pool_snapshot", return_value=snapshot),
             mock.patch("scripts.utils.pool_manager.get_strategy", return_value=self._make_strategy_cfg()),
-            mock.patch("scripts.utils.pool_manager._load_state", return_value={"codes": {}}),
-            mock.patch("scripts.utils.pool_manager._save_state"),
+            mock.patch("scripts.utils.pool_manager._load_previous_code_state", return_value={}),
+            mock.patch("scripts.utils.pool_manager.save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = stock_screener.evaluate_pool_actions(
                 scored,

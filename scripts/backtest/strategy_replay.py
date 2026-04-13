@@ -23,7 +23,7 @@ backtest/strategy_replay.py — 真正的逐日策略回放引擎
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any
+from typing import Optional, Union, Any
 
 from scripts.utils.common import _safe_float
 
@@ -67,7 +67,7 @@ class _Position:
         take_price: float,
         time_stop_date: str,
         entry_score: float,
-        veto_warnings: list[str] | None = None,
+        veto_warnings: Optional[list[str]] = None,
         style: str = "momentum",
         entry_low: float = 0.0,
         peak_price: float = 0.0,
@@ -98,7 +98,7 @@ def run_strategy_replay(
     start: str,
     end: str,
     total_capital: float = 450286,
-    params: dict[str, Any] | None = None,
+    params: dict[str, Optional[Any]] = None,
 ) -> dict[str, Any]:
     """
     信号驱动的逐日策略回放。
@@ -558,8 +558,8 @@ def run_strategy_replay(
 def _recompute_score(
     candidate: dict[str, Any],
     weights: dict[str, float],
-    denoms: dict[str, float] | None = None,
-) -> float | None:
+    denoms: dict[str, Optional[float]] = None,
+) -> Optional[float]:
     """用自定义权重重算四维总分。"""
     denoms = denoms or {}
     components = [

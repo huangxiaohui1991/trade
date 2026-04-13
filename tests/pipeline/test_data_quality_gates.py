@@ -1,6 +1,4 @@
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 
@@ -36,10 +34,9 @@ class DataQualityGateTests(unittest.TestCase):
     def test_pool_actions_route_degraded_promotion_to_manual_review(self):
         from scripts.utils import pool_manager
 
-        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
-            pool_manager,
-            "POOL_STATE_PATH",
-            Path(tmpdir) / "pool_state.json",
+        with (
+            mock.patch.object(pool_manager, "_load_previous_code_state", return_value={}),
+            mock.patch.object(pool_manager, "save_pool_snapshot", return_value="mock_db_path"),
         ):
             suggestions, meta = pool_manager.evaluate_pool_actions(
                 [

@@ -9,7 +9,7 @@ import shutil
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Union
 
 # 导入 parser 模块的解析函数
 import sys
@@ -49,7 +49,7 @@ VAULT_LAYOUT: dict[str, str] = {
 }
 
 
-def default_vault_path(project_root: Path | None = None) -> str:
+def default_vault_path(project_root: Optional[Path] = None) -> str:
     if project_root is None:
         project_root = Path(__file__).resolve().parent.parent.parent
     env_path = os.environ.get("AStockVault", "").strip()
@@ -156,7 +156,7 @@ class ObsidianVault:
             f.write(content)
 
     @staticmethod
-    def _fmt_currency(value: Optional[float | int | str]) -> str:
+    def _fmt_currency(value: Optional[Union[float, int, str]]) -> str:
         try:
             return f"¥{float(value or 0):,.2f}"
         except (TypeError, ValueError):
@@ -170,7 +170,7 @@ class ObsidianVault:
             return "0.0%"
 
     @staticmethod
-    def _fmt_count(value: Optional[float | int | str]) -> str:
+    def _fmt_count(value: Optional[Union[float, int, str]]) -> str:
         try:
             return str(int(value or 0))
         except (TypeError, ValueError):

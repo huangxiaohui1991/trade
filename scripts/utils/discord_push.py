@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Optional, Union, Dict, Tuple
 
 try:
     import yaml
@@ -398,8 +398,8 @@ def _build_embed(
     title: str = "",
     description: str = "",
     color: int = 0x37474F,
-    fields: list[dict] | None = None,
-    footer: dict | None = None,
+    fields: Optional[list[dict]] = None,
+    footer: Optional[dict] = None,
     thumbnail_url: str = "",
     image_url: str = "",
     author_name: str = "",

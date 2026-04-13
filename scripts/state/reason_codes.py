@@ -10,7 +10,7 @@ output shape.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Optional, Union, Any
 
 from scripts.engine.scorer import split_veto_signals
 
@@ -181,7 +181,7 @@ def _prioritize_codes(codes: list[str], priority: list[str]) -> list[str]:
     return _dedupe(ordered)
 
 
-def normalize_reason_code(code: Any, category: str | None = None) -> str:
+def normalize_reason_code(code: Any, category: Optional[str] = None) -> str:
     text = str(code or "").strip()
     if not text:
         return ""
@@ -216,10 +216,10 @@ def reason_meta(code: str) -> dict[str, str]:
     return meta
 
 
-def summarize_reason_codes(category: str, reason_codes: list[str] | None = None,
-                           source_codes: list[str] | None = None,
+def summarize_reason_codes(category: str, reason_codes: Optional[list[str]] = None,
+                           source_codes: Optional[list[str]] = None,
                            state: str = "",
-                           details: dict[str, Any] | None = None) -> dict:
+                           details: dict[str, Optional[Any]] = None) -> dict:
     category = str(category or "").strip().lower()
     codes = _dedupe([normalize_reason_code(code, category=category) for code in (reason_codes or []) if code])
     if not codes:
@@ -250,7 +250,7 @@ def summarize_reason_codes(category: str, reason_codes: list[str] | None = None,
     }
 
 
-def _market_summary(market_snapshot: dict | None) -> dict:
+def _market_summary(market_snapshot: Optional[dict]) -> dict:
     market_snapshot = market_snapshot or {}
     market_signal = str(
         market_snapshot.get("signal", market_snapshot.get("market_signal", "CLEAR"))
@@ -269,7 +269,7 @@ def _market_summary(market_snapshot: dict | None) -> dict:
     )
 
 
-def _pool_summary(pool_snapshot: dict | None, pool_audit: dict | None = None) -> dict:
+def _pool_summary(pool_snapshot: Optional[dict], pool_audit: Optional[dict] = None) -> dict:
     pool_snapshot = pool_snapshot or {}
     pool_audit = pool_audit or {}
     entries = list(pool_snapshot.get("entries", []))
@@ -328,7 +328,7 @@ def _pool_summary(pool_snapshot: dict | None, pool_audit: dict | None = None) ->
     return summary
 
 
-def _trade_reason_codes_from_texts(reasons: list[str] | None) -> tuple[list[str], list[str]]:
+def _trade_reason_codes_from_texts(reasons: Optional[list[str]]) -> tuple[list[str], list[str]]:
     source_codes: list[str] = []
     reason_codes: list[str] = []
     for reason in reasons or []:
@@ -352,7 +352,7 @@ def _trade_reason_codes_from_texts(reasons: list[str] | None) -> tuple[list[str]
     return _dedupe(reason_codes), _dedupe(source_codes)
 
 
-def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) -> dict:
+def _trade_summary(today_decision: Optional[dict], shadow_snapshot: Optional[dict]) -> dict:
     today_decision = today_decision or {}
     shadow_snapshot = shadow_snapshot or {}
 
@@ -441,11 +441,11 @@ def _trade_summary(today_decision: dict | None, shadow_snapshot: dict | None) ->
     )
 
 
-def build_signal_bus_summary(market_snapshot: dict | None = None,
-                             pool_snapshot: dict | None = None,
-                             pool_audit: dict | None = None,
-                             today_decision: dict | None = None,
-                             shadow_snapshot: dict | None = None) -> dict:
+def build_signal_bus_summary(market_snapshot: Optional[dict] = None,
+                             pool_snapshot: Optional[dict] = None,
+                             pool_audit: Optional[dict] = None,
+                             today_decision: Optional[dict] = None,
+                             shadow_snapshot: Optional[dict] = None) -> dict:
     market = _market_summary(market_snapshot)
     pool = _pool_summary(pool_snapshot, pool_audit=pool_audit)
     trade = _trade_summary(today_decision, shadow_snapshot)

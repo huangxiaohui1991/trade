@@ -27,7 +27,7 @@ import os
 import sys
 import warnings
 from datetime import datetime
-from typing import Literal
+from typing import Optional, Union, Literal
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
@@ -285,7 +285,7 @@ class MarketTimer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _fetch_realtime(symbol: str) -> dict | None:
+    def _fetch_realtime(symbol: str) -> Optional[dict]:
         """
         通过腾讯行情接口获取实时价格和涨跌幅。
         symbol: sh000001 / sz399001 等

@@ -15,7 +15,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Optional, Union, Any, Iterable
 
 try:
     import yaml
@@ -416,7 +416,7 @@ def _serialize_entry(entry: dict) -> dict:
     return result
 
 
-def _json_loads(value: str | None, default: Any) -> Any:
+def _json_loads(value: Optional[str], default: Any) -> Any:
     if not value:
         return default
     try:
@@ -690,7 +690,7 @@ def _replace_portfolio_scope_snapshot(
         )
 
 
-def save_daily_capital_snapshot(date_str: str | None = None, scopes: list[str] | None = None) -> None:
+def save_daily_capital_snapshot(date_str: Optional[str] = None, scopes: Optional[list[str]] = None) -> None:
     """
     收盘后保存当日资产快照到历史表。
 
@@ -841,7 +841,7 @@ _ORDER_EXCEPTION_STATUSES = {"exception", "rejected", "failed", "cancel_failed"}
 _ORDER_REVIEW_QUEUE_STATUSES = {"review_required", "review_pending"}
 
 
-def _normalize_order_payload(order: dict, existing: dict | None = None) -> dict:
+def _normalize_order_payload(order: dict, existing: Optional[dict] = None) -> dict:
     existing = existing or {}
     metadata = existing.get("metadata", {})
     payload_metadata = order.get("metadata", {})
@@ -899,7 +899,7 @@ def _normalize_order_payload(order: dict, existing: dict | None = None) -> dict:
     }
 
 
-def _load_order_row(conn: sqlite3.Connection, external_id: str) -> dict | None:
+def _load_order_row(conn: sqlite3.Connection, external_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM orders WHERE external_id = ?", (external_id,)).fetchone()
     if not row:
         return None
@@ -908,7 +908,7 @@ def _load_order_row(conn: sqlite3.Connection, external_id: str) -> dict | None:
     return order
 
 
-def _order_rows(scope: str | None = None, status: str | None = None, conn: sqlite3.Connection | None = None) -> list[dict]:
+def _order_rows(scope: Optional[str] = None, status: Optional[str] = None, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     close_after = conn is None
     if close_after:
         context = _connect()
@@ -938,7 +938,7 @@ def _order_rows(scope: str | None = None, status: str | None = None, conn: sqlit
             context.__exit__(None, None, None)
 
 
-def upsert_order_state(order: dict, conn: sqlite3.Connection | None = None) -> dict:
+def upsert_order_state(order: dict, conn: Optional[sqlite3.Connection] = None) -> dict:
     """Insert or update a structured order row without touching trade events."""
     own_conn = conn is None
     if own_conn:
@@ -1150,7 +1150,7 @@ def _bootstrap_portfolio_snapshot() -> tuple[list[dict], list[dict], str]:
     as_of_date = str(meta.get("updated_at") or meta.get("date") or _today_str())
     updated_at = _now_ts()
 
-    def build_position(row: dict, scope: str, market: str) -> dict | None:
+    def build_position(row: dict, scope: str, market: str) -> Optional[dict]:
         name = str(row.get("股票", "")).strip()
         code = _normalize_code(row.get("代码", ""))
         shares = _safe_int(row.get("持有股数", 0))
@@ -1243,7 +1243,7 @@ def _mx_payload(result: Any) -> dict:
     return payload if isinstance(payload, dict) else result
 
 
-def _build_paper_position(row: dict, as_of_date: str, updated_at: str) -> dict | None:
+def _build_paper_position(row: dict, as_of_date: str, updated_at: str) -> Optional[dict]:
     name = str(row.get("stockName", row.get("secuName", row.get("name", "")))).strip()
     code = _normalize_code(row.get("stockCode", row.get("secuCode", row.get("code", ""))))
     shares = _safe_int(row.get("totalQty", row.get("currentQty", row.get("shares", 0))))
@@ -1502,7 +1502,7 @@ def sync_activity_state() -> dict:
     }
 
 
-def _portfolio_rows(scope: str | None = None, conn: sqlite3.Connection | None = None) -> tuple[list[dict], list[dict]]:
+def _portfolio_rows(scope: Optional[str] = None, conn: Optional[sqlite3.Connection] = None) -> tuple[list[dict], list[dict]]:
     close_after = conn is None
     if close_after:
         context = _connect()
@@ -1537,7 +1537,7 @@ def _portfolio_rows(scope: str | None = None, conn: sqlite3.Connection | None = 
             context.__exit__(None, None, None)
 
 
-def load_portfolio_snapshot(scope: str | None = None) -> dict:
+def load_portfolio_snapshot(scope: Optional[str] = None) -> dict:
     """Return the current structured portfolio snapshot."""
     if scope == PAPER_SCOPE:
         try:
@@ -1602,7 +1602,7 @@ def load_portfolio_snapshot(scope: str | None = None) -> dict:
     }
 
 
-def load_order_snapshot(scope: str | None = None, status: str | None = None) -> dict:
+def load_order_snapshot(scope: Optional[str] = None, status: Optional[str] = None) -> dict:
     """Return the structured order snapshot without mutating any other table."""
     with _connect() as conn:
         orders = _order_rows(scope=scope, status=status, conn=conn)
@@ -1674,7 +1674,7 @@ def _reply_stock_code(stock: str) -> str:
     return normalized if normalized.isdigit() else ""
 
 
-def _pending_condition_orders(scope: str = PAPER_SCOPE, conn: sqlite3.Connection | None = None) -> list[dict]:
+def _pending_condition_orders(scope: str = PAPER_SCOPE, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     orders = _order_rows(scope=scope, conn=conn)
     result = []
     for order in orders:
@@ -2009,8 +2009,8 @@ def save_market_snapshot_history(
     *,
     pipeline: str = "",
     history_group_id: str = "",
-    metadata: dict | None = None,
-    conn: sqlite3.Connection | None = None,
+    metadata: Optional[dict] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict:
     """Archive a market snapshot for exact historical replay."""
     own_conn = conn is None
@@ -2062,9 +2062,9 @@ def save_market_snapshot_history(
 
 
 def load_market_snapshot_history(
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     *,
-    history_group_id: str | None = None,
+    history_group_id: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """Load archived market snapshots."""
@@ -2196,7 +2196,7 @@ def _count_alerts(alerts: list[dict]) -> tuple[dict, dict, dict]:
     return level_counts, code_counts, code_level_counts
 
 
-def _prepare_alert_entry(level: str, code: str, summary: str, details: dict | None = None) -> dict:
+def _prepare_alert_entry(level: str, code: str, summary: str, details: Optional[dict] = None) -> dict:
     now = _now_ts()
     normalized_code = str(code or "").strip() or "UNKNOWN"
     normalized_summary = str(summary or "").strip()
@@ -2296,13 +2296,13 @@ def _pool_snapshot_alerts(pool_snapshot: dict) -> list[dict]:
 
 
 def build_alert_center_snapshot(
-    today_decision: dict | None = None,
-    pool_sync_state: dict | None = None,
-    shadow_snapshot: dict | None = None,
-    order_snapshot: dict | None = None,
-    signal_bus: dict | None = None,
-    pool_snapshot: dict | None = None,
-    market_snapshot: dict | None = None,
+    today_decision: Optional[dict] = None,
+    pool_sync_state: Optional[dict] = None,
+    shadow_snapshot: Optional[dict] = None,
+    order_snapshot: Optional[dict] = None,
+    signal_bus: Optional[dict] = None,
+    pool_snapshot: Optional[dict] = None,
+    market_snapshot: Optional[dict] = None,
 ) -> dict:
     """Build a structured alert center snapshot from the current state views."""
     today_decision = today_decision or {}
@@ -2315,7 +2315,7 @@ def build_alert_center_snapshot(
 
     alerts: list[dict] = []
 
-    def add_alert(level: str, code: str, summary: str, details: dict | None = None) -> None:
+    def add_alert(level: str, code: str, summary: str, details: Optional[dict] = None) -> None:
         alerts.append(_prepare_alert_entry(level, code, summary, details))
 
     if pool_sync_state.get("status") not in {"", "ok"}:
@@ -2423,7 +2423,7 @@ def build_alert_center_snapshot(
     }
 
 
-def save_alert_snapshot(snapshot: dict, conn: sqlite3.Connection | None = None) -> dict:
+def save_alert_snapshot(snapshot: dict, conn: Optional[sqlite3.Connection] = None) -> dict:
     """Persist a structured alert snapshot to the ledger."""
     own_conn = conn is None
     if own_conn:
@@ -2497,7 +2497,7 @@ def save_alert_snapshot(snapshot: dict, conn: sqlite3.Connection | None = None) 
             context.__exit__(None, None, None)
 
 
-def load_alert_snapshot(context: dict | None = None, refresh: bool = False) -> dict:
+def load_alert_snapshot(context: Optional[dict] = None, refresh: bool = False) -> dict:
     """Load or rebuild the structured alert center snapshot."""
     if context is None and not refresh:
         with _connect() as conn:
@@ -2568,11 +2568,11 @@ def load_alert_snapshot(context: dict | None = None, refresh: bool = False) -> d
 def save_decision_snapshot_history(
     today_decision: dict,
     *,
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     pipeline: str = "",
     history_group_id: str = "",
-    metadata: dict | None = None,
-    conn: sqlite3.Connection | None = None,
+    metadata: Optional[dict] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict:
     """Archive a `today_decision` payload for later exact replay."""
     own_conn = conn is None
@@ -2623,9 +2623,9 @@ def save_decision_snapshot_history(
 
 
 def load_decision_snapshot_history(
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     *,
-    history_group_id: str | None = None,
+    history_group_id: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """Load archived `today_decision` rows."""
@@ -2672,15 +2672,15 @@ def load_decision_snapshot_history(
 def save_candidate_snapshot_history(
     candidates: list[dict],
     *,
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     pipeline: str = "",
     history_group_id: str = "",
     pool: str = "",
     universe: str = "",
     source: str = "",
-    actionable_count: int | None = None,
-    metadata: dict | None = None,
-    conn: sqlite3.Connection | None = None,
+    actionable_count: Optional[int] = None,
+    metadata: Optional[dict] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict:
     """Archive scored candidates so later replay can use the exact daily outputs."""
     own_conn = conn is None
@@ -2766,9 +2766,9 @@ def save_candidate_snapshot_history(
 
 
 def load_candidate_snapshot_history(
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     *,
-    history_group_id: str | None = None,
+    history_group_id: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """Load archived scored-candidate snapshots."""
@@ -2889,7 +2889,7 @@ def _resolve_signal_history_group_id(conn: sqlite3.Connection, snapshot_date: st
 
 def load_daily_signal_snapshot_bundle(
     snapshot_date: str,
-    history_group_id: str | None = None,
+    history_group_id: Optional[str] = None,
     *,
     allow_pool_fallback: bool = False,
 ) -> dict:
@@ -2944,8 +2944,8 @@ def save_pool_snapshot_history(
     *,
     pipeline: str = "",
     history_group_id: str = "",
-    metadata: dict | None = None,
-    conn: sqlite3.Connection | None = None,
+    metadata: Optional[dict] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict:
     """Archive a full pool snapshot for later exact replay."""
     own_conn = conn is None
@@ -3030,9 +3030,9 @@ def save_pool_snapshot_history(
 
 
 def load_pool_snapshot_history(
-    snapshot_date: str | None = None,
+    snapshot_date: Optional[str] = None,
     *,
-    history_group_id: str | None = None,
+    history_group_id: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """Load archived pool snapshots."""
@@ -3105,7 +3105,7 @@ def load_pool_snapshot_history(
     }
 
 
-def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: sqlite3.Connection | None = None) -> dict:
+def save_pool_snapshot(entries: list[dict], metadata: Optional[dict] = None, conn: Optional[sqlite3.Connection] = None) -> dict:
     """Persist the latest pool snapshot and project it back to YAML/Obsidian."""
     own_conn = conn is None
     if own_conn:
@@ -3406,7 +3406,7 @@ def _latest_pool_action_summary(conn: sqlite3.Connection, snapshot_date: str) ->
     }
 
 
-def load_pool_action_history(limit: int = 50, snapshot_date: str | None = None) -> dict:
+def load_pool_action_history(limit: int = 50, snapshot_date: Optional[str] = None) -> dict:
     with _connect() as conn:
         _ensure_bootstrapped(conn)
         if snapshot_date:
@@ -3634,7 +3634,7 @@ def _trade_rule_compliance(reason_codes: list[str]) -> dict:
     }
 
 
-def _trade_factor_summary(reason_codes: list[str], reason_texts: list[str] | None = None) -> list[dict]:
+def _trade_factor_summary(reason_codes: list[str], reason_texts: Optional[list[str]] = None) -> list[dict]:
     normalized = _dedupe(
         [
             normalize_reason_code(code, category="trade")
@@ -3747,7 +3747,7 @@ def _estimate_trade_excursion(
     exit_price: float,
     realized_pnl: float,
     exit_reason_codes: list[str],
-) -> tuple[float | None, float | None, str]:
+) -> Optional[tuple[float], Optional[float], str]:
     entry = _safe_float(entry_price, 0.0)
     if entry <= 0:
         return None, None, "pending_market_history"
@@ -3832,7 +3832,7 @@ def _compute_actual_trade_excursion(
     exit_date: str,
     entry_price: float,
     exit_price: float,
-) -> tuple[float | None, float | None, str]:
+) -> Optional[tuple[float], Optional[float], str]:
     entry = _safe_float(entry_price, 0.0)
     if entry <= 0 or not code or not entry_date or not exit_date:
         return None, None, "pending_market_history"

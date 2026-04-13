@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 pipeline/stock_screener.py — 选股流水线
 
@@ -163,7 +164,7 @@ def _dedupe_candidates(candidates: list) -> list:
     return deduped
 
 
-def _tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set, current_snapshot: dict | None = None) -> tuple[list, str]:
+def _tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set, current_snapshot: Optional[dict] = None) -> tuple[list, str]:
     """返回现有核心池/观察池候选集。"""
     snapshot_entries = []
     if current_snapshot:
@@ -206,7 +207,7 @@ def _tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set, current_sna
     return _dedupe_candidates(candidates), pool_name
 
 
-def _fallback_tracked_candidates(stocks_cfg: dict, blacklist: set, current_snapshot: dict | None = None) -> list:
+def _fallback_tracked_candidates(stocks_cfg: dict, blacklist: set, current_snapshot: Optional[dict] = None) -> list:
     """tracked 模式下的 fallback，直接回退到已跟踪股票池。"""
     _logger.info("[fallback] 使用已跟踪股票池作为候选")
     snapshot_entries = current_snapshot.get("entries", []) if current_snapshot else []
@@ -339,7 +340,7 @@ def _write_market_scan_watchlist(results: list) -> str:
     return f"{vault.vault_path}/{relative}"
 
 
-def _write_pool_suggestions(suggestions: dict, meta: dict | None = None) -> str:
+def _write_pool_suggestions(suggestions: dict, meta: Optional[dict] = None) -> str:
     vault = ObsidianVault()
     report_dir = Path(vault.vault_path) / vault.screening_results_dir
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -499,7 +500,7 @@ def _resolve_market_candidates(default_query: str, select_type: str,
 
 def _resolve_tracked_candidates(pool: str, stocks_cfg: dict, blacklist: set,
                                 default_query: str, select_type: str,
-                                current_snapshot: dict | None = None) -> tuple[list, str, str]:
+                                current_snapshot: Optional[dict] = None) -> tuple[list, str, str]:
     """已跟踪模式：先从 core/watch 取池子，再做命中筛选。"""
     base_candidates, pool_name = _tracked_candidates(pool, stocks_cfg, blacklist, current_snapshot=current_snapshot)
     _logger.info(f">> 候选股票: {len(base_candidates)} 只")

@@ -19,7 +19,7 @@ import sys
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Optional, Union, Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -65,8 +65,8 @@ def _ensure_baostock_code(code: str) -> str:
 
 def fetch_drawdown_data(
     code: str,
-    start: str | None = None,
-    end: str | None = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     *,
     days: int = 365,
     adjustflag: str = "2",  # 2=前复权, 1=后复权, 3=不复权
@@ -369,13 +369,13 @@ def render_drawdown_console(code: str, name: str, df: pd.DataFrame, metrics: dic
 
 def run_drawdown_analysis(
     codes: list[str],
-    start: str | None = None,
-    end: str | None = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     *,
     days: int = 365,
     save_csv: bool = True,
     save_json: bool = True,
-    name_map: dict[str, str] | None = None,
+    name_map: dict[str, Optional[str]] = None,
 ) -> dict[str, Any]:
     """
     对单只或多只股票跑回撤分析。

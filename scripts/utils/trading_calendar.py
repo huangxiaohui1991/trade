@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 utils/trading_calendar.py — A股交易日历
 
@@ -35,7 +36,7 @@ CACHE_KEY = "trade_dates"
 CACHE_MAX_AGE = 7 * 24 * 3600  # 7 天刷新一次
 
 
-def _parse_date(value) -> date | None:
+def _parse_date(value) -> Optional[date]:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -49,7 +50,7 @@ def _parse_date(value) -> date | None:
         return None
 
 
-def _load_trade_dates_from_akshare() -> set[str] | None:
+def _load_trade_dates_from_akshare() -> Optional[set[str]]:
     """从 akshare 拉取历史交易日列表"""
     try:
         import akshare as ak
@@ -71,7 +72,7 @@ def _load_trade_dates_from_akshare() -> set[str] | None:
         return None
 
 
-def _load_cached_trade_dates() -> set[str] | None:
+def _load_cached_trade_dates() -> Optional[set[str]]:
     """从本地缓存读取"""
     try:
         cached = load_json_cache("trading_calendar", CACHE_KEY, max_age_seconds=CACHE_MAX_AGE)
@@ -90,10 +91,10 @@ def _save_trade_dates_cache(dates: set[str]):
         _logger.warning(f"[calendar] 缓存写入失败: {exc}")
 
 
-_trade_dates_cache: set[str] | None = None
+_trade_dates_cache: Optional[set[str]] = None
 
 
-def _get_trade_dates() -> set[str] | None:
+def _get_trade_dates() -> Optional[set[str]]:
     """获取交易日集合（带内存缓存）"""
     global _trade_dates_cache
     if _trade_dates_cache is not None:

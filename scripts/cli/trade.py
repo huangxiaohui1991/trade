@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 统一 CLI 入口
 
@@ -544,7 +545,7 @@ def list_agent_templates() -> dict:
     }
 
 
-def _recommend_next_actions(status: str, workflow_name: str | None = None, error: str = "", retryable: bool = False) -> list:
+def _recommend_next_actions(status: str, workflow_name: Optional[str] = None, error: str = "", retryable: bool = False) -> list:
     workflow = WORKFLOWS.get(workflow_name or "", {})
     actions = []
 
@@ -601,7 +602,7 @@ def _requests_ok(url: str, timeout: int = 8) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def _parse_health_ts(value) -> datetime | None:
+def _parse_health_ts(value) -> Optional[datetime]:
     text = str(value or "").strip()
     if not text:
         return None
@@ -616,14 +617,14 @@ def _parse_health_ts(value) -> datetime | None:
     return None
 
 
-def _load_json_file(path: Path) -> dict | None:
+def _load_json_file(path: Path) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
-def _parse_json_arg_or_file(value: str | None) -> dict:
+def _parse_json_arg_or_file(value: Optional[str]) -> dict:
     text = str(value or "").strip()
     if not text:
         return {}
@@ -633,7 +634,7 @@ def _parse_json_arg_or_file(value: str | None) -> dict:
     return json.loads(text)
 
 
-def _parse_codes_arg(value: str | None) -> list[str]:
+def _parse_codes_arg(value: Optional[str]) -> list[str]:
     text = str(value or "").strip()
     if not text:
         return []
@@ -643,7 +644,7 @@ def _parse_codes_arg(value: str | None) -> list[str]:
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
-def _parse_positive_int_list_arg(value: str | None) -> list[int]:
+def _parse_positive_int_list_arg(value: Optional[str]) -> list[int]:
     values = []
     for item in _parse_codes_arg(value):
         try:
@@ -687,7 +688,7 @@ def _cache_namespace_health(namespace: str, max_age_seconds: int, *, cache_dir: 
     if not files:
         return summary
 
-    newest_success: datetime | None = None
+    newest_success: Optional[datetime] = None
     for path in files[:50]:
         payload = _load_json_file(path)
         if not isinstance(payload, dict):
@@ -801,7 +802,7 @@ def _recent_run_health(*, runs_dir: Path, recent_limit: int) -> dict:
     }
 
 
-def _score_data_quality_health(pool_snapshot: dict | None = None) -> dict:
+def _score_data_quality_health(pool_snapshot: Optional[dict] = None) -> dict:
     try:
         snapshot = pool_snapshot if pool_snapshot is not None else load_pool_snapshot()
         entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
@@ -838,11 +839,11 @@ def _score_data_quality_health(pool_snapshot: dict | None = None) -> dict:
 
 def _data_source_health_snapshot(
     *,
-    cache_dir: Path | None = None,
-    runs_dir: Path | None = None,
+    cache_dir: Optional[Path] = None,
+    runs_dir: Optional[Path] = None,
     recent_limit: int = 20,
-    now: datetime | None = None,
-    pool_snapshot: dict | None = None,
+    now: Optional[datetime] = None,
+    pool_snapshot: Optional[dict] = None,
 ) -> dict:
     cache_root = Path(cache_dir or CACHE_DIR)
     runs_root = Path(runs_dir or RUNS_DIR)
@@ -1086,10 +1087,10 @@ def _compact_order_snapshot(order_snapshot: dict, *, sample_size: int = 3) -> di
 
 
 def _build_alert_snapshot(today_decision: dict, pool_sync_state: dict, shadow_snapshot: dict,
-                          order_snapshot: dict, signal_bus: dict, pool_snapshot: dict | None = None) -> dict:
+                          order_snapshot: dict, signal_bus: dict, pool_snapshot: Optional[dict] = None) -> dict:
     alerts = []
 
-    def add_alert(level: str, code: str, summary: str, details: dict | None = None):
+    def add_alert(level: str, code: str, summary: str, details: Optional[dict] = None):
         alerts.append({
             "level": level,
             "code": code,

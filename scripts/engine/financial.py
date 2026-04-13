@@ -16,6 +16,7 @@ import sys
 import time
 import warnings
 from datetime import datetime
+from typing import Optional
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -135,7 +136,7 @@ def _fill_from_indicator(code: str, result: dict, missing_fields: list) -> None:
 
 # ── 腾讯实时行情（行情数据 fallback）──────────────────────────────────────
 
-def _tencent_realtime(code: str) -> dict | None:
+def _tencent_realtime(code: str) -> Optional[dict]:
     """
     通过腾讯 web.sqt.gtimg.cn 获取实时行情。
     返回 {price, change_pct, name, pe, pb, turnover_rate, total_mv, circ_mv}
@@ -177,7 +178,7 @@ def _tencent_realtime(code: str) -> dict | None:
 
 # ── 腾讯日线历史（日线数据 fallback）──────────────────────────────────────
 
-def _tencent_hist(code: str, days: int = 60) -> "pd.DataFrame | None":
+def _tencent_hist(code: str, days: int = 60) -> Optional["pd.DataFrame"]:
     """
     通过 akshare stock_zh_a_hist_tx 获取腾讯日线数据。
     返回 DataFrame(date, open, close, high, low, amount) 或 None。

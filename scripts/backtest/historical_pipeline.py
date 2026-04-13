@@ -32,7 +32,7 @@ import statistics
 import sys
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Any
+from typing import Optional, Union, Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -190,7 +190,7 @@ def compute_market_signal(df_index: pd.DataFrame) -> pd.DataFrame:
 _SYSTEM_INDEX_CODES = ["000001", "399001", "399006", "000688"]
 
 
-def _resolve_strategy_params(overrides: dict | None = None) -> dict:
+def _resolve_strategy_params(overrides: Optional[dict] = None) -> dict:
     """Flatten strategy.yaml into replay params, then apply preset + caller overrides."""
     strategy = get_strategy()
     scoring = strategy.get("scoring", {})
@@ -654,7 +654,7 @@ def compute_technical_score(
     }
 
 
-def _compute_rsi(df: pd.DataFrame, idx: int, period: int = 14) -> float | None:
+def _compute_rsi(df: pd.DataFrame, idx: int, period: int = 14) -> Optional[float]:
     if idx < period:
         return None
     window = df.iloc[idx - period:idx]["close"]
@@ -679,7 +679,7 @@ def check_veto(
     df_stock: pd.DataFrame,
     market_signal: str,
     ma20_history: list,
-    total_market_amount: float | None = None,
+    total_market_amount: Optional[float] = None,
 ) -> list[str]:
     """
     返回触发的 veto 列表。无 veto = 可以买入。
@@ -737,7 +737,7 @@ def build_replay_fixture(
     end: str,
     index_code: str = "000001",
     total_capital: float = 450286.0,
-    strategy_params: dict | None = None,
+    strategy_params: Optional[dict] = None,
     use_history_snapshots: bool = True,
 ) -> dict:
     """
@@ -953,7 +953,7 @@ def build_replay_fixture(
 # ATR 跟踪止盈止损专用回测（不依赖 strategy_replay）
 # ---------------------------------------------------------------------------
 
-def _compute_atr(df: pd.DataFrame, idx: int, period: int = 14) -> float | None:
+def _compute_atr(df: pd.DataFrame, idx: int, period: int = 14) -> Optional[float]:
     """计算 ATR(14)"""
     if idx < period:
         return None
@@ -968,7 +968,7 @@ def _compute_atr(df: pd.DataFrame, idx: int, period: int = 14) -> float | None:
     return sum(trs) / len(trs) if trs else None
 
 
-def _compute_ma(df: pd.DataFrame, idx: int, window: int) -> float | None:
+def _compute_ma(df: pd.DataFrame, idx: int, window: int) -> Optional[float]:
     if idx < window - 1:
         return None
     return float(df.iloc[idx - window + 1:idx + 1]["close"].mean())
@@ -1050,7 +1050,7 @@ def run_atr_strategy_replay(
     rejected_entries: list[dict] = []
 
     # 持仓状态
-    position: dict | None = None
+    position: Optional[dict] = None
 
     for idx, row in df.iterrows():
         day_str = row["date"].strftime("%Y-%m-%d")
@@ -1300,8 +1300,8 @@ def run_system_strategy_backtest(
     start: str,
     end: str,
     index_code: str = "system",
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
 ) -> dict:
     """Build a system-strategy historical fixture and immediately replay it."""
     from scripts.backtest.strategy_replay import run_strategy_replay
@@ -1450,7 +1450,7 @@ def _find_opportunity_windows(
         return []
 
     blocks: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
+    current: dict[str, Optional[Any]] = None
     for candidate in raw_candidates:
         if current is None or candidate["anchor_idx"] > current["anchor_end_idx"] + 1:
             if current is not None:
@@ -1896,9 +1896,9 @@ def _build_code_scan_item(
 def diagnose_signal_snapshot(
     snapshot_date: str,
     *,
-    history_group_id: str | None = None,
-    stock_code: str | None = None,
-    stock_codes: list[str] | None = None,
+    history_group_id: Optional[str] = None,
+    stock_code: Optional[str] = None,
+    stock_codes: Optional[list[str]] = None,
     candidate_limit: int = 20,
 ) -> dict[str, Any]:
     """Inspect one historical signal snapshot bundle and optionally explain a stock's outcome."""
@@ -1990,8 +1990,8 @@ def run_single_stock_strategy_validation(
     start: str,
     end: str,
     index_code: str = "system",
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
     *,
     opportunity_lookahead_days: int = 20,
     opportunity_min_gain_pct: float = 0.15,
@@ -2424,8 +2424,8 @@ def run_veto_rule_analysis(
     end: str,
     *,
     index_code: str = "system",
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
     lookahead_days: int = 20,
     opportunity_gain_pct: float = 0.15,
     risk_drawdown_pct: float = 0.08,
@@ -2448,7 +2448,7 @@ def run_veto_rule_analysis(
     candidate_day_count = 0
     trading_day_count = 0
     veto_day_count = 0
-    sample_params: dict[str, Any] | None = None
+    sample_params: dict[str, Optional[Any]] = None
 
     for code in codes:
         fixture = build_replay_fixture(
@@ -2739,7 +2739,7 @@ def _load_pool_snapshots_for_range(
     end: str,
     *,
     pipeline: str = "stock_screener",
-    history_limit: int | None = None,
+    history_limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     start_date = datetime.strptime(start, "%Y-%m-%d").date()
     end_date = datetime.strptime(end, "%Y-%m-%d").date()
@@ -2761,7 +2761,7 @@ def _extract_pool_entry_events(
     snapshots: list[dict[str, Any]],
     *,
     bucket: str,
-    stock_codes: list[str] | None = None,
+    stock_codes: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     target_buckets = _bucket_targets(bucket)
     code_filter = {
@@ -2841,7 +2841,7 @@ def _event_window_metrics(
     entry_date: str,
     *,
     holding_windows: list[int],
-) -> tuple[float | None, dict[int, dict[str, Any]]]:
+) -> Optional[tuple[float], dict[int, dict[str, Any]]]:
     if price_frame.empty:
         return None, {}
     date_index = price_frame.attrs.get("date_index", {})
@@ -3001,9 +3001,9 @@ def run_pool_entry_performance_analysis(
     end: str,
     bucket: str = "core",
     holding_windows: list[int] | tuple[int, ...] | None = None,
-    stock_codes: list[str] | None = None,
+    stock_codes: Optional[list[str]] = None,
     pipeline: str = "stock_screener",
-    history_limit: int | None = None,
+    history_limit: Optional[int] = None,
     sample_limit: int = 5,
 ) -> dict[str, Any]:
     """Analyze forward N-day performance after a stock newly enters the pool."""
@@ -3273,11 +3273,11 @@ def run_strategy_health_report(
     end: str,
     bucket: str = "core",
     holding_windows: list[int] | tuple[int, ...] | None = None,
-    stock_codes: list[str] | None = None,
+    stock_codes: Optional[list[str]] = None,
     pipeline: str = "stock_screener",
     code_limit: int = 30,
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
     veto_lookahead_days: int = 20,
     veto_opportunity_gain_pct: float = 0.15,
     veto_risk_drawdown_pct: float = 0.08,
@@ -3428,7 +3428,7 @@ def render_strategy_health_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _parse_symbol_list(value: str | None) -> list[str]:
+def _parse_symbol_list(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in re.split(r"[,/，、\s]+", str(value)) if item.strip()]
@@ -3458,8 +3458,8 @@ def run_multi_stock_system_backtest(
     start: str,
     end: str,
     index_code: str = "system",
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Run the system strategy replay for multiple stocks and return an aggregate summary."""
     codes = [str(code).strip() for code in stock_codes if str(code).strip()]
@@ -3472,7 +3472,7 @@ def run_multi_stock_system_backtest(
     total_win_count = 0
     worst_drawdown_pct = 0.0
     total_ending_equity = 0.0
-    sample_params: dict[str, Any] | None = None
+    sample_params: dict[str, Optional[Any]] = None
 
     for code in codes:
         result = run_system_strategy_backtest(
@@ -3526,8 +3526,8 @@ def compare_system_strategy_presets(
     start: str,
     end: str,
     index_code: str = "system",
-    total_capital: float | None = None,
-    strategy_params: dict | None = None,
+    total_capital: Optional[float] = None,
+    strategy_params: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Compare multiple presets on the same stock basket."""
     codes = [str(code).strip() for code in stock_codes if str(code).strip()]
@@ -3591,7 +3591,7 @@ def compare_system_strategy_presets(
     }
 
 
-def _parse_params_json(value: str | None) -> dict:
+def _parse_params_json(value: Optional[str]) -> dict:
     if not value:
         return {}
     path = Path(value)

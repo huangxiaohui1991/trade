@@ -6,7 +6,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Optional, Union, Any
 
 from scripts.engine.composite import build_today_decision
 from scripts.state import audit_state, load_market_snapshot, load_pool_snapshot, load_trade_review
@@ -26,7 +26,7 @@ def _parse_date(value: str) -> date:
         raise ValueError(f"invalid date: {value!r}") from exc
 
 
-def _load_fixture(path: str | Path | None) -> dict[str, Any]:
+def _load_fixture(path: str | Optional[Path]) -> dict[str, Any]:
     if not path:
         return {}
     fixture_path = Path(path)
@@ -61,7 +61,7 @@ def _date_in_range(value: str, start: date, end: date) -> bool:
     return start <= current <= end
 
 
-def _extract_entry_score(trade: dict[str, Any]) -> float | None:
+def _extract_entry_score(trade: dict[str, Any]) -> Optional[float]:
     for key in ("entry_score", "score", "total_score"):
         if key in trade and trade.get(key) not in (None, ""):
             return _safe_float(trade.get(key), 0.0)
@@ -80,7 +80,7 @@ def _extract_entry_score(trade: dict[str, Any]) -> float | None:
     return None
 
 
-def _recompute_weighted_score(trade: dict[str, Any], params: dict[str, float]) -> float | None:
+def _recompute_weighted_score(trade: dict[str, Any], params: dict[str, float]) -> Optional[float]:
     components = [
         ("technical_score", "technical_weight", 2.0),
         ("fundamental_score", "fundamental_weight", 3.0),
@@ -113,7 +113,7 @@ def _baseline_parameters() -> dict[str, float]:
     }
 
 
-def _coerce_grid(values: str | list[float] | None, default: list[float]) -> list[float]:
+def _coerce_grid(values: str | Optional[list[float]], default: list[float]) -> list[float]:
     if values is None:
         return default
     if isinstance(values, str):
@@ -130,17 +130,17 @@ def _coerce_grid(values: str | list[float] | None, default: list[float]) -> list
 
 def _parameter_grid(
     *,
-    buy_thresholds: str | list[float] | None = None,
-    stop_losses: str | list[float] | None = None,
-    take_profits: str | list[float] | None = None,
-    technical_weights: str | list[float] | None = None,
-    fundamental_weights: str | list[float] | None = None,
-    flow_weights: str | list[float] | None = None,
-    sentiment_weights: str | list[float] | None = None,
-    watch_thresholds: str | list[float] | None = None,
-    reject_thresholds: str | list[float] | None = None,
-    time_stop_days_list: str | list[float] | None = None,
-    veto_presets: list[list[str]] | None = None,
+    buy_thresholds: str | Optional[list[float]] = None,
+    stop_losses: str | Optional[list[float]] = None,
+    take_profits: str | Optional[list[float]] = None,
+    technical_weights: str | Optional[list[float]] = None,
+    fundamental_weights: str | Optional[list[float]] = None,
+    flow_weights: str | Optional[list[float]] = None,
+    sentiment_weights: str | Optional[list[float]] = None,
+    watch_thresholds: str | Optional[list[float]] = None,
+    reject_thresholds: str | Optional[list[float]] = None,
+    time_stop_days_list: str | Optional[list[float]] = None,
+    veto_presets: Optional[list[list[str]]] = None,
 ) -> list[dict[str, float]]:
     baseline = _baseline_parameters()
     strategy = get_strategy()
@@ -805,7 +805,7 @@ def _load_trade_history_for_replay(trade: dict[str, Any]) -> list[dict[str, Any]
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _simulate_trade_with_history(trade: dict[str, Any], params: dict[str, float]) -> tuple[float | None, str]:
+def _simulate_trade_with_history(trade: dict[str, Any], params: dict[str, float]) -> Optional[tuple[float], str]:
     entry_price = _safe_float(trade.get("entry_price", 0.0), 0.0)
     if entry_price <= 0:
         return None, ""
@@ -930,7 +930,7 @@ def _build_portfolio_replay(
     start: date,
     end: date,
     total_capital: float,
-    strategy: dict[str, Any] | None = None,
+    strategy: dict[str, Optional[Any]] = None,
 ) -> dict[str, Any]:
     normalized_capital = max(_safe_float(total_capital, 0.0), 1.0)
     strategy = strategy or {}
@@ -1304,7 +1304,7 @@ def _merge_backtest_inputs(
     start: date,
     end: date,
     scope: str,
-    fixture: dict[str, Any] | None = None,
+    fixture: dict[str, Optional[Any]] = None,
 ) -> dict[str, Any]:
     fixture = fixture or {}
     window = _inclusive_days(start, end)
@@ -1333,7 +1333,7 @@ def load_backtest_inputs(
     end: str,
     *,
     scope: str = "cn_a_system",
-    fixture: str | Path | None = None,
+    fixture: str | Optional[Path] = None,
 ) -> dict[str, Any]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)
@@ -1419,19 +1419,19 @@ def run_backtest(
     end: str,
     *,
     scope: str = "cn_a_system",
-    fixture: str | Path | None = None,
-    codes: str | None = None,
-    buy_thresholds: str | list[float] | None = None,
-    stop_losses: str | list[float] | None = None,
-    take_profits: str | list[float] | None = None,
-    technical_weights: str | list[float] | None = None,
-    fundamental_weights: str | list[float] | None = None,
-    flow_weights: str | list[float] | None = None,
-    sentiment_weights: str | list[float] | None = None,
-    watch_thresholds: str | list[float] | None = None,
-    reject_thresholds: str | list[float] | None = None,
-    time_stop_days_list: str | list[float] | None = None,
-    veto_presets: list[list[str]] | None = None,
+    fixture: str | Optional[Path] = None,
+    codes: Optional[str] = None,
+    buy_thresholds: str | Optional[list[float]] = None,
+    stop_losses: str | Optional[list[float]] = None,
+    take_profits: str | Optional[list[float]] = None,
+    technical_weights: str | Optional[list[float]] = None,
+    fundamental_weights: str | Optional[list[float]] = None,
+    flow_weights: str | Optional[list[float]] = None,
+    sentiment_weights: str | Optional[list[float]] = None,
+    watch_thresholds: str | Optional[list[float]] = None,
+    reject_thresholds: str | Optional[list[float]] = None,
+    time_stop_days_list: str | Optional[list[float]] = None,
+    veto_presets: Optional[list[list[str]]] = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -1527,19 +1527,19 @@ def run_parameter_sweep(
     end: str,
     *,
     scope: str = "cn_a_system",
-    fixture: str | Path | None = None,
-    codes: str | None = None,
-    buy_thresholds: str | list[float] | None = None,
-    stop_losses: str | list[float] | None = None,
-    take_profits: str | list[float] | None = None,
-    technical_weights: str | list[float] | None = None,
-    fundamental_weights: str | list[float] | None = None,
-    flow_weights: str | list[float] | None = None,
-    sentiment_weights: str | list[float] | None = None,
-    watch_thresholds: str | list[float] | None = None,
-    reject_thresholds: str | list[float] | None = None,
-    time_stop_days_list: str | list[float] | None = None,
-    veto_presets: list[list[str]] | None = None,
+    fixture: str | Optional[Path] = None,
+    codes: Optional[str] = None,
+    buy_thresholds: str | Optional[list[float]] = None,
+    stop_losses: str | Optional[list[float]] = None,
+    take_profits: str | Optional[list[float]] = None,
+    technical_weights: str | Optional[list[float]] = None,
+    fundamental_weights: str | Optional[list[float]] = None,
+    flow_weights: str | Optional[list[float]] = None,
+    sentiment_weights: str | Optional[list[float]] = None,
+    watch_thresholds: str | Optional[list[float]] = None,
+    reject_thresholds: str | Optional[list[float]] = None,
+    time_stop_days_list: str | Optional[list[float]] = None,
+    veto_presets: Optional[list[list[str]]] = None,
 ) -> dict[str, Any]:
     inputs = load_backtest_inputs(start, end, scope=scope, fixture=fixture)
     start_date = _parse_date(inputs["start"])
@@ -1643,19 +1643,19 @@ def run_walk_forward(
     *,
     scope: str = "cn_a_system",
     folds: int = 3,
-    fixture: str | Path | None = None,
-    codes: str | None = None,
-    buy_thresholds: str | list[float] | None = None,
-    stop_losses: str | list[float] | None = None,
-    take_profits: str | list[float] | None = None,
-    technical_weights: str | list[float] | None = None,
-    fundamental_weights: str | list[float] | None = None,
-    flow_weights: str | list[float] | None = None,
-    sentiment_weights: str | list[float] | None = None,
-    watch_thresholds: str | list[float] | None = None,
-    reject_thresholds: str | list[float] | None = None,
-    time_stop_days_list: str | list[float] | None = None,
-    veto_presets: list[list[str]] | None = None,
+    fixture: str | Optional[Path] = None,
+    codes: Optional[str] = None,
+    buy_thresholds: str | Optional[list[float]] = None,
+    stop_losses: str | Optional[list[float]] = None,
+    take_profits: str | Optional[list[float]] = None,
+    technical_weights: str | Optional[list[float]] = None,
+    fundamental_weights: str | Optional[list[float]] = None,
+    flow_weights: str | Optional[list[float]] = None,
+    sentiment_weights: str | Optional[list[float]] = None,
+    watch_thresholds: str | Optional[list[float]] = None,
+    reject_thresholds: str | Optional[list[float]] = None,
+    time_stop_days_list: str | Optional[list[float]] = None,
+    veto_presets: Optional[list[list[str]]] = None,
 ) -> dict[str, Any]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)

@@ -11,7 +11,7 @@ engine/stock_classifier.py — 股票风格判定模块
 
 import os
 import sys
-from typing import Optional
+from typing import Optional, Union, Optional
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -216,7 +216,7 @@ def check_style_switch(
     Returns:
         {
             "should_switch": bool,
-            "trigger": str | None,
+            "trigger": Optional[str],
             "new_style": str,
         }
     """
@@ -259,7 +259,7 @@ def get_risk_params(style: str, strategy: Optional[dict] = None) -> dict:
         {
             "stop_loss": float,
             "time_stop_days": int,
-            "trailing_stop": float | None,
+            "trailing_stop": Optional[float],
             "exit_ma": int,
             ...
         }

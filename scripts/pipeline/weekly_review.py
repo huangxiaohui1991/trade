@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional, Union
 """
 pipeline/weekly_review.py — 周报生成（周日 20:00 执行）
 
@@ -87,8 +88,8 @@ def _safe_date_key(event: dict) -> str:
 def _build_weekly_report(vault: ObsidianVault, stats: dict,
                          core_pool_changes: list, trade_events: list,
                          year: int, week_num: int,
-                         shadow_advisories: list | None = None,
-                         trade_review: dict | None = None) -> str:
+                         shadow_advisories: Optional[list] = None,
+                         trade_review: Optional[dict] = None) -> str:
     """生成周报 markdown 内容"""
     week_str = f"{year}-W{week_num:02d}"
 

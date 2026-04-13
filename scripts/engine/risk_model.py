@@ -18,7 +18,7 @@ import os
 import sys
 import warnings
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Union, Optional, Tuple
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -34,7 +34,7 @@ from scripts.utils.logger import get_logger
 _logger = get_logger("risk_model")
 
 
-def _parse_trade_date(value) -> date | None:
+def _parse_trade_date(value) -> Optional[date]:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -50,7 +50,7 @@ def _parse_trade_date(value) -> date | None:
         return None
 
 
-def _event_trade_date(event: dict) -> date | None:
+def _event_trade_date(event: dict) -> Optional[date]:
     return _parse_trade_date(
         event.get("trade_date")
         or event.get("event_date")
@@ -226,8 +226,8 @@ def calc_take_profit(cost: float, first_buy_price: float = 0,
     Returns:
         {
             "mode": str,
-            "trailing_stop_price": float | None,
-            "trailing_stop_pct": float | None,
+            "trailing_stop_price": Optional[float],
+            "trailing_stop_pct": Optional[float],
             "exit_ma": int,
         }
     """
