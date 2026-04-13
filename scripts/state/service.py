@@ -635,6 +635,70 @@ def _write_positions(conn: sqlite3.Connection, positions: Iterable[dict]) -> Non
         )
 
 
+def _rebuild_positions_from_trade_events(conn: sqlite3.Connection, scope: str) -> int:
+    """
+    根据 trade_events 表重建并覆盖指定 scope 的持仓记录。
+    返回写入的持仓数量。
+    """
+    from collections import defaultdict
+
+    rows = conn.execute(
+        "SELECT code, name, market, side, shares, price FROM trade_events WHERE scope = ? ORDER BY event_date ASC, id ASC",
+        (scope,),
+    ).fetchall()
+
+    # 按股票聚合：记录最后一笔的 name/market，以及净买入股数和加权成本
+    state: dict[str, dict] = defaultdict(lambda: {"name": "", "Market": "", "net_shares": 0, "cost_sum": 0.0})
+    for code, name, market, side, shares, price in rows:
+        s = state[code]
+        s["Name"] = name or s["Name"]
+        s["Market"] = market or s["Market"]
+        net = _safe_int(shares) * (1 if side == "buy" else -1)
+        s["net_shares"] += net
+        if side == "buy":
+            s["cost_sum"] += _safe_float(price) * _safe_int(shares)
+
+    updated_at = _now_ts()
+    as_of_date = _today_str()
+    count = 0
+
+    conn.execute("DELETE FROM portfolio_positions WHERE scope = ?", (scope,))
+    for code, s in state.items():
+        net_shares = s["net_shares"]
+        if net_shares <= 0:
+            continue
+        cost_sum = s["cost_sum"]
+        avg_cost = round(cost_sum / net_shares, 4) if net_shares > 0 else 0.0
+        conn.execute(
+            """
+            INSERT INTO portfolio_positions(
+              scope, code, name, market, shares, avg_cost, current_price, market_value,
+              status, note, source, as_of_date, updated_at, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                code,
+                s["Name"],
+                s["Market"],
+                net_shares,
+                avg_cost,
+                avg_cost,  # current_price 暂无外部数据，用 avg_cost 代替
+                round(avg_cost * net_shares, 2),
+                "",
+                "",
+                "trade_events_rebuild",
+                as_of_date,
+                updated_at,
+                "{}",
+            ),
+        )
+        count += 1
+
+    LOGGER.info(f"[state] rebuilt {count} positions for {scope} from trade_events")
+    return count
+
+
 def _replace_portfolio_scope_snapshot(
     conn: sqlite3.Connection,
     scope: str,
@@ -1905,14 +1969,23 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
                 )
                 trade_event_recorded = True
 
-    # ── 成交后自动更新持仓（仅模拟盘）─────────────────────────────────
+    # ── 成交后自动更新持仓（模拟盘 / 实盘）────────────────────────────
     portfolio_synced = False
-    if trade_event_recorded and scope == PAPER_SCOPE:
-        try:
-            load_portfolio_snapshot(scope=PAPER_SCOPE)
-            portfolio_synced = True
-        except Exception as sync_exc:
-            LOGGER.warning(f"[apply_order_reply] paper portfolio sync failed: {sync_exc}")
+    positions_synced = False
+    if trade_event_recorded:
+        if scope == PAPER_SCOPE:
+            try:
+                load_portfolio_snapshot(scope=PAPER_SCOPE)
+                portfolio_synced = True
+            except Exception as sync_exc:
+                LOGGER.warning(f"[apply_order_reply] paper portfolio sync failed: {sync_exc}")
+        elif scope == PRIMARY_SCOPE:
+            try:
+                with _connect() as conn:
+                    _rebuild_positions_from_trade_events(conn, scope=PRIMARY_SCOPE)
+                positions_synced = True
+            except Exception as sync_exc:
+                LOGGER.warning(f"[apply_order_reply] real portfolio sync failed: {sync_exc}")
 
     return {
         "status": "ok",
@@ -1921,6 +1994,7 @@ def apply_order_reply(reply_text: str, scope: str = PAPER_SCOPE) -> dict:
         "matched_order_count": matched_order_count,
         "trade_event_recorded": trade_event_recorded,
         "portfolio_synced": portfolio_synced,
+        "positions_synced": positions_synced,
         "is_real_trade": scope != PAPER_SCOPE,
         "order": updated_order,
         "db_path": str(_db_path()),
