@@ -7,6 +7,7 @@ from typing import Optional, Union
   trade doctor
   trade run <pipeline>
   trade status today
+  trade order fill --code --side --price --shares [--broker eastmoney|super|manual] [--scope real|paper_mx] [--date YYYY-MM-DD]
 """
 
 import argparse
@@ -418,6 +419,79 @@ def order_command(action: str, args) -> dict:
             "new_price": new_price,
             "modified_count": len(modified),
             "modified_orders": modified,
+        })
+
+    if action == "fill":
+        # 手动录入实盘成交记录
+        from scripts.state import record_trade_event
+
+        code = getattr(args, "code", "")
+        name = getattr(args, "name", "")
+        side = getattr(args, "side", "sell")
+        price = float(getattr(args, "price", 0))
+        shares = int(getattr(args, "shares", 0))
+        broker = getattr(args, "broker", "manual")
+        scope = getattr(args, "scope", "real")
+        event_date = getattr(args, "date", None)
+        event_date_kwarg = {"event_date": event_date} if event_date else {}
+        now_ts_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # 1. 创建 order 记录（标记为 filled）
+        order_external_id = f"{scope}:manual_fill:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{code}"
+        order = upsert_order_state({
+            "external_id": order_external_id,
+            "scope": scope,
+            "broker": broker,
+            "code": code,
+            "name": name,
+            "side": side,
+            "order_class": "manual_fill",
+            "order_type": "manual_fill",
+            "condition_type": "manual_fill",
+            "requested_shares": shares,
+            "filled_shares": shares,
+            "avg_fill_price": price,
+            "trigger_price": price,
+            "status": "filled",
+            "confirm_status": "not_required",
+            "reason_code": f"MANUAL_FILL_{side.upper()}",
+            "reason_text": f"手动录入实盘成交，broker={broker}",
+            "source": "cli_manual_fill",
+            "placed_at": now_ts_str,
+            "filled_at": now_ts_str,
+            "updated_at": now_ts_str,
+            "metadata": {"filled_by": "cli_manual_fill", "broker": broker},
+        })
+
+        # 2. 写入 trade_events 表（打通风控/复盘）
+        trade_event = record_trade_event({
+            "external_id": order_external_id,
+            "scope": scope,
+            "code": code,
+            "name": name,
+            "side": side,
+            "event_type": side,
+            "shares": shares,
+            "price": price,
+            "amount": round(price * shares, 2),
+            **event_date_kwarg,
+            "reason_code": f"MANUAL_FILL_{side.upper()}",
+            "reason_text": f"手动录入，broker={broker}",
+            "source": "cli_manual_fill",
+            "metadata": {
+                "order_id": order.get("id"),
+                "broker": broker,
+                "filled_at": now_ts_str,
+            },
+        })
+
+        return sanitize_for_json({
+            "command": "order",
+            "action": "fill",
+            "status": "ok",
+            "order": order,
+            "trade_event": trade_event,
+            "summary": f"{'买入' if side == 'buy' else '卖出'} {code} {name} {shares}股 @{price}，已录入 ledger",
         })
 
     if action == "list":
@@ -2232,6 +2306,16 @@ def main():
     order_list.add_argument("--scope", default=None, help="Scope filter")
     order_list.add_argument("--status", default=None, help="Status filter")
     order_list.add_argument("--limit", type=int, default=20, help="Max results")
+
+    order_fill = order_sub.add_parser("fill", help="手动录入实盘成交记录（模拟填单流程）")
+    order_fill.add_argument("--code", required=True, help="股票代码")
+    order_fill.add_argument("--name", default="", help="股票名称")
+    order_fill.add_argument("--side", required=True, choices=["buy", "sell"], help="买卖方向")
+    order_fill.add_argument("--price", type=float, required=True, help="成交价格")
+    order_fill.add_argument("--shares", type=int, required=True, help="成交数量（股）")
+    order_fill.add_argument("--broker", default="manual", choices=["eastmoney", "super", "manual"], help="券商/渠道")
+    order_fill.add_argument("--scope", default="real", help="Scope（real=实盘，paper_mx=模拟）")
+    order_fill.add_argument("--date", default=None, help="成交日期（YYYY-MM-DD，默认今天）")
 
     run_parser = sub.add_parser("run", help="Run pipeline")
     run_sub = run_parser.add_subparsers(dest="pipeline", required=True)

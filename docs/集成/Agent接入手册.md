@@ -217,6 +217,33 @@ bin/trade shadow consistency --window 180 --json
 bin/trade shadow report --json
 ```
 
+### 订单管理
+
+```bash
+# 手动录入实盘成交（打通风控/复盘/周报全链路）
+bin/trade order fill --code 600066 --name 兴业银行 --side buy \
+    --price 36.696 --shares 500 --broker eastmoney --scope real --json
+
+# 补录历史成交（指定日期）
+bin/trade order fill --code 600066 --side sell --price 35.20 --shares 500 \
+    --broker super --scope real --date 2026-04-10 --json
+
+# 录入模拟撮合成交
+bin/trade order fill --code 600066 --side buy --price 36.50 --shares 500 \
+    --broker manual --scope paper_mx --json
+
+# 其他订单操作
+bin/trade order place --code 000001 --name 平安银行 --side sell \
+    --type manual_stop --price 18.50 --shares 500 --json
+bin/trade order list --scope paper_mx --json
+bin/trade order cancel --code 000001 --scope paper_mx --json
+```
+
+说明：
+- `order fill` 同时写入 `orders` 表（status=filled）和 `trade_events` 表（source=cli_manual_fill）
+- `scope real` = 实盘，`scope paper_mx` = 模拟撮合
+- `broker eastmoney/super/manual` 标记成交渠道
+
 ## 建议的技能提示词
 
 Hermes-Agent 的完整可粘贴版本见：
