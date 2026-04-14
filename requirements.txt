@@ -10,3 +10,5 @@ requests==2.33.1
 rich==14.3.3
 
 pytest==9.0.3
+fake_useragent
+pydash
