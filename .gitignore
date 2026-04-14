@@ -25,3 +25,6 @@ venv/
 # Obsidian config（本地配置）
 trade-vault/.obsidian/
 .obsidian/
+data/hermes.db-shm
+data/hermes.db-wal
+src/hermes_trade.egg-info/

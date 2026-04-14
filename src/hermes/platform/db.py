@@ -1,0 +1,258 @@
+"""
+platform/db.py — SQLite 连接管理 + schema migration
+
+所有表按 PG 风格设计，金额字段用 _cents 整数。
+WAL 模式启用，支持读写并发。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Optional
+
+_SCHEMA_VERSION = 1
+
+# ---------------------------------------------------------------------------
+# Schema DDL
+# ---------------------------------------------------------------------------
+
+_SCHEMA_SQL = """\
+-- ═══════════════════════════════════════════════════════════════
+-- 业务事实 (append-only)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS event_log (
+    event_id        TEXT PRIMARY KEY,
+    stream          TEXT NOT NULL,
+    stream_type     TEXT NOT NULL,
+    stream_version  INTEGER NOT NULL,
+    event_type      TEXT NOT NULL,
+    payload_json    TEXT NOT NULL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    occurred_at     TEXT NOT NULL,
+    UNIQUE(stream, stream_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_log_type
+    ON event_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_event_log_stream
+    ON event_log(stream);
+CREATE INDEX IF NOT EXISTS idx_event_log_occurred
+    ON event_log(occurred_at);
+"""
+
+_SCHEMA_SQL_2 = """\
+-- ═══════════════════════════════════════════════════════════════
+-- 规则版本
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS config_versions (
+    config_version  TEXT PRIMARY KEY,
+    config_hash     TEXT NOT NULL UNIQUE,
+    config_json     TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    activated_at    TEXT
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- 运行记录
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS run_log (
+    run_id          TEXT PRIMARY KEY,
+    run_type        TEXT NOT NULL,
+    scope           TEXT NOT NULL DEFAULT 'cn_a',
+    config_version  TEXT NOT NULL,
+    data_cutoff     TEXT,
+    status          TEXT NOT NULL DEFAULT 'running',
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    error_message   TEXT,
+    artifacts_json  TEXT DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_log_type_date
+    ON run_log(run_type, started_at);
+
+-- ═══════════════════════════════════════════════════════════════
+-- 市场观察
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS market_observations (
+    observation_id  TEXT PRIMARY KEY,
+    source          TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    observed_at     TEXT NOT NULL,
+    run_id          TEXT,
+    payload_json    TEXT NOT NULL,
+    UNIQUE(source, kind, symbol, observed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_obs_symbol
+    ON market_observations(symbol, kind, observed_at);
+
+CREATE TABLE IF NOT EXISTS market_bars (
+    symbol          TEXT NOT NULL,
+    bar_date        TEXT NOT NULL,
+    period          TEXT NOT NULL DEFAULT 'daily',
+    open_cents      INTEGER NOT NULL,
+    high_cents      INTEGER NOT NULL,
+    low_cents       INTEGER NOT NULL,
+    close_cents     INTEGER NOT NULL,
+    volume          INTEGER NOT NULL,
+    amount_cents    INTEGER NOT NULL,
+    source          TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL,
+    PRIMARY KEY (symbol, bar_date, period)
+);
+"""
+
+_SCHEMA_SQL_3 = """\
+-- ═══════════════════════════════════════════════════════════════
+-- 投影表 (全部可删可重建)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS projection_positions (
+    code            TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    style           TEXT NOT NULL,
+    shares          INTEGER NOT NULL,
+    avg_cost_cents  INTEGER NOT NULL,
+    entry_date      TEXT NOT NULL,
+    entry_day_low_cents INTEGER,
+    stop_loss_cents INTEGER,
+    take_profit_cents INTEGER,
+    highest_since_entry_cents INTEGER,
+    current_price_cents INTEGER,
+    unrealized_pnl_cents INTEGER,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_orders (
+    order_id        TEXT PRIMARY KEY,
+    code            TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    shares          INTEGER NOT NULL,
+    price_cents     INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    broker          TEXT,
+    created_at      TEXT NOT NULL,
+    filled_at       TEXT,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_balances (
+    scope           TEXT PRIMARY KEY,
+    cash_cents      INTEGER NOT NULL,
+    total_asset_cents INTEGER NOT NULL,
+    weekly_buy_count INTEGER NOT NULL DEFAULT 0,
+    daily_pnl_cents INTEGER NOT NULL DEFAULT 0,
+    consecutive_loss_days INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_candidate_pool (
+    code            TEXT NOT NULL,
+    pool_tier       TEXT NOT NULL,
+    name            TEXT,
+    score           REAL,
+    added_at        TEXT NOT NULL,
+    last_scored_at  TEXT,
+    streak_days     INTEGER DEFAULT 0,
+    note            TEXT,
+    PRIMARY KEY (code, pool_tier)
+);
+
+CREATE TABLE IF NOT EXISTS projection_market_state (
+    index_symbol    TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    signal          TEXT,
+    price_cents     INTEGER,
+    change_pct      REAL,
+    ma20_pct        REAL,
+    ma60_pct        REAL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS report_artifacts (
+    artifact_id     TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    report_type     TEXT NOT NULL,
+    format          TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    delivered_to    TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- Schema 版本追踪
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS _schema_version (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TEXT NOT NULL
+);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Connection management
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
+
+
+def _default_db_path() -> Path:
+    return _DEFAULT_DB_DIR / "hermes.db"
+
+
+def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and recommended pragmas."""
+    path = db_path or _default_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def init_db(db_path: Optional[Path] = None) -> Path:
+    """Create all tables if they don't exist. Returns the db path."""
+    path = db_path or _default_db_path()
+    conn = connect(path)
+    try:
+        conn.executescript(_SCHEMA_SQL)
+        conn.executescript(_SCHEMA_SQL_2)
+        conn.executescript(_SCHEMA_SQL_3)
+
+        # Record schema version
+        existing = conn.execute(
+            "SELECT version FROM _schema_version ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if not existing or existing[0] < _SCHEMA_VERSION:
+            from datetime import datetime, timezone
+
+            conn.execute(
+                "INSERT OR REPLACE INTO _schema_version (version, applied_at) VALUES (?, ?)",
+                (_SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
+            )
+        return path
+    finally:
+        conn.close()
+
+
+def get_schema_version(conn: sqlite3.Connection) -> int:
+    """Return current schema version, or 0 if not initialized."""
+    try:
+        row = conn.execute(
+            "SELECT version FROM _schema_version ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        return row[0] if row else 0
+    except sqlite3.OperationalError:
+        return 0

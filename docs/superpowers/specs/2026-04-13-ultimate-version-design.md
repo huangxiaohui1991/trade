@@ -396,3 +396,396 @@ Sun 20:00 trade orchestrate weekly_review
 | Cron | 保留系统级 cron | 与容器解耦 |
 | API 设计 | REST 资源型 + action 端点 | 覆盖全部现有功能 |
 | Discord | 保持独立 | 不走 API，仍由 Python 脚本驱动 |
+
+---
+
+## 15. 事件溯源架构（Event Sourcing + CQRS）
+
+**状态：提议阶段（v3 新增）**
+
+### 15.1 现状问题
+
+现有状态管理层是 **mutable snapshot**：
+
+```
+orders 表（现状）
+order_id | code | side | price | shares | status | updated_at
+    ↓ 直接覆写
+状态变了，但"怎么变成这个状态"的历史丢了
+```
+
+```
+positions 表（现状）
+stock_code | shares | cost | updated_at
+    ↓ 直接覆写
+买入→加仓→减仓→清仓，每一步的"为什么"丢了
+```
+
+后果：
+- **无法复盘**："当时为什么买？信号是什么？" → 查不到
+- **审计失效**："这个止损是什么时候触发的？" → 不知道
+- **对账困难**："持仓数字对不对？" → 没有事件链可以回放验证
+- **跨表不一致**：`orders`/`positions`/`trade_events` 三张表各写各的，没有统一事件流
+
+### 15.2 目标：用 Event Store 重建状态层
+
+所有状态变化都先写入 **Append-only Event Store**，再由 Projector 投影到 Read Model：
+
+```
+  COMMAND                    EVENT STORE（写）              PROJECTOR              READ MODEL（读）
+  ──────                     ─────────────────              ─────────              ─────────────
+  fill_order()      ──▶     [OrderFilled]          ──▶    PositionProjector  ──▶  positions 表
+  record_stop()     ──▶     [StopTriggered]        ──▶    OrderProjector      ──▶  orders 表
+  market_close()     ──▶     [MarketClosed]         ──▶    DailyJournalProjector──▶  journal 文件
+```
+
+**核心原则**：
+- Event Store 是唯一真相来源（Source of Truth）
+- Read Model（positions/orders）永远从 Event Store 重建，不反向写入
+- 每个事件带 `aggregate_id` + `version` 实现乐观并发锁
+- 事件不可变（Immutable），只能追加（Append-only）
+
+### 15.3 Event Store Schema（PostgreSQL）
+
+```sql
+CREATE TABLE event_store (
+    id              BIGSERIAL PRIMARY KEY,
+    aggregate_id    VARCHAR(128) NOT NULL,      -- 聚合根 ID，如 "ORDER:600036:BUY:20260414"
+    aggregate_type  VARCHAR(64) NOT NULL,        -- "Order" | "Position"
+    event_type      VARCHAR(128) NOT NULL,        -- "OrderFilled" | "StopTriggered" 等
+    payload         JSONB NOT NULL,               -- 事件数据（业务含义）
+    metadata        JSONB DEFAULT '{}',           -- 触发源/actor/时间戳等
+    version         INTEGER NOT NULL,             -- 聚合版本号，单调递增
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(aggregate_id, version)                 -- 防止重复写入
+);
+
+CREATE INDEX idx_event_store_aggregate ON event_store(aggregate_id, version);
+CREATE INDEX idx_event_store_type ON event_store(event_type, created_at);
+```
+
+**payload 示例（OrderFilled）**：
+```json
+{
+  "order_id": "ORD-20260414-001",
+  "stock_code": "600036",
+  "stock_name": "招商银行",
+  "side": "buy",
+  "price": 36.696,
+  "shares": 500,
+  "broker": "eastmoney",
+  "scope": "cn_a_system",
+  "filled_at": "2026-04-14T09:32:15+08:00",
+  "signal_codes": ["BREAK_MA20", "GREEN_MARKET"],
+  "reason_codes": [],
+  "actor": "cli_order_fill"
+}
+```
+
+### 15.4 Aggregate 聚合根定义
+
+#### 15.4.1 Order 聚合根
+
+```
+状态机：
+┌──────────┐  submit  ┌──────────┐  partial_fill  ┌────────────────┐
+│  NONE    │ ──────▶ │  PENDING │ ─────────────▶ │ PARTIAL_FILLED │
+└──────────┘         └──────────┘                └───────┬────────┘
+                            │                              │
+                            │ cancel                       │ fill
+                            ▼                              ▼
+                      ┌──────────┐                  ┌──────────┐
+                      │CANCELLED│                  │  FILLED  │
+                      └──────────┘                  └──────────┘
+                            │
+                     expire/timeout
+                            │
+                            ▼
+                      ┌──────────┐
+                      │ EXPIRED  │
+                      └──────────┘
+```
+
+**事件列表**：
+
+| 事件 | 触发条件 | payload 关键字段 |
+|------|---------|----------------|
+| `OrderSubmitted` | 用户/策略提交订单 | code, side, price, shares, signal_codes |
+| `OrderFilled` | 成交确认 | price, shares_filled, broker_fill_id |
+| `OrderPartialFill` | 部分成交 | price, shares_filled, shares_remaining |
+| `OrderCancelled` | 用户取消 | cancel_reason |
+| `OrderExpired` | 收盘未成交自动作废 | expiry_reason |
+| `StopTriggered` | 止损信号触发 | stop_type, triggered_price |
+
+**Command（写）**：
+```python
+class OrderAggregate:
+    def submit_order(cmd: SubmitOrderCommand) -> list[Event]:
+        # 验证：非 ST、非涨停（卖出除外）、非黑名单
+        # 生成：OrderSubmitted 事件
+        pass
+
+    def fill_order(cmd: FillOrderCommand, expected_version: int) -> list[Event]:
+        # 乐观锁：if current_version != expected_version → raise ConcurrencyError
+        # 状态校验：只有 PENDING 才能 fill
+        # 生成：OrderFilled 或 OrderPartialFill 事件
+        pass
+```
+
+#### 15.4.2 Position 聚合根
+
+每个 `stock_code + scope` 是一个 Position 聚合根。
+
+```
+事件流（时间顺序）：
+[PositionOpened]  ──▶  [BuyExecuted × N]  ──▶  [SellExecuted]  ──▶  [PositionClosed]
+                            │                        │
+                            └──────▶ [StopTriggered] ←┘
+```
+
+**事件列表**：
+
+| 事件 | 说明 | payload |
+|------|------|---------|
+| `PositionOpened` | 首次买入开仓 | code, name, price, shares, cost_basis |
+| `BuyExecuted` | 加仓 | price, shares, new_total, avg_cost |
+| `SellExecuted` | 减仓/清仓 | price, shares_sold, remaining, realized_pnl |
+| `StopTriggered` | 止损触发 | stop_type, triggered_price, reason_code |
+| `DividendReceived` | 分红 | amount, tax |
+| `CostAdjusted` | 手动成本修正 | old_cost, new_cost, reason |
+
+**Projector 重建 Position Read Model**：
+```python
+class PositionProjector:
+    def project(aggregate_id: str) -> PositionSnapshot:
+        events = event_store.get_events(aggregate_id)  # 按 version 排序
+        state = Position.empty()
+        for event in events:
+            state = state.apply(event)  # 纯函数，无副作用
+        return state.to_snapshot()      # 写入 positions 投影表
+```
+
+### 15.5 CQRS 分离
+
+```
+COMMAND SIDE（写）                        QUERY SIDE（读）
+─────────────────                        ───────────────
+bin/trade order fill ──▶ OrderAggregate ──▶ Event Store
+                                     │
+                                     │ Projector（异步）
+                                     ▼
+bin/trade score single ──▶ ScoreEngine ──▶ signal_snapshots 表
+bin/trade risk check   ──▶ RiskEngine   ──▶ alert_center 表
+```
+
+**读模型表（PostgreSQL）**：
+```sql
+-- 持仓快照（从 PositionProjector 持续投影）
+CREATE TABLE positions (
+    id SERIAL PRIMARY KEY,
+    account_scope VARCHAR(32) NOT NULL,
+    stock_code VARCHAR(16) NOT NULL,
+    stock_name VARCHAR(128),
+    shares INTEGER NOT NULL DEFAULT 0,
+    cost_basis DECIMAL(12,4) NOT NULL DEFAULT 0,  -- 加权平均成本
+    market_value DECIMAL(14,4),
+    unrealized_pnl DECIMAL(14,4),
+    realized_pnl DECIMAL(14,4) DEFAULT 0,
+    stop_price DECIMAL(10,4),
+    stop_type VARCHAR(32),
+    last_updated TIMESTAMPTZ DEFAULT NOW(),
+    version INTEGER NOT NULL,
+    UNIQUE(account_scope, stock_code)
+);
+
+-- 订单快照
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    order_id VARCHAR(64) UNIQUE NOT NULL,
+    account_scope VARCHAR(32) NOT NULL,
+    stock_code VARCHAR(16) NOT NULL,
+    side VARCHAR(8) NOT NULL,
+    price DECIMAL(10,4) NOT NULL,
+    shares INTEGER NOT NULL,
+    shares_filled INTEGER DEFAULT 0,
+    status VARCHAR(32) NOT NULL,
+    signal_codes JSONB DEFAULT '[]',
+    reason_codes JSONB DEFAULT '[]',
+    broker_order_id VARCHAR(128),
+    broker_fill_id VARCHAR(128),
+    submitted_at TIMESTAMPTZ,
+    filled_at TIMESTAMPTZ,
+    last_updated TIMESTAMPTZ DEFAULT NOW(),
+    version INTEGER NOT NULL,
+    UNIQUE(account_scope, stock_code, submitted_at)
+);
+
+-- 事件溯源专用索引
+CREATE INDEX idx_positions_scope ON positions(account_scope);
+CREATE INDEX idx_orders_scope_status ON orders(account_scope, status);
+CREATE INDEX idx_orders_pending ON orders(status) WHERE status IN ('PENDING', 'PARTIAL_FILLED');
+```
+
+### 15.6 Command Handler 实现骨架
+
+```python
+# app/commands/order_commands.py
+from dataclasses import dataclass
+from typing import Literal
+
+@dataclass
+class SubmitOrderCommand:
+    stock_code: str
+    side: Literal["buy", "sell"]
+    price: float
+    shares: int
+    signal_codes: list[str]
+    scope: str = "cn_a_system"
+    actor: str = "cli"
+
+@dataclass
+class FillOrderCommand:
+    order_id: str
+    price: float
+    shares: int
+    broker_fill_id: str
+    scope: str
+
+class OrderCommandHandler:
+    def __init__(self, event_store: 'EventStore'):
+        self.event_store = event_store
+
+    def handle_submit(self, cmd: SubmitOrderCommand) -> OrderSnapshot:
+        agg_id = f"ORDER:{cmd.stock_code}:{cmd.side}:{date.today().isoformat()}"
+        aggregate = OrderAggregate.reconstitute(self.event_store, agg_id)
+        events = aggregate.submit(cmd)
+        self.event_store.append(agg_id, events)
+        return aggregate.to_snapshot()
+
+    def handle_fill(self, cmd: FillOrderCommand) -> tuple[OrderSnapshot, PositionSnapshot]:
+        agg_id = self._find_order_aggregate(cmd.order_id)
+        order_agg = OrderAggregate.reconstitute(self.event_store, agg_id)
+        order_events = order_agg.fill(cmd)
+        self.event_store.append(agg_id, order_events)
+
+        pos_agg_id = f"POSITION:{cmd.stock_code}:{cmd.scope}"
+        pos_agg = PositionAggregate.reconstitute(self.event_store, pos_agg_id)
+        pos_events = pos_agg.apply_trade(cmd)
+        self.event_store.append(pos_agg_id, pos_events)
+
+        return order_agg.to_snapshot(), pos_agg.to_snapshot()
+```
+
+### 15.7 三阶段迁移策略
+
+**Phase 1（数据层热身）：Event Store 建表 + 双写（向后兼容）**
+
+```
+现状                            Phase 1
+orders ──▶ SQLite              orders ──▶ Event Store（新增）
+                              orders ──▶ SQLite（保留）
+```
+- 新建 `event_store` 表
+- `record_trade_event()` 同时写入 SQLite + event_store
+- 现有 pipeline 零改动
+- 验收：event_store 数据与 SQLite 数据完全一致
+
+**Phase 2（读取侧迁移）**
+
+```
+Phase 1                          Phase 2
+SQLite orders（真相）             event_store（真相）
+                                     │
+                                     │ PositionProjector 重建
+                                     ▼
+                                  positions 表（投影）
+```
+- 实现 `PositionProjector` 和 `OrderProjector`
+- 对比 event_store 重建的 positions 与 SQLite 原始数据
+- 差异为 0 时，切换读路径到投影表
+- 保留 SQLite 写路径（Phase 3 移除）
+
+**Phase 3（完全迁移）**
+
+```
+Phase 2                          Phase 3（最终态）
+写入 ──▶ SQLite + event_store    写入 ──▶ event_store（唯一写入路径）
+读出 ──▶ 投影表                  读出 ──▶ 投影表（从 event_store 重建）
+```
+- 移除 SQLite 写入逻辑
+- `record_trade_event()` 只写 event_store
+- 删除或归档 SQLite `orders`/`positions` 表
+- Event Store 成为单一真相来源
+
+### 15.8 事件重放（Replay）场景
+
+Event Store 的真正威力在于**任意时间点重放**：
+
+```python
+# 回到任意日期重建持仓状态
+def rebuild_position_at(code: str, scope: str, as_of: date) -> PositionSnapshot:
+    events = event_store.get_events_before(
+        f"POSITION:{code}:{scope}",
+        as_of=as_of  # WHERE created_at <= as_of
+    )
+    state = Position.empty()
+    for event in events:
+        state = state.apply(event)
+    return state
+
+# 用于对账：持仓快照 vs券商报告
+snapshot = rebuild_position_at("600036", "cn_a_system", as_of=date.today())
+assert snapshot.shares == broker_report.shares  # 对不上则触发告警
+```
+
+### 15.9 与 FastAPI 的整合
+
+```
+Hermes/Cron                       FastAPI                         Event Layer
+─────────────                     ────────                         ───────────
+bin/trade order fill
+      │                           CommandHandler
+      │                                │
+      ▼                                ▼
+ POST /orders/fill  ──▶     OrderCommandHandler.handle_fill()
+                                  │
+                                  ▼ Event append
+                            EventStore.append()
+                                  │
+                                  │ async, 非阻塞
+                                  ▼ Projector
+                            PositionProjector.project()
+                                  │
+                                  ▼
+                            positions 投影表更新
+                                  │
+                                  ▼
+                            GET /positions 读投影表返回
+```
+
+**向后兼容接口**：
+- `/orders/fill`（POST）→ CommandHandler → EventStore
+- `/orders`（GET）→ 读 orders 投影表（Phase 2+）
+- `/positions`（GET）→ 读 positions 投影表（Phase 2+）
+
+### 15.10 决策记录（续）
+
+| 决策 | 选择 | 原因 |
+|------|------|------|
+| 事件格式 | JSONB payload | 灵活，前向兼容，PostgreSQL 原生支持 |
+| 聚合粒度 | Order + Position 两个聚合根 | 避免跨聚合事务，Order 事件不影响 Position |
+| 并发控制 | 乐观锁（version 字段） | 轻量，无锁竞争，适合低并发场景 |
+| 投影方式 | 同步投影（写入后立即更新） | 简单，满足当前性能需求 |
+| 迁移策略 | 三阶段双写 | 零停机，每阶段可回滚 |
+
+### 15.11 实施优先级与工作量
+
+| 阶段 | 工作内容 | 估计（人时） | 收益 |
+|------|---------|------------|------|
+| Phase 0 | Event Store Schema + EventStore Python 类 | 4h | 骨架就位 |
+| Phase 0 | Order Aggregate（含状态机） | 6h | 订单流完整 |
+| Phase 1 | 双写 + Position Projector | 4h | 历史数据开始积累 |
+| Phase 2 | 读取侧迁移到投影表 | 6h | 读性能提升 |
+| Phase 3 | 清理 SQLite 写入 | 2h | 架构统一 |
+
+**Phase 0 + Phase 1 = 14h，可以独立完成，MVP 阶段可先行交付。** Phase 2/3 依赖 FastAPI 上线节奏。
