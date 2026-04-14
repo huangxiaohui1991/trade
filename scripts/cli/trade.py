@@ -529,7 +529,6 @@ def order_command(action: str, args) -> dict:
                             "状态": "",
                         })
                     vault.update_portfolio({"holdings": holdings})
-                    vault.sync_portfolio_state()
                 positions_synced = True
             except Exception as sync_exc:
                 LOGGER.warning(f"[order fill] portfolio sync failed: {sync_exc}")
