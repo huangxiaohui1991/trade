@@ -356,10 +356,14 @@ def trade_screener(query: str = "") -> str:
     results = asyncio.run(adapter.search_stocks(q))
 
     # 批量评分筛选结果
-    stock_list = [{"code": r.get("code", ""), "name": r.get("name", "")}
-                  for r in results if r.get("code")]
+    stock_list = [{"code": r.get("code") or r.get("代码", ""), "name": r.get("name") or r.get("名称", "")}
+                  for r in results if r.get("code") or r.get("代码")]
     if not stock_list:
-        return json.dumps({"screened": results, "scored": [], "added_to_watch": []}, ensure_ascii=False, default=str)
+        return json.dumps({"screened": len(results), "scored": [], "added_to_watch": []}, ensure_ascii=False, default=str)
+
+    # 限制评分数量
+    scan_limit = cfg.get("screening", {}).get("market_scan_limit", 30)
+    stock_list = stock_list[:scan_limit]
 
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
     run_id = f"screener_{datetime.now().strftime('%H%M%S')}"
