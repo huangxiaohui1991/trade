@@ -128,13 +128,24 @@ class AkShareMarketAdapter:
         try:
             import akshare as ak
             from datetime import datetime, timedelta
-            end = datetime.now().strftime("%Y%m%d")
-            start = (datetime.now() - timedelta(days=count + 30)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist(
-                symbol=code, period=period,
-                start_date=start, end_date=end, adjust="qfq",
-            )
-            return df if df is not None and not df.empty else None
+
+            # 适配 akshare 接口格式：沪市加 sh，深市加 sz
+            if code.startswith(("6", "9")):
+                symbol = f"sh{code}"
+            else:
+                symbol = f"sz{code}"
+
+            df = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+            if df is None or df.empty:
+                return None
+
+            # 按日期升序，取最近足够多数据
+            df = df.sort_values("date").tail(count * 2).reset_index(drop=True)
+
+            # 添加涨跌幅列（用 close 计算）
+            df["涨跌幅"] = df["close"].pct_change() * 100
+
+            return df
         except Exception:
             return None
 

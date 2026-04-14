@@ -19,6 +19,7 @@ from hermes.market.models import (
     TechnicalIndicators,
 )
 from hermes.market.store import MarketStore
+from hermes.market.indicators import compute_technical_indicators
 from hermes.strategy.models import MarketState
 
 _logger = logging.getLogger(__name__)
@@ -65,6 +66,9 @@ class MarketService:
                 return_exceptions=True,
             )
 
+            # 技术指标：从 K 线计算
+            technical = await self._get_technical(code, quote)
+
             # 异常处理
             if isinstance(quote, Exception):
                 _logger.warning(f"[collect] {code} quote failed: {quote}")
@@ -83,6 +87,7 @@ class MarketService:
                 code=code,
                 name=name or (quote.name if quote else code),
                 quote=quote,
+                technical=technical,
                 financial=fin,
                 flow=flow,
                 sentiment=sent,
@@ -248,5 +253,20 @@ class MarketService:
                     return result
             except Exception as e:
                 _logger.info(f"[sentiment] {code} provider failed: {e}")
+                continue
+        return None
+
+    async def _get_technical(self, code: str, quote: Optional[StockQuote]) -> Optional[TechnicalIndicators]:
+        """从 K 线计算技术指标。"""
+        # 优先用 market providers 的 K 线
+        for provider in self._market:
+            if not hasattr(provider, "get_kline"):
+                continue
+            try:
+                kline = await provider.get_kline(code, "daily", 120)
+                if kline is not None and not kline.empty:
+                    return compute_technical_indicators(kline, quote)
+            except Exception as e:
+                _logger.info(f"[technical] {code} provider kline failed: {e}")
                 continue
         return None
