@@ -350,7 +350,10 @@ def apply_veto(tech_data: dict[str, Any], flow_data: dict[str, Any], strategy: d
             closes = [float(c) for c in hist["收盘"].tolist()]
             from scripts.engine.stock_classifier import calc_ma20_slope
             slope = calc_ma20_slope(closes, 10)
-            if slope < -0.002:  # MA20 连续下行
+            above_ma20 = tech_data.get("above_ma20", True)
+            # 价格在 MA20 上方时，MA20 轻微下行是正常回调不过 veto
+            # 只有价格跌破 MA20 且 MA20 向下时才否决
+            if slope < -0.02 and not above_ma20:
                 veto_signals.append("ma20_trend_down")
 
     return veto_signals
