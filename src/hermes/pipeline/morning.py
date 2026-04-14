@@ -68,6 +68,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     if risk_alerts:
         reasons.extend(risk_alerts)
 
+    if signal in ("RED", "CLEAR"):
+        decision_action = "NO_TRADE"
+    elif not can_buy:
+        decision_action = "NO_TRADE"
+    elif signal == "YELLOW":
+        decision_action = "REDUCED_BUY"
+    else:
+        decision_action = "BUY_ALLOWED"
+
     ctx.obsidian.write_today_decision(
         market_signal=signal, multiplier=multiplier,
         can_buy=can_buy, holding_count=len(positions),
@@ -102,6 +111,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "market": market_state.detail.get("indices", {}),
         "positions": [{"name": p.name, "shares": p.shares, "price": p.current_price or p.avg_cost} for p in positions],
         "core_pool": core_pool[:5],
+        "decision": {
+            "action": decision_action,
+            "multiplier": multiplier,
+            "holding_count": len(positions),
+            "risk_alerts": risk_alerts,
+        },
     }
     embed = format_morning_embed(discord_data)
 

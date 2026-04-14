@@ -52,18 +52,92 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     run_scores = [e["payload"] for e in score_events if e.get("metadata", {}).get("run_id") == run_id]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
 
-    # 5. 更新 projection_candidate_pool
+    # 5. 更新 projection_candidate_pool（含降级逻辑）
+    # 读取现有 streak_days
+    existing_rows = {r["code"]: dict(r) for r in ctx.conn.execute(
+        "SELECT code, streak_days, pool_tier FROM projection_candidate_pool WHERE pool_tier = 'core'"
+    ).fetchall()}
+
     pool_entries = []
+    demoted = []
+    removed = []
     for s in run_scores:
+        code = s.get("code", "")
         total = s.get("total_score", 0)
-        pool_entries.append({
-            "code": s.get("code", ""),
-            "name": s.get("name", ""),
-            "pool_tier": "core",
-            "score": total,
-            "note": "veto" if s.get("veto_triggered") else "",
-        })
+        prev = existing_rows.get(code, {})
+        old_streak = prev.get("streak_days", 0)
+
+        # streak_days: 正数=连续达标天数, 负数=连续低分天数
+        if s.get("veto_triggered"):
+            # 一票否决 → 立即降级到观察池
+            demoted.append({"code": code, "name": s.get("name", ""), "reason": "veto"})
+            pool_entries.append({
+                "code": code, "name": s.get("name", ""),
+                "pool_tier": "watch", "score": total,
+                "streak_days": 0, "note": "veto_demoted",
+            })
+            # 删除核心池记录
+            ctx.conn.execute(
+                "DELETE FROM projection_candidate_pool WHERE code = ? AND pool_tier = 'core'", (code,)
+            )
+        elif total < 4:
+            new_streak = (old_streak - 1) if old_streak < 0 else -1
+            if new_streak <= -2:
+                # 连续2天<4 → 移出池子
+                removed.append({"code": code, "name": s.get("name", ""), "score": total})
+                ctx.conn.execute(
+                    "DELETE FROM projection_candidate_pool WHERE code = ? AND pool_tier = 'core'", (code,)
+                )
+            else:
+                pool_entries.append({
+                    "code": code, "name": s.get("name", ""),
+                    "pool_tier": "core", "score": total,
+                    "streak_days": new_streak, "note": f"low_score_streak={new_streak}",
+                })
+        elif total < 5:
+            new_streak = (old_streak - 1) if old_streak < 0 else -1
+            if new_streak <= -2:
+                # 连续2天<5 → 降级到观察池
+                demoted.append({"code": code, "name": s.get("name", ""), "reason": f"score<5 x{abs(new_streak)}d"})
+                pool_entries.append({
+                    "code": code, "name": s.get("name", ""),
+                    "pool_tier": "watch", "score": total,
+                    "streak_days": 0, "note": "demoted_from_core",
+                })
+                ctx.conn.execute(
+                    "DELETE FROM projection_candidate_pool WHERE code = ? AND pool_tier = 'core'", (code,)
+                )
+            else:
+                pool_entries.append({
+                    "code": code, "name": s.get("name", ""),
+                    "pool_tier": "core", "score": total,
+                    "streak_days": new_streak, "note": f"low_score_streak={new_streak}",
+                })
+        else:
+            # 评分正常，重置 streak
+            pool_entries.append({
+                "code": code, "name": s.get("name", ""),
+                "pool_tier": "core", "score": total,
+                "streak_days": max(old_streak + 1, 1) if old_streak >= 0 else 1,
+                "note": "veto" if s.get("veto_triggered") else "",
+            })
     ctx.projector.sync_candidate_pool(pool_entries)
+
+    # 写池子变动事件
+    for d in demoted:
+        ctx.event_store.append(
+            stream=f"strategy:{d['code']}", stream_type="strategy",
+            event_type="pool.demoted",
+            payload={"code": d["code"], "name": d.get("name", ""), "from": "core", "to": "watch", "reason": d["reason"]},
+            metadata={"run_id": run_id},
+        )
+    for r in removed:
+        ctx.event_store.append(
+            stream=f"strategy:{r['code']}", stream_type="strategy",
+            event_type="pool.removed",
+            payload={"code": r["code"], "name": r.get("name", ""), "from": "core", "score": r["score"]},
+            metadata={"run_id": run_id},
+        )
 
     # 6. Obsidian
     ctx.obsidian.write_scoring_report(run_id, run_scores)
@@ -76,6 +150,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         total = s.get("total_score", 0)
         emoji = "✅" if total >= 7 else ("🟡" if total >= 5 else "❌")
         lines.append(f"- {s.get('name', '')}({s.get('code', '')}) {emoji} {total:.1f}")
+    if demoted:
+        lines.extend(["", "### 池子变动"])
+        for d in demoted:
+            lines.append(f"- ⬇️ {d.get('name', '')}({d['code']}) 降级观察池（{d['reason']}）")
+    if removed:
+        for r in removed:
+            lines.append(f"- ❌ {r.get('name', '')}({r['code']}) 移出池子（评分 {r['score']:.1f}）")
     ctx.obsidian.write_daily_log(run_id, "\n".join(lines))
 
     # 7. Discord embed
@@ -95,5 +176,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     return {
         "scored": len(run_scores),
         "scores": run_scores,
+        "demoted": demoted,
+        "removed": removed,
         "discord_embed": embed,
     }

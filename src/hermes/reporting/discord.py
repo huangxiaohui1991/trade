@@ -88,6 +88,23 @@ def format_morning_embed(data: dict) -> dict:
     else:
         fields.append(_field("💼 持仓", "空仓", inline=False))
 
+    # 今日决策
+    decision = data.get("decision", {})
+    if decision:
+        action = decision.get("action", "")
+        action_map = {
+            "BUY_ALLOWED": "✅ 可买入",
+            "REDUCED_BUY": "🟡 减量买入",
+            "NO_TRADE": "🚫 不操作",
+        }
+        action_label = action_map.get(action, action)
+        mult = decision.get("multiplier", 0)
+        alerts = decision.get("risk_alerts", [])
+        decision_lines = [f"仓位系数 `{mult:.2f}`"]
+        if alerts:
+            decision_lines.extend([f"⚠️ {a}" for a in alerts])
+        fields.append(_field("📋 今日决策", f"**{action_label}**\n" + "\n".join(decision_lines), inline=False))
+
     # 核心池
     core = data.get("core_pool", [])
     if core:

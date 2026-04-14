@@ -347,14 +347,51 @@ def trade_trade_events(days: int = 7) -> str:
 @mcp.tool()
 @_safe
 def trade_screener(query: str = "") -> str:
-    """选股筛选。"""
+    """选股筛选 → 批量评分 → 评分≥6.5自动加入观察池。"""
     adapter = MXScreenerAdapter()
     cfg = _config_snapshot.data.get("strategy", {}) if _config_snapshot else {}
     q = query.strip() or cfg.get("screening", {}).get("mx_query", "")
     if not q:
         return json.dumps({"error": "请提供筛选条件"}, ensure_ascii=False)
     results = asyncio.run(adapter.search_stocks(q))
-    return json.dumps(results, ensure_ascii=False, default=str)
+
+    # 批量评分筛选结果
+    stock_list = [{"code": r.get("code", ""), "name": r.get("name", "")}
+                  for r in results if r.get("code")]
+    if not stock_list:
+        return json.dumps({"screened": results, "scored": [], "added_to_watch": []}, ensure_ascii=False, default=str)
+
+    config_version = _config_snapshot.version if _config_snapshot else "unknown"
+    run_id = f"screener_{datetime.now().strftime('%H%M%S')}"
+    snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
+    market_state = asyncio.run(_market_svc.collect_market_state(run_id))
+    _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
+
+    events = _event_store.query(event_type="score.calculated")
+    run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]
+    run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+
+    # 已在池中的 codes
+    existing = {r["code"] for r in _conn.execute(
+        "SELECT code FROM projection_candidate_pool"
+    ).fetchall()}
+
+    # 评分≥6.5 且不在池中 → 加入观察池
+    projector = ProjectionUpdater(_event_store, _conn)
+    added = []
+    for s in run_scores:
+        code = s.get("code", "")
+        total = s.get("total_score", 0)
+        if total >= 6.5 and code and code not in existing and not s.get("veto_triggered"):
+            projector.sync_candidate_pool([{
+                "code": code, "name": s.get("name", ""),
+                "pool_tier": "watch", "score": total,
+            }])
+            added.append({"code": code, "name": s.get("name", ""), "score": total})
+
+    return json.dumps({
+        "screened": len(results), "scored": run_scores, "added_to_watch": added,
+    }, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
