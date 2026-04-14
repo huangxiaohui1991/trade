@@ -37,6 +37,7 @@ from scripts.engine.scorer import (
 from scripts.state import load_activity_summary, load_order_snapshot, record_trade_event, upsert_order_state
 from scripts.utils.common import _safe_float, _safe_int
 from scripts.utils.config_loader import get_stocks, get_strategy
+from scripts.utils.discord_push import send_shadow_report
 from scripts.utils.logger import get_logger
 from scripts.utils.obsidian import ObsidianVault
 
@@ -783,10 +784,13 @@ def _build_shadow_position_view(raw_position: dict, risk_cfg: dict,
                raw_position.get("totalQty", raw_position.get("currentQty",
                raw_position.get("shares", 0)))))
     market_value = _safe_float(raw_position.get("value", 0)) if raw_position.get("value") else shares * price
-    pnl     = _safe_float(raw_position.get("dayProfit", raw_position.get("profit",
+    pnl     = _safe_float(raw_position.get("profit",
+                   raw_position.get("dayProfit",
                    raw_position.get("floatProfit", (price - cost) * shares))))
-    pnl_pct = float(raw_position.get("dayProfitPct", raw_position.get("profitPct",
-                   (price / cost - 1) if cost > 0 else 0.0)))  # MX dayProfitPct 已是百分比值，无需再×100
+    # MX profitPct 是累计收益率百分比（如 1.6572 = 1.66%），已含%，直接用
+    pnl_pct = float(raw_position.get("profitPct",
+                    raw_position.get("dayProfitPct",
+                    (price / cost - 1) * 100 if cost > 0 else 0.0)))
 
     trade_context = (trade_context_map or {}).get(code, {})
     open_date = _parse_date(trade_context.get("open_date"))
@@ -1043,12 +1047,19 @@ def _get_balance(_client: object = None) -> dict:
     data = result.get("data", {})
     if not isinstance(data, dict):
         data = {}
+    # MX API 的 totalProfit 字段可能为 None，改用主动计算
+    raw_total = data.get("totalProfit")
+    init_money = float(data.get("initMoney", 200000) or 200000)
+    total_assets = float(data.get("totalAssets", 0) or 0)
+    computed_profit = total_assets - init_money
+    total_profit = float(raw_total) if raw_total is not None else computed_profit
+
     return {
-        "total_assets": data.get("totalAssets", 0),
+        "total_assets": total_assets,
         "available": data.get("availBalance", 0),
         "position_value": data.get("totalPosValue", 0),
-        "total_profit": data.get("totalProfit", 0),
-        "init_money": data.get("initMoney", 200000),
+        "total_profit": total_profit,
+        "init_money": init_money,
     }
 
 
@@ -1642,6 +1653,24 @@ def generate_report() -> str:
 
     report_path = f"{vault.vault_path}/{report_relative}"
     _logger.info(f"[shadow] 报告已写入: {report_path}")
+
+    # Discord Embed 推送
+    init_money = bal.get("init_money", 200000)
+    total_assets = bal.get("total_assets", 0)
+    total_return_pct = ((total_assets / init_money) - 1) * 100 if init_money > 0 else 0
+    discord_ok, discord_err = False, ""
+    discord_ok, discord_err = send_shadow_report(
+        positions=positions,
+        balance=bal,
+        total_return_pct=total_return_pct,
+        advisory_summary=advisory_summary,
+        date_str=datetime.now().strftime("%Y-%m-%d"),
+    )
+    if discord_ok:
+        _logger.info("[shadow] Discord 推送成功")
+    else:
+        _logger.warning(f"[shadow] Discord 推送失败: {discord_err}")
+
     return report_path
 
 

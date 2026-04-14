@@ -29,7 +29,7 @@ _BASE_URL = os.environ.get(
     "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"
 ).rstrip("/")
 
-_APIKEY = os.environ.get("MINIMAX_APIKEY", "")
+_APIKEY = os.environ.get("MINIMAX_APIKEY", "").strip().strip()
 _MODEL = "mini-max-claude"
 
 # 系统 prompt：A股舆情分析师

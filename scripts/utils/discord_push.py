@@ -186,6 +186,8 @@ DISCORD_COLORS = {
     "hk_alert":  0x880E4F,  # 深红 — 港股告警
     "hk_summary":0x4A148C,  # 紫黑 — 港股汇总
     "trade_fill": 0x1565C0,  # 蓝色 — 实盘成交确认
+    "scoring":    0x00838F,  # 青色 — 核心池评分
+    "shadow":     0x4E342E,  # 棕色 — 模拟盘报告
     "info":      0x37474F,  # 灰蓝 — 通用信息
 }
 
@@ -870,6 +872,104 @@ def _build_weekly_embeds(data: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Embed Builder — 核心池评分
+# ---------------------------------------------------------------------------
+
+def _build_scoring_embeds(scores: list, date_str: str = "") -> list[dict]:
+    """
+    核心池评分报告 → Discord Embed 卡片。
+
+    scores 元素: {name, code, total_score, technical_score, fundamental_score,
+                  flow_score, sentiment_score, data_quality, data_missing_fields,
+                  veto_signals, ...}
+    """
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    ts = datetime.now().strftime("%H:%M")
+    iso_ts = _now_iso()
+
+    weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    weekday = weekday_names[dt.weekday()]
+
+    # 分类：✅可买入 / 🟡观察 / ❌规避
+    buy_list, watch_list, avoid_list = [], [], []
+    for s in scores:
+        from scripts.engine.scorer import get_recommendation
+        rec = get_recommendation(s)
+        s["_rec"] = rec
+        if "✅" in rec:
+            buy_list.append(s)
+        elif "🟡" in rec or "🟠" in rec:
+            watch_list.append(s)
+        else:
+            avoid_list.append(s)
+
+    fields: list[dict] = []
+
+    # 综合统计
+    total = len(scores)
+    buy_n = len(buy_list)
+    watch_n = len(watch_list)
+    avg = sum(float(s.get("total_score", 0) or 0) for s in scores) / total if total else 0
+
+    stats = (
+        f"✅ **{buy_n}** 可买入  "
+        f"🟡 **{watch_n}** 观察  "
+        f"❌ **{total - buy_n - watch_n}** 规避  "
+        f"  平均 **{avg:.1f}** 分"
+    )
+    fields.append({"name": "📊 核心池统计", "value": stats, "inline": False})
+
+    def _score_rows(items: list, emoji: str, label: str) -> list:
+        rows = []
+        for s in items:
+            name = s.get("name", "")
+            code = s.get("code", "")
+            total_s = s.get("total_score", 0)
+            tech = s.get("technical_score", 0)
+            fin = s.get("fundamental_score", 0)
+            flow = s.get("flow_score", 0)
+            sent = s.get("sentiment_score", 0)
+            dq = s.get("data_quality", "ok")
+            dq_note = " ⚠️数据" if dq != "ok" else ""
+            rows.append(
+                f"{emoji} **{name}**({code}) "
+                f"技术{tech:.1f}/基本面{fin:.1f}/资金{flow:.1f}/舆情{sent:.1f} "
+                f"**总分{total_s:.1f}**{dq_note}"
+            )
+        return rows
+
+    if buy_list:
+        fields.append({"name": "✅ 可买入", "value": "\n".join(_score_rows(buy_list, "✅", "可买入")) or "—", "inline": False})
+    if watch_list:
+        fields.append({"name": "🟡 观察", "value": "\n".join(_score_rows(watch_list, "🟡", "观察")) or "—", "inline": False})
+    if avoid_list:
+        # 避免过长，只展示前5
+        for s in avoid_list[:5]:
+            fields.append({
+                "name": f"❌ {s.get('name', '')}({s.get('code', '')})",
+                "value": f"总分 **{s.get('total_score', 0):.1f}**  {_score_rows([s], '❌', '')[0]}",
+                "inline": False,
+            })
+        if len(avoid_list) > 5:
+            fields.append({"name": "…", "value": f"另有 {len(avoid_list) - 5} 只评分 < 5", "inline": False})
+
+    # 颜色：综合评分越高越绿
+    score_color = 0x2E7D32 if avg >= 7 else (0xFB8C00 if avg >= 5 else 0xC62828)
+
+    return [_build_embed(
+        title=f"🎯 核心池评分 — {date_str}（{weekday}）{ts}",
+        description=f"评分 {total} 只 · 平均 **{avg:.1f}** 分",
+        color=score_color,
+        fields=fields,
+        footer=_footer("Hermes · core_pool_scoring", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Embed Builder — 舆情提醒
 # ---------------------------------------------------------------------------
 
@@ -1353,6 +1453,99 @@ def send_evening_report(data: dict) -> Tuple[bool, str]:
       tomorrow_plan: [str, ...]
     """
     embeds = _build_evening_embeds(data)
+    return _post_embed_to_discord(embeds)
+
+
+def send_scoring_report(scores: list, date_str: str = "") -> Tuple[bool, str]:
+    """
+    核心池评分报告 → Discord Rich Embed。
+
+    scores: batch_score() 返回的评分列表
+    date_str: 可选，格式 YYYY-MM-DD
+    """
+    embeds = _build_scoring_embeds(scores, date_str)
+    return _post_embed_to_discord(embeds)
+
+
+def send_shadow_report(
+    positions: list,
+    balance: dict,
+    total_return_pct: float,
+    advisory_summary: dict,
+    date_str: str = "",
+) -> Tuple[bool, str]:
+    """
+    模拟盘持仓报告 → Discord Rich Embed。
+
+    positions: get_status()["positions"]
+    balance: get_status()["balance"]
+    total_return_pct: 总体收益率（%）
+    advisory_summary: get_status()["advisory_summary"]
+    """
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    ts = datetime.now().strftime("%H:%M")
+    iso_ts = _now_iso()
+
+    init = balance.get("init_money", 200000)
+    total = balance.get("total_assets", 0)
+    available = balance.get("available", 0)
+    pos_value = balance.get("position_value", 0)
+    total_profit = balance.get("total_profit", 0)
+
+    fields: list[dict] = []
+
+    # 账户概览
+    fields.append({
+        "name": "💰 账户概览",
+        "value": (
+            f"总资产 **¥{total:,.0f}**  "
+            f"可用 **¥{available:,.0f}**\n"
+            f"持仓市值 **¥{pos_value:,.0f}**  "
+            f"总收益 **¥{total_profit:,.0f}**（{total_return_pct:+.2f}%）"
+        ),
+        "inline": False,
+    })
+
+    # 持仓明细
+    if positions:
+        pos_lines = []
+        for p in positions:
+            pnl = p.get("pnl_pct", 0)
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            pos_lines.append(
+                f"{emoji} **{p['name']}**({p['code']}) "
+                f"{p['shares']}股 @ ¥{p['cost']:.2f} "
+                f"→ ¥{p['price']:.2f} {pnl:+.1f}%"
+            )
+        fields.append({"name": "📋 持仓明细", "value": "\n".join(pos_lines), "inline": False})
+    else:
+        fields.append({"name": "📋 持仓明细", "value": "空仓", "inline": False})
+
+    # 风控提示
+    adv = advisory_summary.get("positions", [])
+    if adv:
+        adv_lines = []
+        for item in adv:
+            drawdown = item.get("drawdown_pct", 0)
+            adv_lines.append(
+                f"⚠️ **{item['name']}**({item['code']}) "
+                f"回撤 **{drawdown*100:.1f}%**  "
+                f"{item.get('summary', '')}"
+            )
+        fields.append({"name": "🛡️ 风控提示", "value": "\n".join(adv_lines), "inline": False})
+
+    color = 0x2E7D32 if total_return_pct >= 0 else 0xC62828
+
+    embeds = [_build_embed(
+        title=f"📈 模拟盘报告 — {date_str} {ts}",
+        description=f"初始 ¥{init:,.0f} → 当前 ¥{total:,.0f}（{total_return_pct:+.2f}%）",
+        color=color,
+        fields=fields,
+        footer=_footer("Hermes · shadow_trade", ts),
+        author_name="Hermes 交易系统",
+        timestamp=iso_ts,
+    )]
     return _post_embed_to_discord(embeds)
 
 

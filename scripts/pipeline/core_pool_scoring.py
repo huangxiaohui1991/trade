@@ -34,6 +34,7 @@ from scripts.engine.scorer import batch_score, get_recommendation, split_veto_si
 from scripts.state import save_candidate_snapshot_history
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks
+from scripts.utils.discord_push import send_scoring_report
 from scripts.utils.logger import get_logger
 from scripts.utils.pool_manager import build_pool_snapshot_entries, load_pool_snapshot, save_pool_snapshot
 from scripts.utils.runtime_state import update_pipeline_state
@@ -201,10 +202,20 @@ def run() -> list:
         except Exception as e:
             _logger.warning(f"  更新池子投影失败: {e}")
 
-        _logger.info(">> 生成个股评分解释...")
+        _logger.info(f">> 生成个股评分解释...")
         explain_paths = vault.write_stock_explanations(scores, scope="all")
         if explain_paths:
             _logger.info(f"  已写入 {len(explain_paths)} 个个股解释文件")
+
+        # Discord Embed 推送
+        _logger.info(">> 推送 Discord 评分卡片...")
+        discord_ok, discord_err = False, ""
+        if scores:
+            discord_ok, discord_err = send_scoring_report(scores, date_str)
+            if discord_ok:
+                _logger.info("  Discord 推送成功")
+            else:
+                _logger.warning(f"  Discord 推送失败: {discord_err}")
 
         _logger.info(f"[SCORING] 评分完成，共 {len(scores)} 只")
 
@@ -218,6 +229,8 @@ def run() -> list:
                 "snapshot_path": snapshot_path,
                 "history_group_id": history_group_id,
                 "pool_snapshot_summary": snapshot_meta.get("summary", {}),
+                "discord_ok": discord_ok,
+                "discord_error": discord_err,
             },
             date_str,
         )
