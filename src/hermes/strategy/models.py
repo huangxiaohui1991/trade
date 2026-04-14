@@ -123,6 +123,32 @@ class MarketState:
 
 
 @dataclass(frozen=True)
+class StyleResult:
+    """风格判定结果。"""
+    style: Style
+    confidence: float
+    metrics: dict = field(default_factory=dict)
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class EntrySignal:
+    """入场信号。"""
+    code: str
+    signal_type: str  # "golden_cross" | "pullback" | "trend"
+    triggered: bool = False
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class SwitchResult:
+    """风格切换检测结果。"""
+    should_switch: bool = False
+    trigger: str = ""
+    new_style: Style = Style.SLOW_BULL
+
+
+@dataclass(frozen=True)
 class DecisionIntent:
     code: str
     name: str

@@ -58,10 +58,17 @@ class ConfigRegistry:
 
     def freeze(self, conn: sqlite3.Connection) -> ConfigSnapshot:
         """
-        Load all config files, merge profile overlay, compute hash,
+        Load all config files, merge profile overlay, validate, compute hash,
         persist to config_versions, return frozen snapshot.
         """
         data = self._load_merged()
+
+        # JSON Schema validation (best-effort)
+        errors = self._validate(data)
+        if errors:
+            import logging
+            logging.getLogger(__name__).warning(f"Config validation warnings: {errors}")
+
         config_json = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
         config_hash = hashlib.sha256(config_json.encode()).hexdigest()[:16]
 
@@ -102,6 +109,55 @@ class ConfigRegistry:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def load_and_validate(self) -> tuple[dict, list[str]]:
+        """Load config and validate against schema. Returns (data, errors)."""
+        data = self._load_merged()
+        errors = self._validate(data)
+        return data, errors
+
+    def _validate(self, data: dict) -> list[str]:
+        """Validate config against built-in schema rules. Returns list of error messages."""
+        errors: list[str] = []
+        strategy = data.get("strategy", {})
+        if not strategy:
+            errors.append("strategy config missing")
+            return errors
+
+        # Scoring weights must sum to 10
+        weights = strategy.get("scoring", {}).get("weights", {})
+        if weights:
+            total = sum(weights.values())
+            if total != 10:
+                errors.append(f"scoring weights sum to {total}, expected 10")
+
+        # Thresholds: buy > watch > reject
+        thresholds = strategy.get("scoring", {}).get("thresholds", {})
+        if thresholds:
+            buy = thresholds.get("buy", 0)
+            watch = thresholds.get("watch", 0)
+            reject = thresholds.get("reject", 0)
+            if not (buy > watch > reject):
+                errors.append(f"thresholds must be buy({buy}) > watch({watch}) > reject({reject})")
+
+        # Risk: stop_loss must be positive
+        risk = strategy.get("risk", {})
+        for style in ("slow_bull", "momentum"):
+            sl = risk.get(style, {}).get("stop_loss", 0)
+            if sl and sl <= 0:
+                errors.append(f"risk.{style}.stop_loss must be positive, got {sl}")
+
+        # Position limits
+        pos = risk.get("position", {})
+        if pos:
+            if pos.get("single_max", 0) > pos.get("total_max", 1):
+                errors.append("position.single_max > position.total_max")
+
+        return errors
 
     # ------------------------------------------------------------------
     # Internal

@@ -17,7 +17,7 @@ from hermes.platform.events import EventStore
 from hermes.platform.config import ConfigRegistry
 from hermes.platform.runs import RunJournal
 
-app = typer.Typer(name="hermes", help="Hermes 交易系统 CLI")
+app = typer.Typer(name="trade", help="Hermes 交易系统 CLI")
 db_app = typer.Typer(name="db", help="数据库管理")
 config_app = typer.Typer(name="config", help="配置管理")
 runs_app = typer.Typer(name="runs", help="运行记录")
@@ -38,6 +38,20 @@ def db_init(
     """初始化数据库（创建所有表）"""
     path = init_db(db_path)
     typer.echo(f"数据库已初始化: {path}")
+
+
+@db_app.command("migrate")
+def db_migrate(
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+):
+    """运行数据库 migration（创建缺失的表，更新 schema 版本）"""
+    path = init_db(db_path)
+    conn = connect(db_path)
+    try:
+        version = get_schema_version(conn)
+        typer.echo(f"Migration 完成: schema v{version} @ {path}")
+    finally:
+        conn.close()
 
 
 @db_app.command("status")
@@ -189,6 +203,151 @@ def events_count(
         typer.echo(f"Events: {n}")
     finally:
         conn.close()
+
+
+# ── score commands ─────────────────────────────────────────────
+
+@app.command("score")
+def score_stock(
+    code: str = typer.Argument(..., help="股票代码"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+):
+    """单股四维评分（V2 纯函数引擎）"""
+    import asyncio
+    conn = connect(db_path)
+    try:
+        from hermes.market.service import MarketService
+        from hermes.market.adapters import AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter, MXMarketAdapter, MXSentimentAdapter
+        from hermes.market.store import MarketStore
+        from hermes.strategy.models import ScoringWeights
+        from hermes.strategy.scorer import Scorer
+
+        store = MarketStore(conn)
+        market_svc = MarketService(
+            market_providers=[MXMarketAdapter(), AkShareMarketAdapter()],
+            financial_providers=[AkShareFinancialAdapter()],
+            flow_providers=[AkShareFlowAdapter()],
+            sentiment_providers=[MXSentimentAdapter()],
+            store=store,
+        )
+
+        registry = ConfigRegistry()
+        try:
+            snapshot = registry.freeze(conn)
+            cfg = snapshot.data.get("strategy", {})
+        except Exception:
+            cfg = {}
+
+        weights_cfg = cfg.get("scoring", {}).get("weights", {})
+        scorer = Scorer(
+            weights=ScoringWeights(
+                technical=weights_cfg.get("technical", 3),
+                fundamental=weights_cfg.get("fundamental", 2),
+                flow=weights_cfg.get("flow", 2),
+                sentiment=weights_cfg.get("sentiment", 3),
+            ),
+            veto_rules=cfg.get("scoring", {}).get("veto", []),
+            entry_cfg=cfg.get("entry_signal", {}),
+        )
+
+        snap = asyncio.run(market_svc.collect_snapshot(code))
+        result = scorer.score(snap)
+
+        typer.echo(f"{result.name}({result.code}): 总分 {result.total:.1f}")
+        for d in result.dimensions:
+            typer.echo(f"  {d.name}={d.score:.1f}/{d.max_score:.0f}  {d.detail}")
+        typer.echo(f"  风格={result.style.value}  入场信号={'✅' if result.entry_signal else '❌'}")
+        if result.veto_triggered:
+            typer.echo(f"  ❌ 否决: {','.join(result.hard_veto)}")
+    except Exception as e:
+        typer.echo(f"评分失败: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        conn.close()
+
+
+@app.command("status")
+def portfolio_status(
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+):
+    """持仓概览"""
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        from hermes.execution.service import ExecutionService
+        svc = ExecutionService(store, conn)
+        portfolio = svc.get_portfolio()
+        positions = portfolio.get("positions", [])
+        if not positions:
+            typer.echo("当前无持仓")
+            return
+        typer.echo(f"持仓 {portfolio['holding_count']} 只:")
+        for p in positions:
+            cost = p["avg_cost_cents"] / 100
+            typer.echo(f"  {p['code']} {p['name']}  {p['shares']}股  成本{cost:.2f}  风格={p['style']}")
+    finally:
+        conn.close()
+
+
+@app.command("mcp")
+def run_mcp():
+    """启动 MCP Server（stdio transport）"""
+    from hermes.platform.mcp_server import main as mcp_main
+    mcp_main()
+
+
+@app.command("run-pipeline")
+def run_pipeline(
+    pipeline_type: str = typer.Argument(..., help="morning | evening | scoring | weekly"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+):
+    """运行指定 pipeline（完整流程，带幂等检查）"""
+    from hermes.pipeline.context import build_context
+
+    ctx = build_context(db_path)
+    try:
+        if ctx.run_journal.is_completed_today(pipeline_type):
+            typer.echo(f"⏭️  {pipeline_type} 今日已完成，跳过")
+            return
+
+        run_id = ctx.run_journal.start_run(pipeline_type, ctx.config_version)
+        typer.echo(f"▶️  {pipeline_type} 开始 (run_id={run_id})")
+
+        try:
+            if pipeline_type == "morning":
+                from hermes.pipeline.morning import run
+                result = run(ctx, run_id)
+                typer.echo(f"  大盘={result['signal']} 持仓={result['positions']} 风控={len(result['risk_alerts'])}条")
+
+            elif pipeline_type == "scoring":
+                from hermes.pipeline.scoring import run
+                result = run(ctx, run_id)
+                typer.echo(f"  评分 {result['scored']} 只股票")
+
+            elif pipeline_type == "evening":
+                from hermes.pipeline.evening import run
+                result = run(ctx, run_id)
+                typer.echo(f"  大盘={result['signal']} 持仓={result['positions']} 风控={len(result['risk_alerts'])}条")
+
+            elif pipeline_type == "weekly":
+                from hermes.pipeline.weekly import run
+                result = run(ctx, run_id)
+                typer.echo(f"  {result['buy_count']}买 {result['sell_count']}卖 胜率{result['win_rate']:.0%}")
+
+            else:
+                ctx.run_journal.fail_run(run_id, f"Unknown pipeline: {pipeline_type}")
+                typer.echo(f"❌ Unknown pipeline: {pipeline_type}", err=True)
+                raise typer.Exit(1)
+
+            ctx.run_journal.complete_run(run_id, artifacts={"result": "ok"})
+            typer.echo(f"✅ {pipeline_type} 完成")
+
+        except Exception as e:
+            ctx.run_journal.fail_run(run_id, str(e))
+            typer.echo(f"❌ {pipeline_type} 失败: {e}", err=True)
+            raise typer.Exit(1)
+    finally:
+        ctx.conn.close()
 
 
 def main():

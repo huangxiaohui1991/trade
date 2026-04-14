@@ -1,0 +1,120 @@
+"""
+pipeline/evening.py — 收盘报告
+
+流程：
+1. 抓大盘信号
+2. 读持仓 + 检查风控（止损/止盈/时间止损）
+3. 生成收盘报告 → report_artifacts
+4. 写 Obsidian（日志 + 持仓概览）
+5. 格式化 Discord embed
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import date
+
+from hermes.pipeline.context import PipelineContext
+from hermes.risk.rules import check_exit_signals, get_risk_params
+from hermes.strategy.models import Style
+from hermes.reporting.discord import format_evening_embed, format_stop_alert_embed
+
+_logger = logging.getLogger(__name__)
+
+
+def run(ctx: PipelineContext, run_id: str) -> dict:
+    """执行收盘报告 pipeline。"""
+
+    # 1. 大盘信号
+    market_state = asyncio.run(ctx.market_svc.collect_market_state(run_id))
+    signal = market_state.signal.value
+
+    # 2. 持仓 + 风控
+    positions = ctx.exec_svc.get_positions()
+    risk_alerts = []
+    stop_embeds = []
+
+    for pos in positions:
+        style = Style(pos.style) if pos.style in ("slow_bull", "momentum") else Style.UNKNOWN
+        params = get_risk_params(style)
+        try:
+            entry_date = date.fromisoformat(pos.entry_date) if pos.entry_date else date.today()
+        except ValueError:
+            entry_date = date.today()
+
+        signals = check_exit_signals(
+            code=pos.code, avg_cost=pos.avg_cost,
+            current_price=pos.current_price or pos.avg_cost,
+            entry_date=entry_date, today=date.today(),
+            highest_since_entry=pos.highest_since_entry_cents / 100 if pos.highest_since_entry_cents else pos.avg_cost,
+            entry_day_low=pos.entry_day_low_cents / 100 if pos.entry_day_low_cents else pos.avg_cost,
+            params=params,
+        )
+
+        # 写风控事件
+        for s in signals:
+            ctx.risk_svc._event_store.append(
+                stream=f"risk:{pos.code}", stream_type="risk",
+                event_type=f"risk.{s.signal_type}_triggered",
+                payload={"code": pos.code, "signal_type": s.signal_type,
+                         "trigger_price": s.trigger_price, "current_price": s.current_price,
+                         "description": s.description, "urgency": s.urgency},
+                metadata={"run_id": run_id},
+            )
+            risk_alerts.append(f"⚠️ {pos.name}({pos.code}): {s.description}")
+            stop_embeds.append(format_stop_alert_embed({
+                "code": pos.code, "signal_type": s.signal_type,
+                "description": s.description, "urgency": s.urgency,
+            }))
+
+    # 3. 收盘报告
+    report = ctx.reporter.generate_evening_report(run_id)
+
+    # 4. Obsidian
+    ctx.obsidian.write_portfolio_status()
+
+    log_lines = [f"## 收盘报告", "", f"大盘信号: **{signal}**", ""]
+    if positions:
+        log_lines.append(f"持仓 {len(positions)} 只")
+        for p in positions:
+            pnl_pct = ((p.current_price or p.avg_cost) - p.avg_cost) / p.avg_cost * 100 if p.avg_cost else 0
+            emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            log_lines.append(f"- {emoji} {p.name}({p.code}) {p.shares}股 盈亏 {pnl_pct:+.1f}%")
+    else:
+        log_lines.append("当前空仓")
+    if risk_alerts:
+        log_lines.extend(["", "### 风控触发"] + risk_alerts)
+    ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
+
+    # 5. Discord embed
+    discord_data = {
+        "date": date.today().isoformat(),
+        "market": market_state.detail.get("indices", {}),
+        "positions": [{
+            "name": p.name, "shares": p.shares,
+            "pnl_pct": ((p.current_price or p.avg_cost) - p.avg_cost) / p.avg_cost * 100 if p.avg_cost else 0,
+        } for p in positions],
+        "alerts": risk_alerts,
+    }
+    embed = format_evening_embed(discord_data)
+
+    _logger.info(f"[evening] 完成: {len(positions)} 持仓, {len(risk_alerts)} 风控触发")
+
+    # 6. Discord 推送
+    try:
+        from hermes.reporting.discord_sender import send_embed
+        ok, err = send_embed(embed)
+        if not ok:
+            _logger.warning(f"[evening] Discord 推送失败: {err}")
+        # 止损告警单独推送
+        for se in stop_embeds:
+            send_embed(se, content="⚠️ 风控告警")
+    except Exception as e:
+        _logger.warning(f"[evening] Discord 推送异常: {e}")
+
+    return {
+        "signal": signal, "positions": len(positions),
+        "risk_alerts": risk_alerts, "stop_embeds": stop_embeds,
+        "discord_embed": embed,
+    }

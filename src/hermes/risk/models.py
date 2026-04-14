@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
+from typing import Optional, List
 
 from hermes.strategy.models import Style
 
@@ -46,3 +46,33 @@ class RiskBreach:
     current_value: float
     limit_value: float
     description: str
+
+
+@dataclass(frozen=True)
+class PortfolioLimits:
+    """组合风控阈值。"""
+    daily_loss_limit_pct: float = 0.03
+    consecutive_loss_days_limit: int = 2
+    cooldown_days: int = 2
+    max_single_position_warn_pct: float = 0.25
+    max_sector_exposure_warn_pct: float = 0.40
+
+    def to_dict(self) -> dict:
+        return {
+            "daily_loss_limit_pct": self.daily_loss_limit_pct,
+            "consecutive_loss_days_limit": self.consecutive_loss_days_limit,
+            "cooldown_days": self.cooldown_days,
+            "max_single_position_warn_pct": self.max_single_position_warn_pct,
+            "max_sector_exposure_warn_pct": self.max_sector_exposure_warn_pct,
+        }
+
+
+@dataclass(frozen=True)
+class RiskAssessment:
+    """风控评估结果。"""
+    code: str
+    exit_signals: list[ExitSignal] = field(default_factory=list)
+    portfolio_breaches: list[RiskBreach] = field(default_factory=list)
+    position_size: Optional[PositionSize] = None
+    blocked: bool = False
+    block_reason: str = ""

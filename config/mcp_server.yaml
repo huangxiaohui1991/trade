@@ -1,0 +1,35 @@
+# Hermes MCP Server 配置
+#
+# 启动方式：
+#   hermes mcp
+#   或: python -m hermes.platform.mcp_server
+#
+# 外部 Agent 连接配置示例（放到 Agent 自己的 MCP 配置中）：
+#   {
+#     "mcpServers": {
+#       "hermes-trade": {
+#         "command": "/path/to/trade/.venv/bin/python",
+#         "args": ["-m", "hermes.platform.mcp_server"],
+#         "env": { "PYTHONPATH": "src:." }
+#       }
+#     }
+#   }
+
+server:
+  name: hermes-trade
+  transport: stdio
+
+# 查询类 tools 自动批准（无副作用）
+auto_approve:
+  - trade_market_signal
+  - trade_portfolio
+  - trade_pool_status
+  - trade_score_history
+  - trade_trade_events
+  - trade_check_risk
+  - trade_check_portfolio_risk
+
+# 需要确认的 tools（有副作用）
+require_confirm:
+  - trade_run_pipeline
+  - trade_backtest

@@ -86,3 +86,17 @@ class StockSnapshot:
     flow: Optional[FundFlow] = None
     sentiment: Optional[SentimentData] = None
     kline: Optional[pd.DataFrame] = None
+
+
+@dataclass(frozen=True)
+class IndexQuote:
+    """指数行情。"""
+    symbol: str
+    name: str
+    price: float = 0.0
+    change_pct: float = 0.0
+    ma20: float = 0.0
+    ma60: float = 0.0
+    above_ma20: bool = False
+    below_ma60_days: int = 0
+    timestamp: Optional[datetime] = None

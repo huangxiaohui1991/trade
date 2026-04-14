@@ -1,0 +1,19 @@
+# Hermes V2 crontab
+#
+# 安装：crontab -e，粘贴以下内容（调整 REPO_ROOT）
+
+REPO_ROOT="/Users/huangxiaohui/Documents/workspace/trade"
+TRADE="$REPO_ROOT/bin/trade"
+LOG_DIR="$REPO_ROOT/data"
+
+# 盘前摘要 08:25
+25 8 * * 1-5 $TRADE run-pipeline morning >> $LOG_DIR/cron_morning.log 2>&1
+
+# 收盘报告 15:35
+35 15 * * 1-5 $TRADE run-pipeline evening >> $LOG_DIR/cron_evening.log 2>&1
+
+# 核心池评分 15:40
+40 15 * * 1-5 $TRADE run-pipeline scoring >> $LOG_DIR/cron_scoring.log 2>&1
+
+# 周报 周日 20:00
+0 20 * * 0 $TRADE run-pipeline weekly >> $LOG_DIR/cron_weekly.log 2>&1
