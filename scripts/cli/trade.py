@@ -490,6 +490,28 @@ def order_command(action: str, args) -> dict:
             },
         })
 
+        # 2b. 同步写入当日日志（与 evening._backfill_today_trades 格式一致）
+        event_date_str = event_date or datetime.now().strftime("%Y-%m-%d")
+        try:
+            vault = ObsidianVault()
+            journal_rel = vault.get_journal_path(event_date_str)
+            journal_full = Path(vault.vault_path) / journal_rel
+            content = journal_full.read_text(encoding="utf-8") if journal_full.exists() else ""
+            time_str = now_ts_str[11:16]
+            action_str = "买入" if side == "buy" else "卖出"
+            amount_val = round(price * shares, 2)
+            trade_type = f"MANUAL_FILL_{side.upper()}"
+            row = (f"| {time_str} | {name or code} | {action_str} | ¥{price:.2f} "
+                   f"| {shares} | ¥{amount_val:,.0f} | {trade_type} |")
+            empty_placeholder = "|  |  |  |  |  |  | 首次买入/加仓/止盈/止损 |"
+            if empty_placeholder in content:
+                content = content.replace(empty_placeholder, row)
+            else:
+                content = content + "\n" + row
+            vault.write(journal_rel, content)
+        except Exception as journal_exc:
+            LOGGER.warning(f"[order fill] journal write failed: {journal_exc}")
+
         # 3. 持仓重建（实盘 scope 才需要）
         positions_synced = False
         if scope == PRIMARY_SCOPE:
@@ -1988,14 +2010,7 @@ def status_today(sync_state: bool = True) -> dict:
         "pool_snapshot": pool_snapshot,
         "market_snapshot": market_snapshot,
     })
-    try:
-        vault = ObsidianVault()
-        vault.write_account_overview(portfolio_snapshot, paper_portfolio_snapshot)
-        vault.write_today_decision(today_decision)
-        vault.write_signal_snapshot(today.get("date", datetime.now().strftime("%Y-%m-%d")))
-        vault.write_candidate_pool(today.get("date", datetime.now().strftime("%Y-%m-%d")))
-    except Exception:
-        pass
+    # vault 写入由各自 pipeline 负责（evening/scoring/stock_screener），不在此处重复
     pipelines = today.get("pipelines", {})
     normalized = {}
     for name, payload in pipelines.items():

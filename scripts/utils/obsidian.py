@@ -135,25 +135,27 @@ class ObsidianVault:
         with open(full_path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    def write(self, relative_path: str, content: str) -> None:
+    def write(self, relative_path: str, content: str, append: bool = False) -> None:
         """
-        写文件（自动备份原文件）
+        写文件（append=False 时自动备份原文件）
 
         Args:
             relative_path: 相对于 vault 根目录的路径
             content: 文件内容
+            append: 若为 True，则追加到文件末尾（不备份）；若为 False，则覆盖并备份
         """
         full_path = self._full_path(relative_path)
 
         # 确保目录存在
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
-        # 备份原文件
-        self._backup(full_path)
-
-        # 写入新内容
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        if append:
+            with open(full_path, 'a', encoding='utf-8') as f:
+                f.write(content)
+        else:
+            self._backup(full_path)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
 
     @staticmethod
     def _fmt_currency(value: Optional[Union[float, int, str]]) -> str:
@@ -1199,13 +1201,13 @@ class ObsidianVault:
             "---",
             "",
             f"> 本页由 `render_candidate_pool()` 自动投影生成。",
-            f"> 数据来源: pool_snapshot_history（近 {TREND_DAYS} 天趋势）",
+            f"> 数据来源: 筛选结果_综合_*.md（近 {TREND_DAYS} 天趋势）",
         ])
         return "\n".join(lines)
 
     def write_candidate_pool(self, snapshot_date: str) -> str:
         """
-        写入候选池总览。从 SQLite 加载近期评分历史并渲染。
+        写入候选池总览。直接从评分报告 md 文件读取近 5 天评分历史。
 
         Args:
             snapshot_date: 日期字符串，格式 YYYY-MM-DD
@@ -1213,31 +1215,43 @@ class ObsidianVault:
         Returns:
             写入文件的绝对路径
         """
-        from scripts.state.service import (
-            load_pool_snapshot_history,
-            load_candidate_snapshot_history,
-        )
-        import sqlite3
+        import re
+        from datetime import timedelta
+        from scripts.state.service import load_pool_snapshot_history
 
-        # 当前池条目
+        # 当前池条目（从 SQLite，pool entries 通常可靠）
         pool_bundle = load_pool_snapshot_history(snapshot_date=snapshot_date, limit=1)
         pool_latest = pool_bundle.get("latest", {}) or {}
         entries = pool_latest.get("entries", []) or []
 
-        # 近 5 天评分历史
+        # 近 5 天评分历史（从 md 文件，而非 SQLite candidate_snapshot_history）
         TREND_DAYS = 5
         score_history = []
         for days_ago in range(TREND_DAYS):
-            from datetime import timedelta
             date_offset = datetime.now() - timedelta(days=days_ago)
             date_str = date_offset.strftime("%Y-%m-%d")
-            bundle = load_candidate_snapshot_history(snapshot_date=date_str, limit=1)
-            latest = bundle.get("latest", {}) or {}
-            if latest:
-                score_history.append({
-                    "snapshot_date": date_str,
-                    "candidates": latest.get("candidates", []) or [],
-                })
+            date_glob = date_offset.strftime("%Y%m%d")
+            # 找当天最近的综合报告
+            pattern = f"筛选结果_综合_{date_glob}_*.md"
+            report_dir = os.path.join(self.vault_path, self.screening_results_dir)
+            candidates = []
+            try:
+                matches = sorted(Path(report_dir).glob(pattern))
+                if matches:
+                    content = matches[-1].read_text(encoding="utf-8")
+                    # 解析 markdown 表格：| # | 股票 | 代码 | 四维总分 | ... |
+                    for line in content.splitlines():
+                        m = re.match(r"\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*(\d{6})\s*\|\s*\*\*?([\d.]+)\*?\*\*?\s*\|", line.strip())
+                        if m:
+                            name, code, score = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+                            try:
+                                candidates.append({"code": code, "name": name, "total_score": float(score)})
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
+            if candidates:
+                score_history.append({"snapshot_date": date_str, "candidates": candidates})
 
         content = self.render_candidate_pool(entries, score_history)
         relative_path = self.get_candidate_pool_path()

@@ -150,11 +150,10 @@ def _log_trade(action: str, code: str, name: str, shares: int,
         )
         vault.write(log_relative, header)
 
-    # 追加一行
+    # 追加一行（append=True 不触发备份，保持追加写入的原子性）
     reason_text = f"[{reason_code}] {reason}".strip() if reason_code else reason
     line = f"| {now} | {action} | {name} | {code} | {shares} | ¥{price:.2f} | ¥{amount:,.0f} | {reason_text} |\n"
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(line)
+    vault.write(log_relative, line, append=True)
 
     try:
         side = "buy" if "买" in action else "sell" if "卖" in action else action.lower()
