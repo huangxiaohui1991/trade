@@ -1109,7 +1109,9 @@ def upsert_order_state(order: dict, conn: Optional[sqlite3.Connection] = None) -
                 _json_dumps(payload["metadata"]),
             ),
         )
-        return {**payload, "db_path": str(_db_path())}
+        # Re-fetch so we always return the real DB row id (existing or newly inserted)
+        row_id = (_load_order_row(conn, external_id) or {}).get("id") if external_id else None
+        return {**payload, "id": row_id, "db_path": str(_db_path())}
     finally:
         if own_conn:
             context.__exit__(None, None, None)
