@@ -1,0 +1,171 @@
+"""Tests for strategy/scorer.py — pure function scoring"""
+
+import pytest
+
+from hermes.market.models import (
+    FinancialReport,
+    FundFlow,
+    SentimentData,
+    StockQuote,
+    StockSnapshot,
+    TechnicalIndicators,
+)
+from hermes.strategy.models import DataQuality, ScoringWeights, Style
+from hermes.strategy.scorer import Scorer
+
+
+def _make_snapshot(**overrides) -> StockSnapshot:
+    """Build a StockSnapshot with sensible defaults."""
+    tech = TechnicalIndicators(
+        ma5=15.0, ma10=14.5, ma20=14.0, ma60=13.0,
+        above_ma20=True, volume_ratio=1.8, rsi=55.0,
+        golden_cross=True, ma20_slope=0.01,
+        momentum_5d=3.0, daily_volatility=0.025,
+        deviation_rate=2.0, change_pct=1.5,
+    )
+    quote = StockQuote(
+        code="002138", name="双环传动", price=15.0,
+        open=14.8, high=15.2, low=14.7, close=15.0,
+        volume=5000000, amount=7.5e8, change_pct=1.5,
+    )
+    fin = FinancialReport(roe=12.0, revenue_growth=15.0,
+                          operating_cash_flow=1e8, pe_ttm=25.0)
+    flow = FundFlow(net_inflow_1d=6e8, northbound_net_positive=True)
+    sent = SentimentData(score=2.0, detail="研报3篇")
+
+    defaults = dict(
+        code="002138", name="双环传动",
+        quote=quote, technical=tech, financial=fin,
+        flow=flow, sentiment=sent,
+    )
+    defaults.update(overrides)
+    return StockSnapshot(**defaults)
+
+
+@pytest.fixture
+def scorer():
+    return Scorer(
+        weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
+        veto_rules=["below_ma20", "limit_up_today", "consecutive_outflow", "ma20_trend_down"],
+        entry_cfg={"rsi_max": 70, "volume_ratio_min": 1.5},
+    )
+
+
+def test_basic_score(scorer):
+    s = _make_snapshot()
+    result = scorer.score(s)
+
+    assert result.code == "002138"
+    assert result.total > 0
+    assert len(result.dimensions) == 4
+    assert not result.veto_triggered
+    assert result.entry_signal is True  # golden_cross + vol_ratio + rsi ok
+
+
+def test_veto_below_ma20(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(above_ma20=False, rsi=55, volume_ratio=1.8),
+    )
+    result = scorer.score(s)
+
+    assert result.veto_triggered
+    assert "below_ma20" in result.hard_veto
+    assert result.total == 0.0
+
+
+def test_veto_limit_up(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            above_ma20=True, change_pct=10.0, rsi=55, volume_ratio=1.8,
+        ),
+    )
+    result = scorer.score(s)
+
+    assert "limit_up_today" in result.hard_veto
+    assert result.total == 0.0
+
+
+def test_no_entry_signal_when_rsi_high(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            ma5=15, ma10=14.5, ma20=14, ma60=13,
+            above_ma20=True, volume_ratio=2.0, rsi=75.0,
+            golden_cross=True, ma20_slope=0.01,
+            momentum_5d=3.0, daily_volatility=0.025,
+        ),
+    )
+    result = scorer.score(s)
+
+    assert result.entry_signal is False  # RSI too high
+
+
+def test_style_classification_momentum(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            above_ma20=True, rsi=78, volume_ratio=2.0,
+            daily_volatility=0.04, ma20_slope=0.03,
+            golden_cross=True,
+        ),
+    )
+    result = scorer.score(s)
+    assert result.style == Style.MOMENTUM
+
+
+def test_style_classification_slow_bull(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            above_ma20=True, rsi=58, volume_ratio=1.5,
+            daily_volatility=0.015, ma20_slope=0.008,
+            golden_cross=False, ma5=15, ma10=14.5, ma20=14, ma60=13,
+        ),
+    )
+    result = scorer.score(s)
+    assert result.style == Style.SLOW_BULL
+
+
+def test_degraded_data_quality(scorer):
+    s = _make_snapshot(
+        financial=FinancialReport(roe=10.0),  # missing revenue_growth and cash_flow
+    )
+    result = scorer.score(s)
+    assert result.data_quality == DataQuality.DEGRADED
+    assert len(result.data_missing_fields) > 0
+
+
+def test_batch_score_sorted(scorer):
+    s1 = _make_snapshot(code="001", name="高分股",
+                        technical=TechnicalIndicators(
+                            above_ma20=True, rsi=55, volume_ratio=2.0,
+                            golden_cross=True, ma5=15, ma10=14.5, ma20=14, ma60=13,
+                            momentum_5d=5, ma20_slope=0.01,
+                        ))
+    s2 = _make_snapshot(code="002", name="低分股",
+                        technical=TechnicalIndicators(above_ma20=True, rsi=55))
+
+    results = scorer.score_batch([s2, s1])
+    assert results[0].code == "001"  # higher score first
+
+
+def test_consecutive_outflow_warn(scorer):
+    """consecutive_outflow with above_ma20 + high amount → warn only, not hard veto"""
+    s = _make_snapshot(
+        technical=TechnicalIndicators(above_ma20=True, rsi=55, volume_ratio=1.8),
+        flow=FundFlow(consecutive_outflow_days=3, northbound_net_positive=True),
+        quote=StockQuote(
+            code="002138", name="双环传动", price=15.0,
+            open=14.8, high=15.2, low=14.7, close=15.0,
+            volume=5000000, amount=6e8, change_pct=1.5,
+        ),
+    )
+    result = scorer.score(s)
+    assert "consecutive_outflow_warn" in result.warning_signals
+    assert not result.veto_triggered
+    assert result.total > 0  # reduced but not zero
+
+
+def test_none_dimensions_handled(scorer):
+    """Snapshot with all None data should not crash."""
+    s = StockSnapshot(code="999", name="空数据")
+    result = scorer.score(s)
+    assert result.total == 0.0 or result.total >= 0
+    assert result.data_quality in (DataQuality.OK, DataQuality.ERROR, DataQuality.DEGRADED)
