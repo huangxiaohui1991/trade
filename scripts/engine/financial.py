@@ -7,8 +7,9 @@ engine/financial.py — 基本面数据模块
 
 数据源（按优先级）：
   1. 妙想 mx_data API（优先）
-  2. 东方财富 akshare（fallback，重试 3 次）
-  3. 新浪财经（最终 fallback）
+  2. iwencai（MX 部分缺失时的补充数据源）
+  3. 东方财富 akshare（fallback，重试 3 次）
+  4. 新浪财经（最终 fallback）
 """
 
 import os
@@ -319,6 +320,48 @@ def get_financial(code: str) -> dict:
         if not has_cf:
             missing_fields.append("cash_flow")
         _logger.info(f"[get_financial] MX 部分缺失 {missing_fields}，akshare 补充")
+
+    # ── iwencai 补充（MX 完全失败，或部分字段缺失）──────────────────────────
+    if missing_fields or "roe" not in result:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data/sources/pywencai")))
+            from data.sources.pywencai import get_financial as _iw_fin
+            name_for_iw = result.get("name", code)
+            iw_data = _iw_fin(name_for_iw)
+            if iw_data:
+                _logger.info(f"[get_financial] iwencai 补充成功 {name_for_iw}: {list(iw_data.keys())}")
+                result["source_chain"].append("iwencai")
+                if "roe" in iw_data and "roe" not in result:
+                    result["roe"] = iw_data["roe"]
+                    result["roe_recent"] = [iw_data["roe"]]
+                if "revenue_growth" in iw_data and "revenue_growth" not in result:
+                    result["revenue_growth"] = iw_data["revenue_growth"]
+                if "operating_cash_flow" in iw_data and "operating_cash_flow" not in result:
+                    result["operating_cash_flow"] = iw_data["operating_cash_flow"]
+                    result["cash_flow_positive"] = iw_data.get("cash_flow_positive", iw_data["operating_cash_flow"] > 0)
+                # iwencai 特有字段：预测PE / PB（akshare 没有）
+                if "pe_forward" in iw_data:
+                    result["pe_forward"] = iw_data["pe_forward"]
+                    result["pe_forward_year"] = iw_data.get("pe_forward_year", "N/A")
+                if "pe_ttm" in iw_data:
+                    result["pe_ttm"] = iw_data["pe_ttm"]
+                if "pb" in iw_data:
+                    result["pb"] = iw_data["pb"]
+                if "gross_margin" in iw_data:
+                    result["gross_margin"] = iw_data["gross_margin"]
+                # 更新缺失字段记录
+                for k in list(missing_fields):
+                    if k == "roe" and "roe" in result:
+                        missing_fields.remove(k)
+                    elif k == "revenue" and "revenue_growth" in result:
+                        missing_fields.remove(k)
+                    elif k == "cash_flow" and "operating_cash_flow" in result:
+                        missing_fields.remove(k)
+            else:
+                _logger.warning(f"[get_financial] iwencai 返回空 name={name_for_iw}")
+        except Exception as e:
+            _logger.warning(f"[get_financial] iwencai 补充失败 code={code}: {e}")
 
     # ── ROE（东财）───────────────────────────────────────────────────────────
     if "roe" not in result:

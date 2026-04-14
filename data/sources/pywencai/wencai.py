@@ -10,7 +10,10 @@ import requests as rq
 import pandas as pd
 import pydash as _
 
-from .headers import build_headers
+try:
+    from .headers import build_headers
+except ImportError:
+    from headers import build_headers
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ def _while_do(do, retry=3, sleep=1):
 
 # ── Step 1: get-robot-data → 获取 condition / url_params ───────────────────
 
-def _get_robot_data(query: str, query_type: str = "stock", cookie: str = "") -> dict | None:
+def _get_robot_data(query: str, query_type: str = "stock", cookie: str = "") -> dict:
     """返回 {'url_params': dict, 'condition': str, 'row_count': int}"""
     url = "http://www.iwencai.com/customized/chart/get-robot-data"
     payload = {
@@ -145,7 +148,7 @@ def _get_data_list(url_params: dict, cookie: str = "", page: int = 1,
 
 # ── 公开 API ────────────────────────────────────────────────────────────────
 
-def query(query: str, loop: bool = True, cookie: str = "") -> pd.DataFrame | None:
+def query(query: str, loop: bool = True, cookie: str = "") -> pd.DataFrame:
     """
     查询 iwencai，支持自然语言选股条件。
 
@@ -192,7 +195,7 @@ def query(query: str, loop: bool = True, cookie: str = "") -> pd.DataFrame | Non
 
 
 # ── 兼容性 alias ─────────────────────────────────────────────────────────────
-def fetch_stocks(codes: list[str], cookie: str = "") -> pd.DataFrame | None:
+def fetch_stocks(codes: list, cookie: str = "") -> pd.DataFrame:
     """
     用股票代码列表批量拉取数据（通过 find 接口）。
 

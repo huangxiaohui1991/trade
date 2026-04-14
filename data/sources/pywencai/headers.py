@@ -12,7 +12,7 @@ def get_token() -> str:
     )
     return result.stdout.decode().strip()
 
-def build_headers(cookie: str, user_agent: str | None = None) -> dict:
+def build_headers(cookie: str, user_agent: str = None) -> dict:
     if user_agent is None:
         from fake_useragent import UserAgent
         user_agent = UserAgent().random

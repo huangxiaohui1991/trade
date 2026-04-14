@@ -6,7 +6,7 @@ pipeline/stock_screener.py — 选股流水线
 职责：
   1. 读取 config/stocks.yaml 的核心池/观察池/黑名单
   2. 优先调用妙想智能选股 API（mx_xuangu）进行自然语言筛选
-  3. mx skill 不可用或失败时，fallback 到 akshare 原生接口
+  3. MX 不可用时，依次尝试 iwencai → akshare 原生接口
   4. 对候选池进行四维评分，写入 Obsidian 筛选记录
 
 用法：
@@ -445,7 +445,7 @@ def _sync_to_zixuan(actionable: list) -> None:
 def _resolve_market_candidates(default_query: str, select_type: str,
                                strategy_cfg: dict, blacklist: set,
                                tracked_candidates: list) -> tuple[list, str, dict]:
-    """全市场模式：优先 mx-screener，再试 akshare，再回退缓存和 tracked。"""
+    """全市场模式：优先 mx-screener，iwencai 补充，akshare 最终 fallback。"""
     screening_cfg = strategy_cfg.get("screening", {})
     cache_ttl_hours = int(screening_cfg.get("candidate_cache_ttl_hours", 24))
     cache_ttl_seconds = max(cache_ttl_hours, 1) * 3600
@@ -473,6 +473,44 @@ def _resolve_market_candidates(default_query: str, select_type: str,
 
         _logger.warning(">> mx-screener 调用失败，fallback 到 akshare 全市场轻筛")
         fallback_meta["source_chain"].append("mx_market_failed")
+
+    # ── iwencai 补充（MX 失败后，akshare 之前）────────────────────────────────
+    if default_query:
+        try:
+            import sys as _sys
+            _proj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            _iw_path = os.path.join(_proj_root, "data/sources/pywencai")
+            if _iw_path not in _sys.path:
+                _sys.path.insert(0, _iw_path)
+            from data.sources.pywencai import query as _iw_query
+            _logger.info(f">> mx 失败，iwencai 选股补充，query={default_query[:30]}...")
+            iw_df = _iw_query(default_query, loop=False)
+            if iw_df is not None and not iw_df.empty:
+                # 解析 iwencai 结果 → candidates 格式
+                iw_candidates = []
+                code_col = next((c for c in iw_df.columns if "代码" in c or "code" in c.lower()), None)
+                name_col = next((c for c in iw_df.columns if "简称" in c or "name" in c.lower() or "名称" in c), None)
+                if code_col and name_col:
+                    seen = set()
+                    for _, row in iw_df.iterrows():
+                        code = str(row.get(code_col, "")).strip().split(".")[0]
+                        name = str(row.get(name_col, "")).strip()
+                        if code and name and code not in seen and code not in blacklist:
+                            seen.add(code)
+                            iw_candidates.append({"code": code, "name": name, "mx_data": row.to_dict()})
+                if iw_candidates:
+                    _logger.info(f">> iwencai 选股返回 {len(iw_candidates)} 只")
+                    cache_path = _save_candidate_cache(
+                        "market_latest", iw_candidates, f"iwencai 自然语言选股（{default_query[:20]}）")
+                    fallback_meta["source_chain"].append("iwencai_market")
+                    fallback_meta["cache_path"] = cache_path
+                    return iw_candidates, f"iwencai 自然语言选股", fallback_meta
+                else:
+                    _logger.warning(f">> iwencai 返回 {len(iw_df)} 行但无法解析 code/name 列: {list(iw_df.columns)[:8]}")
+            else:
+                _logger.warning(f">> iwencai 选股返回空，尝试 akshare 全市场轻筛")
+        except Exception as e:
+            _logger.warning(f">> iwencai 选股异常: {e}，继续 akshare")
 
     candidates = _fallback_market_candidates(strategy_cfg, blacklist)
     if candidates:
