@@ -78,11 +78,11 @@ class MXAsyncClient:
 
     async def search_news(self, query: str) -> dict[str, Any]:
         """资讯搜索。"""
-        return await self.post("/api/claw/search", {"keyword": query})
+        return await self.post("/api/claw/news-search", {"query": query})
 
     async def query_data(self, query: str) -> dict[str, Any]:
         """数据查询。"""
-        return await self.post("/api/claw/data-query", {"keyword": query})
+        return await self.post("/api/claw/query", {"toolQuery": query})
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
