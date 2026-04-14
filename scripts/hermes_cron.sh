@@ -63,9 +63,16 @@ fi
 # export DISCORD_WEBHOOK_URL  ← 由 Hermes/launchd 运行时注入
 
 MODE="${1:-}"
+SKIP_DISCORD=""
+
+if [[ "$MODE" == "--skip-discord" ]] || [[ "$2" == "--skip-discord" ]]; then
+    SKIP_DISCORD="--skip-discord"
+    MODE="${1:-$2}"
+    MODE="${MODE#--skip-discord}"
+fi
 
 if [[ -z "$MODE" ]]; then
-    echo "用法: hermes_cron.sh [morning|noon|evening|scoring|weekly|sentiment|hk_monitor|monthly]"
+    echo "用法: hermes_cron.sh [morning|noon|evening|scoring|weekly|sentiment|hk_monitor|monthly] [--skip-discord]"
     exit 1
 fi
 
@@ -159,8 +166,8 @@ case "$MODE" in
         "$PYTHON" -m scripts.cli.trade orchestrate weekly_review --json 2>&1
         ;;
     sentiment)
-        echo ">> 舆情监控"
-        "$PYTHON" -m scripts.cli.trade run sentiment 2>&1
+        echo ">> 舆情监控${SKIP_DISCORD:+ (跳过Discord)}"
+        "$PYTHON" -m scripts.cli.trade run sentiment ${SKIP_DISCORD:+"$SKIP_DISCORD"} 2>&1
         ;;
     hk_monitor)
         echo ">> 港股遗留仓位检查"
