@@ -533,6 +533,34 @@ def order_command(action: str, args) -> dict:
             except Exception as sync_exc:
                 LOGGER.warning(f"[order fill] portfolio sync failed: {sync_exc}")
 
+        # 3b. 自动加入 watch_pool（买入实盘成交）
+        watch_pool_updated = False
+        if scope == PRIMARY_SCOPE and side == "buy":
+            try:
+                import yaml
+                stocks_path = Path(__file__).resolve().parent.parent.parent / "config" / "stocks.yaml"
+                with open(stocks_path, "r", encoding="utf-8") as f:
+                    stocks_cfg = yaml.safe_load(f) or {}
+                watch_pool = stocks_cfg.get("watch_pool", [])
+                existing_codes = {str(item.get("code", "")).strip().lstrip("0") for item in watch_pool}
+                code_normalized = code.lstrip("0")
+                if code_normalized not in existing_codes:
+                    watch_pool.append({
+                        "code": code,
+                        "name": name or code,
+                        "added": datetime.now().strftime("%Y-%m-%d"),
+                        "score": None,
+                    })
+                    stocks_cfg["watch_pool"] = watch_pool
+                    with open(stocks_path, "w", encoding="utf-8") as f:
+                        yaml.safe_dump(stocks_cfg, f, allow_unicode=True, sort_keys=False)
+                    watch_pool_updated = True
+                    LOGGER.info(f"[order fill] {code} {name} added to watch_pool")
+                else:
+                    LOGGER.info(f"[order fill] {code} already in watch_pool, skip")
+            except Exception as pool_exc:
+                LOGGER.warning(f"[order fill] watch_pool update failed: {pool_exc}")
+
         # 4. Discord 卡片（实盘才发）
         discord_ok = False
         discord_error = ""
@@ -565,10 +593,12 @@ def order_command(action: str, args) -> dict:
             "order": order,
             "trade_event": trade_event,
             "positions_synced": positions_synced,
+            "watch_pool_updated": watch_pool_updated,
             "discord_ok": discord_ok,
             "discord_error": discord_error,
             "summary": f"{'买入' if side == 'buy' else '卖出'} {code} {name} {shares}股 @{price}，"
                        f"已录入 ledger{'，持仓已更新' if positions_synced else ''}"
+                       f"{'，已加入舆情监控' if watch_pool_updated else ''}"
                        f"{'，Discord 已通知' if discord_ok else ''}",
         })
 
