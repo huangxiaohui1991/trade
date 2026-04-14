@@ -424,6 +424,10 @@ def order_command(action: str, args) -> dict:
     if action == "fill":
         # 手动录入实盘成交记录
         from scripts.state import record_trade_event
+        from scripts.state.service import (
+            _rebuild_positions_from_trade_events,
+            PRIMARY_SCOPE,
+        )
 
         code = getattr(args, "code", "")
         name = getattr(args, "name", "")
@@ -485,13 +489,88 @@ def order_command(action: str, args) -> dict:
             },
         })
 
+        # 3. 持仓重建（实盘 scope 才需要）
+        positions_synced = False
+        if scope == PRIMARY_SCOPE:
+            try:
+                rebuilt: dict = {}
+                from scripts.state.service import _connect
+                with _connect() as conn:
+                    rebuilt = _rebuild_positions_from_trade_events(conn, scope=PRIMARY_SCOPE)
+                if rebuilt:
+                    vault = ObsidianVault()
+                    portfolio = vault.read_portfolio()
+                    holdings: list = list(portfolio.get("holdings", []))
+                    existing_codes = {h.get("code") for h in holdings}
+                    for h in holdings:
+                        code_key = h.get("code")
+                        if code_key in rebuilt:
+                            r = rebuilt[code_key]
+                            h["持有股数"] = r["shares"]
+                            h["平均成本"] = round(r["avg_cost"], 4)
+                            h["持仓市值"] = round(r["market_value"], 2)
+                            if r.get("first_buy_price"):
+                                h["首次买入价"] = r["first_buy_price"]
+                            if r.get("buy_count"):
+                                h["加仓次数"] = r["buy_count"] - 1
+                            del rebuilt[code_key]
+                    for new_code, r in rebuilt.items():
+                        holdings.append({
+                            "股票": r["name"],
+                            "代码": new_code,
+                            "首次买入价": r["first_buy_price"],
+                            "加仓次数": max(r["buy_count"] - 1, 0),
+                            "平均成本": round(r["avg_cost"], 4),
+                            "持有股数": r["shares"],
+                            "持仓市值": round(r["market_value"], 2),
+                            "止损价": "待设定",
+                            "绝对止损": "待设定",
+                            "止盈1(15%)": "待设定",
+                            "状态": "",
+                        })
+                    vault.update_portfolio({"holdings": holdings})
+                    vault.sync_portfolio_state()
+                positions_synced = True
+            except Exception as sync_exc:
+                LOGGER.warning(f"[order fill] portfolio sync failed: {sync_exc}")
+
+        # 4. Discord 卡片（实盘才发）
+        discord_ok = False
+        discord_error = ""
+        if scope == PRIMARY_SCOPE:
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                embeds = [
+                    _build_embed(
+                        title=f"📋 实盘成交录入 — {name} ({code})",
+                        description=f"{'买入' if side == 'buy' else '卖出'}成交确认",
+                        color=DISCORD_COLORS.get("trade_fill", 0x1565C0),
+                        fields=[
+                            {"name": "方向", "value": "买入" if side == "buy" else "卖出", "inline": True},
+                            {"name": "价格", "value": f"¥{price:.3f}", "inline": True},
+                            {"name": "数量", "value": f"{shares} 股", "inline": True},
+                            {"name": "渠道", "value": broker, "inline": True},
+                            {"name": "成交额", "value": f"¥{round(price * shares, 2):,.2f}", "inline": True},
+                        ],
+                        footer=f"Hermes · order fill · {ts}",
+                    )
+                ]
+                discord_ok, discord_error = _post_embed_to_discord(embeds)
+            except Exception as disc_exc:
+                discord_error = str(disc_exc)
+
         return sanitize_for_json({
             "command": "order",
             "action": "fill",
             "status": "ok",
             "order": order,
             "trade_event": trade_event,
-            "summary": f"{'买入' if side == 'buy' else '卖出'} {code} {name} {shares}股 @{price}，已录入 ledger",
+            "positions_synced": positions_synced,
+            "discord_ok": discord_ok,
+            "discord_error": discord_error,
+            "summary": f"{'买入' if side == 'buy' else '卖出'} {code} {name} {shares}股 @{price}，"
+                       f"已录入 ledger{'，持仓已更新' if positions_synced else ''}"
+                       f"{'，Discord 已通知' if discord_ok else ''}",
         })
 
     if action == "list":
