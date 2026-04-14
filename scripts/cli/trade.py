@@ -441,7 +441,8 @@ def order_command(action: str, args) -> dict:
         now_ts_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
         # 1. 创建 order 记录（标记为 filled）
-        order_external_id = f"{scope}:manual_fill:{datetime.now().strftime('%Y%m%d%H%M%S%f')}:{code}"
+        # 使用稳定的 external_id 实现幂等：同一股票+同方向只产生一条记录
+        order_external_id = f"{scope}:manual_fill:{code}:{side}"
         order = upsert_order_state({
             "external_id": order_external_id,
             "scope": scope,
@@ -555,11 +556,11 @@ def order_command(action: str, args) -> dict:
                     with open(stocks_path, "w", encoding="utf-8") as f:
                         yaml.safe_dump(stocks_cfg, f, allow_unicode=True, sort_keys=False)
                     watch_pool_updated = True
-                    LOGGER.info(f"[order fill] {code} {name} added to watch_pool")
+                    print(f"[order fill] {code} {name} added to watch_pool")
                 else:
-                    LOGGER.info(f"[order fill] {code} already in watch_pool, skip")
+                    print(f"[order fill] {code} already in watch_pool, skip")
             except Exception as pool_exc:
-                LOGGER.warning(f"[order fill] watch_pool update failed: {pool_exc}")
+                print(f"[order fill] watch_pool update failed: {pool_exc}")
 
         # 4. Discord 卡片（实盘才发）
         discord_ok = False
