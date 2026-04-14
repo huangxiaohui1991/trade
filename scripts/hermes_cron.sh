@@ -34,11 +34,12 @@ DEFAULT_VAULT_PATH="$REPO_ROOT/trade-vault"
 if [[ ! -d "$DEFAULT_VAULT_PATH" ]]; then
     DEFAULT_VAULT_PATH="$REPO_ROOT"
 fi
-VAULT_PATH="${AStockVault:-$DEFAULT_VAULT_PATH}"
+# Always point to trade-vault; external AStockVault may be repo-root, ignore it
+VAULT_PATH="$DEFAULT_VAULT_PATH"
 PYTHON="$REPO_ROOT/.venv/bin/python"
 
-# 确保 vault 的 scripts 在 PYTHONPATH
-export PYTHONPATH="${VAULT_PATH}${PYTHONPATH:+:$PYTHONPATH}"
+# PYTHONPATH: REPO_ROOT for scripts module, VAULT_PATH for vault data
+export PYTHONPATH="${REPO_ROOT}:${VAULT_PATH}${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="${HOME}/.local/bin:$PATH"
 export AStockVault="$VAULT_PATH"
 
