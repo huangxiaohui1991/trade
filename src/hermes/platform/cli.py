@@ -298,7 +298,7 @@ def run_mcp():
 
 @app.command("run-pipeline")
 def run_pipeline(
-    pipeline_type: str = typer.Argument(..., help="morning | evening | scoring | weekly"),
+    pipeline_type: str = typer.Argument(..., help="morning | noon | evening | scoring | weekly"),
     db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
 ):
     """运行指定 pipeline（完整流程，带幂等检查）"""
@@ -318,6 +318,11 @@ def run_pipeline(
                 from hermes.pipeline.morning import run
                 result = run(ctx, run_id)
                 typer.echo(f"  大盘={result['signal']} 持仓={result['positions']} 风控={len(result['risk_alerts'])}条")
+
+            elif pipeline_type == "noon":
+                from hermes.pipeline.noon import run
+                result = run(ctx, run_id)
+                typer.echo(f"  大盘={result['signal']} 持仓={result['positions']} 风控={len(result['alerts'])}条")
 
             elif pipeline_type == "scoring":
                 from hermes.pipeline.scoring import run

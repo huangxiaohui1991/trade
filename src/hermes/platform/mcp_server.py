@@ -388,6 +388,8 @@ def trade_run_pipeline(pipeline_type: str) -> str:
 
         if pipeline_type == "morning":
             from hermes.pipeline.morning import run
+        elif pipeline_type == "noon":
+            from hermes.pipeline.noon import run
         elif pipeline_type == "scoring":
             from hermes.pipeline.scoring import run
         elif pipeline_type == "evening":

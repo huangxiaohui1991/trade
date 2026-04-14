@@ -82,6 +82,7 @@
 
 ### 定时任务（cron 自动执行）
 - 08:25 盘前摘要（`trade_run_pipeline morning`）
+- 11:55 午休检查（`trade_run_pipeline noon`）
 - 15:35 收盘报告（`trade_run_pipeline evening`）
 - 15:40 核心池评分（`trade_run_pipeline scoring`）
 - 周日 20:00 周报（`trade_run_pipeline weekly`）
