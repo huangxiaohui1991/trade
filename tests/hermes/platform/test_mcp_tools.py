@@ -80,8 +80,9 @@ class TestMCPTools:
         assert result["history"][0]["total_score"] == 7.5
 
     def test_trade_trade_events_empty(self, setup_mcp):
-        result = setup_mcp.trade_trade_events()
-        assert "交易记录" in result
+        result = json.loads(setup_mcp.trade_trade_events())
+        assert result["count"] == 0
+        assert result["trades"] == []
 
     def test_trade_calc_position(self, setup_mcp):
         result = json.loads(setup_mcp.trade_calc_position("002138", 7.5, 15.0))

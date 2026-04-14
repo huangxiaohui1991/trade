@@ -221,7 +221,7 @@ def trade_score_batch(codes: str = "") -> str:
     events = _event_store.query(event_type="score.calculated")
     run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-    return json.dumps(run_scores, ensure_ascii=False, default=str)
+    return json.dumps({"scores": run_scores, "count": len(run_scores)}, ensure_ascii=False, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -280,13 +280,13 @@ def trade_check_risk(code: str) -> str:
         entry_day_low=pos.entry_day_low_cents / 100 if pos.entry_day_low_cents else pos.avg_cost,
         params=params,
     )
-    return json.dumps([{
+    return json.dumps({"code": code, "signals": [{
         "signal_type": s.signal_type,
         "trigger_price": s.trigger_price,
         "current_price": s.current_price,
         "description": s.description,
         "urgency": s.urgency,
-    } for s in signals], ensure_ascii=False)
+    } for s in signals]}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -299,10 +299,10 @@ def trade_check_portfolio_risk() -> str:
         max_single_exposure_pct=0.0, max_sector_exposure_pct=0.0,
         limits={"daily_loss_limit_pct": 0.03, "consecutive_loss_days_limit": 2},
     )
-    return json.dumps([{
+    return json.dumps({"breaches": [{
         "rule": b.rule, "current_value": b.current_value,
         "limit_value": b.limit_value, "description": b.description,
-    } for b in breaches], ensure_ascii=False)
+    } for b in breaches]}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -341,7 +341,19 @@ def trade_score_history(code: str, days: int = 7) -> str:
 @_safe
 def trade_trade_events(days: int = 7) -> str:
     """查看最近的交易记录。"""
-    return _report_gen.generate_trade_history(days)
+    events = _event_store.query(event_type="order.filled")
+    recent = events[-50:]
+    trades = []
+    for ev in recent:
+        p = ev["payload"]
+        trades.append({
+            "code": p.get("code", ""),
+            "side": p.get("side", ""),
+            "shares": p.get("shares", 0),
+            "price": p.get("fill_price_cents", 0) / 100,
+            "time": ev.get("occurred_at", "")[:16],
+        })
+    return json.dumps({"trades": trades, "count": len(trades)}, ensure_ascii=False)
 
 
 @mcp.tool()
