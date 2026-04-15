@@ -339,6 +339,11 @@ def run_pipeline(
                 result = run(ctx, run_id)
                 typer.echo(f"  {result['buy_count']}买 {result['sell_count']}卖 胜率{result['win_rate']:.0%}")
 
+            elif pipeline_type == "sentiment":
+                from hermes.pipeline.sentiment import run as sentiment_run
+                result = sentiment_run(ctx, run_id)
+                typer.echo(f"  监控{result['monitored']}只 告警{len(result['alerts'])}条")
+
             else:
                 ctx.run_journal.fail_run(run_id, f"Unknown pipeline: {pipeline_type}")
                 typer.echo(f"❌ Unknown pipeline: {pipeline_type}", err=True)
