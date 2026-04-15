@@ -50,10 +50,51 @@ def test_clear_signal():
     assert state.multiplier == 0.0
 
 
-def test_no_data():
+def test_no_data_first_time():
+    """No data and no history → RED (not CLEAR, to avoid false liquidation)."""
+    # Reset module-level cache
+    import hermes.strategy.timer as _timer
+    _timer._last_valid_state = None
+
     state = compute_market_signal({})
-    assert state.signal == MarketSignal.CLEAR
+    assert state.signal == MarketSignal.RED
     assert state.multiplier == 0.0
+
+
+def test_no_data_fallback_to_last_valid():
+    """No data but has previous valid signal → fallback to last signal."""
+    import hermes.strategy.timer as _timer
+    _timer._last_valid_state = None
+
+    # First: establish a valid GREEN signal
+    green_data = {
+        "上证指数": {"above_ma20": True, "below_ma60_days": 0},
+        "深证成指": {"above_ma20": True, "below_ma60_days": 0},
+        "创业板指": {"above_ma20": True, "below_ma60_days": 0},
+    }
+    state = compute_market_signal(green_data)
+    assert state.signal == MarketSignal.GREEN
+
+    # Then: no data → should fallback to GREEN
+    state = compute_market_signal({})
+    assert state.signal == MarketSignal.GREEN
+    assert "沿用上次信号" in state.detail.get("reason", "")
+
+
+def test_no_data_fallback_preserves_red():
+    """Fallback should also work for non-GREEN signals."""
+    import hermes.strategy.timer as _timer
+    _timer._last_valid_state = None
+
+    red_data = {
+        "上证指数": {"above_ma20": False, "below_ma60_days": 3},
+        "深证成指": {"above_ma20": False, "below_ma60_days": 5},
+        "创业板指": {"above_ma20": False, "below_ma60_days": 2},
+    }
+    compute_market_signal(red_data)
+
+    state = compute_market_signal({})
+    assert state.signal == MarketSignal.RED
 
 
 def test_partial_error():

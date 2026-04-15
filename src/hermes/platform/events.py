@@ -19,7 +19,7 @@ def _now_iso() -> str:
 
 
 def _new_id() -> str:
-    return uuid.uuid4().hex[:16]
+    return uuid.uuid4().hex
 
 
 class EventStore:
@@ -38,6 +38,7 @@ class EventStore:
     ) -> str:
         """
         追加一条事件。自动递增 stream_version。
+        使用 BEGIN IMMEDIATE 保证 version 查询和 INSERT 的原子性。
 
         Returns:
             event_id
@@ -45,29 +46,35 @@ class EventStore:
         metadata = metadata or {}
         event_id = _new_id()
 
-        # Get next version for this stream
-        row = self._conn.execute(
-            "SELECT MAX(stream_version) FROM event_log WHERE stream = ?",
-            (stream,),
-        ).fetchone()
-        next_version = (row[0] or 0) + 1 if row else 1
+        # BEGIN IMMEDIATE 获取写锁，防止并发 version 冲突
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                "SELECT MAX(stream_version) FROM event_log WHERE stream = ?",
+                (stream,),
+            ).fetchone()
+            next_version = (row[0] or 0) + 1 if row else 1
 
-        self._conn.execute(
-            """INSERT INTO event_log
-               (event_id, stream, stream_type, stream_version,
-                event_type, payload_json, metadata_json, occurred_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                event_id,
-                stream,
-                stream_type,
-                next_version,
-                event_type,
-                json.dumps(payload, ensure_ascii=False, default=str),
-                json.dumps(metadata, ensure_ascii=False, default=str),
-                _now_iso(),
-            ),
-        )
+            self._conn.execute(
+                """INSERT INTO event_log
+                   (event_id, stream, stream_type, stream_version,
+                    event_type, payload_json, metadata_json, occurred_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    stream,
+                    stream_type,
+                    next_version,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    json.dumps(metadata, ensure_ascii=False, default=str),
+                    _now_iso(),
+                ),
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
         return event_id
 
     def query(
@@ -78,8 +85,14 @@ class EventStore:
         since: Optional[str] = None,
         until: Optional[str] = None,
         limit: int = 1000,
+        metadata_filter: Optional[dict] = None,
     ) -> list[dict]:
-        """Query events with optional filters."""
+        """Query events with optional filters.
+
+        Args:
+            metadata_filter: 可选的 metadata 字段过滤，如 {"run_id": "xxx"}。
+                使用 json_extract 在 SQL 层过滤，避免全量拉取后内存过滤。
+        """
         clauses: list[str] = []
         params: list = []
 
@@ -98,6 +111,10 @@ class EventStore:
         if until:
             clauses.append("occurred_at <= ?")
             params.append(until)
+        if metadata_filter:
+            for key, value in metadata_filter.items():
+                clauses.append(f"json_extract(metadata_json, '$.{key}') = ?")
+                params.append(value)
 
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"""SELECT * FROM event_log

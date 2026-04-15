@@ -88,3 +88,46 @@ def test_empty_query(store: EventStore):
     events = store.query(event_type="nonexistent")
     assert events == []
     assert store.count() == 0
+
+
+def test_metadata_filter(store: EventStore):
+    """metadata_filter should filter events at SQL level."""
+    store.append("s:1", "t", "score.calculated", {"v": 1}, metadata={"run_id": "run_a"})
+    store.append("s:2", "t", "score.calculated", {"v": 2}, metadata={"run_id": "run_b"})
+    store.append("s:3", "t", "score.calculated", {"v": 3}, metadata={"run_id": "run_a"})
+
+    events = store.query(event_type="score.calculated", metadata_filter={"run_id": "run_a"})
+    assert len(events) == 2
+    assert all(e["metadata"]["run_id"] == "run_a" for e in events)
+
+
+def test_metadata_filter_empty_result(store: EventStore):
+    store.append("s:1", "t", "e1", {"v": 1}, metadata={"run_id": "run_x"})
+    events = store.query(metadata_filter={"run_id": "nonexistent"})
+    assert events == []
+
+
+def test_metadata_filter_combined_with_event_type(store: EventStore):
+    store.append("s:1", "t", "score.calculated", {"v": 1}, metadata={"run_id": "run_a"})
+    store.append("s:2", "t", "decision.suggested", {"v": 2}, metadata={"run_id": "run_a"})
+    store.append("s:3", "t", "score.calculated", {"v": 3}, metadata={"run_id": "run_b"})
+
+    events = store.query(event_type="score.calculated", metadata_filter={"run_id": "run_a"})
+    assert len(events) == 1
+    assert events[0]["payload"]["v"] == 1
+
+
+def test_event_id_full_uuid(store: EventStore):
+    """Event IDs should be full 32-char hex UUIDs (not truncated 16-char)."""
+    eid = store.append("s:1", "t", "e1", {"v": 1})
+    assert len(eid) == 32
+
+
+def test_transaction_protection(store: EventStore):
+    """Concurrent appends to same stream should get sequential versions."""
+    for i in range(10):
+        store.append("s:race", "t", f"e{i}", {"i": i})
+
+    events = store.get_stream("s:race")
+    versions = [e["stream_version"] for e in events]
+    assert versions == list(range(1, 11))

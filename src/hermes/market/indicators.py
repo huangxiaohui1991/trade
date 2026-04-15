@@ -77,11 +77,13 @@ def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote
     rsi = _rsi(close, 14)
 
     # 金叉：MA5 上穿 MA10（前一日 MA5 <= MA10，今日 MA5 > MA10）
+    # 用 rolling Series 直接取倒数第二个值，避免重复计算
     golden_cross = False
-    if len(close) >= 2 and ma5 > ma10 > 0:
-        prev_close = float(close.iloc[-2])
-        prev_ma5 = _ma(close.iloc[:-1], 5)  # 前一日 MA5
-        prev_ma10 = _ma(close.iloc[:-1], 10)  # 前一日 MA10
+    if len(close) >= 11 and ma5 > ma10 > 0:
+        ma5_series = close.rolling(5).mean()
+        ma10_series = close.rolling(10).mean()
+        prev_ma5 = float(ma5_series.iloc[-2]) if len(ma5_series) >= 2 else 0.0
+        prev_ma10 = float(ma10_series.iloc[-2]) if len(ma10_series) >= 2 else 0.0
         golden_cross = bool(prev_ma5 <= prev_ma10 and ma5 > ma10)
 
     # MA5 > MA10 > MA20 排列

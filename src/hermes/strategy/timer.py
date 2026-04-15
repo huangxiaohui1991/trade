@@ -7,9 +7,15 @@ strategy/timer.py — 大盘择时（纯函数）
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from hermes.strategy.models import MarketSignal, MarketState
+
+_logger = logging.getLogger(__name__)
+
+# 模块级缓存：上一次有效的大盘信号（provider 全挂时 fallback）
+_last_valid_state: Optional[MarketState] = None
 
 
 def compute_market_signal(
@@ -18,6 +24,9 @@ def compute_market_signal(
 ) -> MarketState:
     """
     纯函数：根据指数数据计算大盘信号。
+
+    当所有 provider 都失败（total == 0）时，fallback 到上一次有效信号，
+    而不是直接返回 CLEAR（避免误触发清仓）。
 
     Args:
         index_data: {
@@ -30,6 +39,8 @@ def compute_market_signal(
     Returns:
         MarketState(signal, multiplier, detail)
     """
+    global _last_valid_state
+
     config = config or {}
     clear_days = config.get("clear_days_ma60", 15)
 
@@ -55,10 +66,24 @@ def compute_market_signal(
             clear_count += 1
 
     if total == 0:
+        # Fallback 到上一次有效信号，避免 provider 临时故障误触发 CLEAR
+        if _last_valid_state is not None:
+            _logger.warning("[timer] 无有效指数数据，沿用上次信号: %s", _last_valid_state.signal.value)
+            return MarketState(
+                signal=_last_valid_state.signal,
+                multiplier=_last_valid_state.multiplier,
+                detail={
+                    "reason": "无有效指数数据，沿用上次信号",
+                    "fallback_signal": _last_valid_state.signal.value,
+                    "indices": index_data,
+                },
+            )
+        # 首次运行且无数据 → 保守返回 RED（禁止新开仓但不触发清仓）
+        _logger.warning("[timer] 无有效指数数据且无历史信号，返回 RED")
         return MarketState(
-            signal=MarketSignal.CLEAR,
+            signal=MarketSignal.RED,
             multiplier=0.0,
-            detail={"reason": "无有效指数数据", "indices": index_data},
+            detail={"reason": "无有效指数数据且无历史信号", "indices": index_data},
         )
 
     green_pct = green_count / total
@@ -76,7 +101,7 @@ def compute_market_signal(
 
     multiplier = _signal_to_multiplier(signal)
 
-    return MarketState(
+    state = MarketState(
         signal=signal,
         multiplier=multiplier,
         detail={
@@ -89,6 +114,10 @@ def compute_market_signal(
             "indices": index_data,
         },
     )
+
+    # 缓存有效信号
+    _last_valid_state = state
+    return state
 
 
 def _signal_to_multiplier(signal: MarketSignal) -> float:

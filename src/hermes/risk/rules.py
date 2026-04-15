@@ -162,4 +162,14 @@ def check_portfolio_risk(
             description=f"单股仓位 {max_single_exposure_pct:.0%} > {single_warn:.0%}",
         ))
 
+    # 行业集中度检查
+    sector_warn = limits.get("max_sector_exposure_warn_pct", 0.40)
+    if max_sector_exposure_pct > sector_warn:
+        breaches.append(RiskBreach(
+            rule="sector_concentration",
+            current_value=max_sector_exposure_pct,
+            limit_value=sector_warn,
+            description=f"行业仓位 {max_sector_exposure_pct:.0%} > {sector_warn:.0%}",
+        ))
+
     return breaches

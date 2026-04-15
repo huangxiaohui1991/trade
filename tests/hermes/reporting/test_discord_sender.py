@@ -1,0 +1,135 @@
+"""Tests for reporting/discord_sender.py — retry logic and env loading"""
+
+import os
+import pytest
+from unittest.mock import patch, MagicMock
+import urllib.error
+
+from hermes.reporting.discord_sender import (
+    _api_request,
+    _load_env_once,
+    send_embed,
+    send_text,
+)
+
+
+class TestEnvLoading:
+    def test_load_env_once_flag(self):
+        """_load_env_once should only read file once."""
+        import hermes.reporting.discord_sender as mod
+        mod._env_loaded = False
+        _load_env_once()
+        assert mod._env_loaded is True
+        # Second call should be a no-op (no file read)
+        _load_env_once()
+        assert mod._env_loaded is True
+
+    def test_no_token_returns_error(self):
+        """send_embed should fail gracefully without token."""
+        with patch.dict(os.environ, {}, clear=True):
+            import hermes.reporting.discord_sender as mod
+            mod._env_loaded = True  # skip file loading
+            ok, err = send_embed({"title": "test"})
+            assert ok is False
+            assert "not configured" in err
+
+
+class TestRetryLogic:
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    def test_success_first_try(self, mock_urlopen):
+        """Successful request on first try."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "123"}'
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = _api_request("POST", "/test", "fake_token", {"data": 1})
+        assert result["id"] == "123"
+        assert mock_urlopen.call_count == 1
+
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    @patch("hermes.reporting.discord_sender.time.sleep")
+    def test_retry_on_500(self, mock_sleep, mock_urlopen):
+        """Should retry on 500 errors."""
+        error_resp = MagicMock()
+        error_resp.read.return_value = b'{"message": "server error"}'
+        http_error = urllib.error.HTTPError(
+            "http://test", 500, "Internal Server Error", {}, error_resp
+        )
+
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"id": "456"}'
+        success_resp.__enter__ = lambda s: s
+        success_resp.__exit__ = MagicMock(return_value=False)
+
+        mock_urlopen.side_effect = [http_error, success_resp]
+
+        result = _api_request("POST", "/test", "fake_token", max_retries=3)
+        assert result["id"] == "456"
+        assert mock_urlopen.call_count == 2
+        assert mock_sleep.call_count == 1
+
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    @patch("hermes.reporting.discord_sender.time.sleep")
+    def test_retry_on_429(self, mock_sleep, mock_urlopen):
+        """Should retry on 429 rate limit with retry_after."""
+        error_resp = MagicMock()
+        error_resp.read.return_value = b'{"retry_after": 0.5}'
+        http_error = urllib.error.HTTPError(
+            "http://test", 429, "Too Many Requests", {}, error_resp
+        )
+
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"id": "789"}'
+        success_resp.__enter__ = lambda s: s
+        success_resp.__exit__ = MagicMock(return_value=False)
+
+        mock_urlopen.side_effect = [http_error, success_resp]
+
+        result = _api_request("POST", "/test", "fake_token", max_retries=3)
+        assert result["id"] == "789"
+
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    def test_no_retry_on_400(self, mock_urlopen):
+        """Should NOT retry on 4xx (non-429) errors."""
+        error_resp = MagicMock()
+        error_resp.read.return_value = b'{"message": "bad request"}'
+        http_error = urllib.error.HTTPError(
+            "http://test", 400, "Bad Request", {}, error_resp
+        )
+        mock_urlopen.side_effect = http_error
+
+        result = _api_request("POST", "/test", "fake_token", max_retries=3)
+        assert "error" in result
+        assert mock_urlopen.call_count == 1  # no retry
+
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    @patch("hermes.reporting.discord_sender.time.sleep")
+    def test_all_retries_exhausted(self, mock_sleep, mock_urlopen):
+        """Should return error after all retries exhausted."""
+        error_resp = MagicMock()
+        error_resp.read.return_value = b'{"message": "server error"}'
+        http_error = urllib.error.HTTPError(
+            "http://test", 500, "Internal Server Error", {}, error_resp
+        )
+        mock_urlopen.side_effect = http_error
+
+        result = _api_request("POST", "/test", "fake_token", max_retries=3)
+        assert "error" in result
+        assert mock_urlopen.call_count == 3
+
+    @patch("hermes.reporting.discord_sender.urllib.request.urlopen")
+    @patch("hermes.reporting.discord_sender.time.sleep")
+    def test_retry_on_connection_error(self, mock_sleep, mock_urlopen):
+        """Should retry on connection errors."""
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"id": "ok"}'
+        success_resp.__enter__ = lambda s: s
+        success_resp.__exit__ = MagicMock(return_value=False)
+
+        mock_urlopen.side_effect = [ConnectionError("timeout"), success_resp]
+
+        result = _api_request("POST", "/test", "fake_token", max_retries=3)
+        assert result["id"] == "ok"
+        assert mock_urlopen.call_count == 2

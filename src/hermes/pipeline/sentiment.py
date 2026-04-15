@@ -30,9 +30,9 @@ _EVENT_KEYWORDS = {"业绩预告", "业绩快报", "重大合同", "股权变动
 
 
 def _item_hash(item: dict) -> str:
-    """生成资讯去重 hash。"""
-    key = f"{item.get('code', '')}{item.get('title', '')}"
-    return hashlib.md5(key.encode()).hexdigest()[:16]
+    """生成资讯去重 hash（含日期避免同标题不同日期误去重）。"""
+    key = f"{item.get('code', '')}{item.get('title', '')}{item.get('date', '')[:10]}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def _extract_brief(text: str, max_len: int = 120) -> str:
@@ -226,7 +226,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 2. 获取已推送 hash
     pushed_hashes = _get_pushed_hashes(ctx.conn)
 
-    # 3. 逐票搜索资讯（带缓存）
+    # 3. 并发搜索资讯（带缓存 + semaphore 限流）
     cfg = ctx.cfg.get("sentiment", {})
     cache_ttl = cfg.get("dedup_hours", 24) * 60 // 24  # 默认约 30 分钟
     if cache_ttl < 10:
@@ -236,22 +236,36 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     alerts = []
     cache_hits = 0
 
-    for code, name in watch_stocks.items():
-        # 检查缓存
+    async def _search_one(code: str, name: str, sem: asyncio.Semaphore) -> tuple[str, list[dict], bool]:
+        """单票搜索，返回 (code, items, is_cache_hit)。"""
         cached_items = _get_cached_items(ctx.conn, code, ttl_minutes=cache_ttl)
         if cached_items is not None:
-            items = cached_items
-            cache_hits += 1
-        else:
+            return code, cached_items, True
+        async with sem:
             try:
-                result = mx.search(f"{name} 最新资讯")
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, mx.search, f"{name} 最新资讯")
                 items = mx.extract_items(result)
-                # 存缓存
                 _save_cache(ctx.conn, code, items, run_id)
+                return code, items, False
             except Exception as e:
                 _logger.warning(f"[sentiment] {name}({code}) search failed: {e}")
-                continue
+                return code, [], False
 
+    async def _search_all():
+        sem = asyncio.Semaphore(5)
+        tasks = [
+            _search_one(code, name, sem)
+            for code, name in watch_stocks.items()
+        ]
+        return await asyncio.gather(*tasks)
+
+    search_results = asyncio.run(_search_all())
+
+    for code, items, is_hit in search_results:
+        if is_hit:
+            cache_hits += 1
+        name = watch_stocks.get(code, code)
         for item in items:
             h = _item_hash(item)
             if h in pushed_hashes:

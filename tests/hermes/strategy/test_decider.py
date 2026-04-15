@@ -99,3 +99,44 @@ def test_batch_decide(decider):
 
     assert len(decisions) == 2
     assert decisions[0].code == "001"
+
+
+# ── exposure limit tests (#3) ──
+
+def test_exposure_limit_caps_position(decider):
+    """When near total_max, position_pct should be capped to remaining."""
+    score = _make_score(8.0)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    d = decider.decide(score, market, current_exposure_pct=0.55)
+
+    assert d.action == Action.BUY
+    # total_max=0.60, current=0.55, remaining=0.05
+    assert d.position_pct <= 0.05 + 0.001
+
+
+def test_full_exposure_blocks_buy(decider):
+    """When at total_max, position_pct should be 0 → still BUY but 0% position."""
+    score = _make_score(8.0)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    d = decider.decide(score, market, current_exposure_pct=0.60)
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.0
+
+
+def test_weekly_limit_exact_boundary(decider):
+    """weekly_buy_count == weekly_max should block BUY."""
+    score = _make_score(8.0)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    d = decider.decide(score, market, weekly_buy_count=2)
+
+    assert d.action == Action.WATCH  # blocked by weekly limit
+
+
+def test_weekly_limit_under(decider):
+    """weekly_buy_count < weekly_max should allow BUY."""
+    score = _make_score(8.0)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    d = decider.decide(score, market, weekly_buy_count=1)
+
+    assert d.action == Action.BUY

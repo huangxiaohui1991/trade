@@ -20,6 +20,7 @@ from hermes.platform.config import ConfigRegistry, ConfigSnapshot
 from hermes.platform.runs import RunJournal
 from hermes.market.adapters import (
     AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter,
+    AkShareHKMarketAdapter, AkShareHKFinancialAdapter,
     MXMarketAdapter, MXSentimentAdapter, MXScreenerAdapter,
 )
 from hermes.market.service import MarketService
@@ -110,8 +111,8 @@ def build_context(db_path: Optional[Path] = None) -> PipelineContext:
     # Market
     store = MarketStore(conn)
     market_svc = MarketService(
-        market_providers=[MXMarketAdapter(), AkShareMarketAdapter()],
-        financial_providers=[AkShareFinancialAdapter()],
+        market_providers=[MXMarketAdapter(), AkShareHKMarketAdapter(), AkShareMarketAdapter()],
+        financial_providers=[AkShareHKFinancialAdapter(), AkShareFinancialAdapter()],
         flow_providers=[AkShareFlowAdapter()],
         sentiment_providers=[MXSentimentAdapter()],
         store=store,

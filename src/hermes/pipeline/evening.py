@@ -16,8 +16,7 @@ import logging
 from datetime import date
 
 from hermes.pipeline.context import PipelineContext
-from hermes.risk.rules import check_exit_signals, get_risk_params
-from hermes.strategy.models import Style
+from hermes.pipeline.helpers import check_position_risks
 from hermes.reporting.discord import format_evening_embed, format_stop_alert_embed
 
 _logger = logging.getLogger(__name__)
@@ -30,28 +29,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     market_state = asyncio.run(ctx.market_svc.collect_market_state(run_id))
     signal = market_state.signal.value
 
-    # 2. 持仓 + 风控
+    # 2. 持仓 + 风控（带 MA 数据 + 配置文件参数）
     positions = ctx.exec_svc.get_positions()
+    risk_results = check_position_risks(ctx, positions, run_id)
     risk_alerts = []
     stop_embeds = []
 
-    for pos in positions:
-        style = Style(pos.style) if pos.style in ("slow_bull", "momentum") else Style.UNKNOWN
-        params = get_risk_params(style)
-        try:
-            entry_date = date.fromisoformat(pos.entry_date) if pos.entry_date else date.today()
-        except ValueError:
-            entry_date = date.today()
-
-        signals = check_exit_signals(
-            code=pos.code, avg_cost=pos.avg_cost,
-            current_price=pos.current_price or pos.avg_cost,
-            entry_date=entry_date, today=date.today(),
-            highest_since_entry=pos.highest_since_entry_cents / 100 if pos.highest_since_entry_cents else pos.avg_cost,
-            entry_day_low=pos.entry_day_low_cents / 100 if pos.entry_day_low_cents else pos.avg_cost,
-            params=params,
-        )
-
+    for pos, signals in risk_results:
         # 写风控事件
         for s in signals:
             ctx.risk_svc._event_store.append(

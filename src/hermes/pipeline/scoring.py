@@ -18,6 +18,7 @@ import logging
 from datetime import date
 
 from hermes.pipeline.context import PipelineContext
+from hermes.pipeline.helpers import get_current_exposure
 from hermes.reporting.discord import format_scoring_embed
 
 _logger = logging.getLogger(__name__)
@@ -42,14 +43,22 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 3. 大盘信号
     market_state = asyncio.run(ctx.market_svc.collect_market_state(run_id))
 
-    # 4. 评分 + 决策
+    # 3.5 获取当前仓位和本周买入次数（修复 #3：之前始终为 0）
+    current_exposure_pct, weekly_buy_count = get_current_exposure(ctx)
+
+    # 4. 评分 + 决策（传入真实的仓位数据）
     decisions = ctx.strategy_svc.evaluate(
         snapshots, market_state, run_id, ctx.config_version,
+        current_exposure_pct=current_exposure_pct,
+        weekly_buy_count=weekly_buy_count,
     )
 
-    # 收集评分结果
-    score_events = ctx.event_store.query(event_type="score.calculated")
-    run_scores = [e["payload"] for e in score_events if e.get("metadata", {}).get("run_id") == run_id]
+    # 收集评分结果（使用 metadata_filter 在 SQL 层过滤，避免全量拉取）
+    score_events = ctx.event_store.query(
+        event_type="score.calculated",
+        metadata_filter={"run_id": run_id},
+    )
+    run_scores = [e["payload"] for e in score_events]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
 
     # 5. 更新 projection_candidate_pool（含降级逻辑）
