@@ -348,57 +348,87 @@ class MXMarketAdapter:
             return {}
 
     def _get_index_sync(self) -> dict[str, IndexQuote]:
-        """获取指数行情，优先 MX，失败则用 akshare 兜底。"""
-        # 优先 MX
+        """获取指数行情，优先 MX，失败则用 akshare 兜底。
+        均线/above_ma20/below_ma60_days 由 akshare 日线数据计算。"""
+        import akshare as ak
+        import pandas as pd
+
+        # 日线代码映射
+        code_map = {
+            "上证指数": "sh000001",
+            "深证成指": "sz399001",
+            "创业板指": "sz399006",
+            "科创50": "sh000688",
+        }
+
+        def _compute_ma(symbol: str) -> tuple[float, float, bool, int]:
+            """计算 MA20、MA60、above_ma20、below_ma60_days。"""
+            try:
+                df = ak.stock_zh_index_daily(symbol=symbol)
+                df = df.sort_values("date")
+                close = df["close"].astype(float)
+                ma20_val = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else 0
+                ma60_val = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else 0
+                latest_price = close.iloc[-1]
+                above = bool(latest_price > ma20_val > 0)
+                # below_ma60_days：最近多少个交易日连续低于 MA60
+                below_ma60 = (close < ma60_val).iloc[-20:] if ma60_val > 0 else pd.Series(False, index=close.index[-20:])
+                count = 0
+                for v in reversed(below_ma60.tolist()):
+                    if v:
+                        count += 1
+                    else:
+                        break
+                return float(ma20_val), float(ma60_val), above, count
+            except Exception:
+                return 0.0, 0.0, False, 0
+
+        result = {}
+
+        # 优先 MX（获取实时价格/涨跌幅）
         try:
             from hermes.market.mx.realtime import get_market_index_mx
             raw = get_market_index_mx()
-            result = {}
             for name, data in raw.items():
                 if "error" in data:
                     continue
+                symbol = code_map.get(name, name)
+                ma20, ma60, above_ma20, below_days = _compute_ma(symbol)
                 result[name] = IndexQuote(
-                    symbol=data.get("symbol", name),
+                    symbol=symbol,
                     name=name,
-                    price=data.get("price", 0),
-                    change_pct=data.get("change_pct", 0),
-                    ma20=data.get("ma20", 0),
-                    ma60=data.get("ma60", 0),
-                    above_ma20=data.get("above_ma20", False),
-                    below_ma60_days=data.get("below_ma60_days", 0),
+                    price=data.get("close") or data.get("price", 0) or 0,
+                    change_pct=data.get("change_pct", 0) or 0,
+                    ma20=ma20,
+                    ma60=ma60,
+                    above_ma20=above_ma20,
+                    below_ma60_days=below_days,
                 )
-            # result 不为空且有有效数据才用 MX
-            if result and any(v.price > 0 or v.change_pct not in (None, 0)
-                              for v in result.values()):
+            if result and any(v.price > 0 for v in result.values()):
                 return result
         except Exception:
             pass
 
-        # akshare 兜底
+        # akshare 兜底（价格 + 均线）
         try:
-            import akshare as ak
-            df = ak.stock_zh_index_spot_sina()
-            # 上证、深证、创业板、科创50
-            code_map = {
-                "上证指数": "sh000001",
-                "深证成指": "sz399001",
-                "创业板指": "sz399006",
-                "科创50": "sh000688",
-            }
-            result = {}
+            spot = ak.stock_zh_index_spot_sina()
             for name, code in code_map.items():
-                row = df[df["代码"] == code]
+                if name in result:
+                    continue
+                row = spot[spot["代码"] == code]
                 if row.empty:
                     continue
                 r = row.iloc[0]
+                ma20, ma60, above_ma20, below_days = _compute_ma(code)
                 result[name] = IndexQuote(
                     symbol=code,
                     name=name,
                     price=float(r.get("最新价", 0) or 0),
                     change_pct=float(r.get("涨跌幅", 0) or 0),
-                    ma20=0, ma60=0,
-                    above_ma20=False,
-                    below_ma60_days=0,
+                    ma20=ma20,
+                    ma60=ma60,
+                    above_ma20=above_ma20,
+                    below_ma60_days=below_days,
                 )
             return result
         except Exception:
