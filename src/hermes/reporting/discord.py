@@ -270,9 +270,18 @@ def format_sentiment_embed(alerts: list[dict]) -> dict:
         name = a.get("name", "")
         code = a.get("code", "")
         summary = a.get("summary", "")
+        brief = a.get("brief", "")
+        date = a.get("date", "")
+
+        value_parts = [f"**{summary}**"]
+        if brief:
+            value_parts.append(brief)
+        if date:
+            value_parts.append(f"_{date}_")
+
         fields.append(_field(
             f"{emoji} {name}({code})",
-            summary,
+            "\n".join(value_parts),
             inline=False,
         ))
 
