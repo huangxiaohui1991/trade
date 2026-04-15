@@ -167,14 +167,32 @@ class AkShareFinancialAdapter:
             if df is None or df.empty:
                 return None
 
-            roe = None
-            roe_col = next((c for c in df.columns if "净资产收益率" in str(c)), None)
-            if roe_col:
-                vals = df[roe_col].dropna().head(4).tolist()
-                if vals:
-                    roe = round(float(vals[0]), 2)
+            def _latest(col_name_pattern: str) -> Optional[float]:
+                col = next((c for c in df.columns if col_name_pattern in str(c)), None)
+                if not col:
+                    return None
+                vals = df[col].dropna().head(4).tolist()
+                return round(float(vals[0]), 2) if vals else None
 
-            return FinancialReport(roe=roe)
+            roe = _latest("净资产收益率")  # 取加权净资产收益率更准确
+            if roe is None:
+                roe = _latest("总资产净利润率")
+
+            # 营收增长：主营业务收入增长率（最新一期）
+            rev_growth = _latest("主营业务收入增长率")
+
+            # 现金流：每股经营性现金流
+            cash_flow = _latest("每股经营性现金流")
+
+            # 也尝试总资产净利润率作为备选
+            if roe is None:
+                roe = _latest("总资产净利润率")
+
+            return FinancialReport(
+                roe=roe,
+                revenue_growth=rev_growth,
+                operating_cash_flow=cash_flow,
+            )
         except Exception:
             return None
 

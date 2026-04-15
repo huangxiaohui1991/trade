@@ -93,20 +93,24 @@ class MarketService:
                 sentiment=sent,
             )
 
-            # 存储观测
+            # 存储观测（只存有效的观测，不存全 None 状态）
             if self._store and run_id:
-                self._store.save_observation(
-                    source="market_service",
-                    kind="snapshot",
-                    symbol=code,
-                    payload={
-                        "has_quote": quote is not None,
-                        "has_financial": fin is not None,
-                        "has_flow": flow is not None,
-                        "has_sentiment": sent is not None,
-                    },
-                    run_id=run_id,
-                )
+                has_any = (quote is not None or fin is not None
+                           or flow is not None or sent is not None
+                           or technical is not None)
+                if has_any:
+                    self._store.save_observation(
+                        source="market_service",
+                        kind="snapshot",
+                        symbol=code,
+                        payload={
+                            "has_quote": quote is not None,
+                            "has_financial": fin is not None,
+                            "has_flow": flow is not None,
+                            "has_sentiment": sent is not None,
+                        },
+                        run_id=run_id,
+                    )
 
             return snapshot
 
@@ -224,11 +228,8 @@ class MarketService:
 
     async def _get_flow(self, code: str) -> Optional[FundFlow]:
         """从 flow providers 获取资金流向，自动 fallback。"""
-        if self._store:
-            cached = self._store.get_cached(code, "flow")
-            if cached:
-                return FundFlow(**cached)
-
+        # 注意：flow 的 save_observation 只存了 has_flow 布尔标记，不含实际数据，
+        # 所以不走缓存，直接从 provider 拉取。
         for provider in self._flow:
             try:
                 result = await provider.get_fund_flow(code)
