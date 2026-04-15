@@ -18,5 +18,8 @@ LOG_DIR="$REPO_ROOT/data"
 # 核心池评分 15:40
 40 15 * * 1-5 $TRADE run-pipeline scoring >> $LOG_DIR/cron_scoring.log 2>&1
 
+# 模拟盘自动交易 14:00（盘中，评分后执行）
+0 14 * * 1-5 $TRADE run-pipeline auto_trade >> $LOG_DIR/cron_auto_trade.log 2>&1
+
 # 周报 周日 20:00
 0 20 * * 0 $TRADE run-pipeline weekly >> $LOG_DIR/cron_weekly.log 2>&1

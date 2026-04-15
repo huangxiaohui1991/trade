@@ -469,7 +469,77 @@ def trade_watchlist_manage(action: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — 模拟交易
+# Tools — 模拟盘自动交易
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_safe
+def trade_auto_trade(dry_run: bool = True) -> str:
+    """
+    执行模拟盘自动交易（选股→评分→风控→买卖）。
+    dry_run=True 时只记录不下单，False 时真实下单到妙想模拟盘。
+    需要先在 config/strategy.yaml 中启用 auto_trade.enabled: true。
+    """
+    from hermes.pipeline.context import build_context
+    ctx = build_context()
+    try:
+        # 临时覆盖 dry_run
+        if ctx.config_snapshot and ctx.config_snapshot.data.get("strategy", {}).get("auto_trade"):
+            ctx.config_snapshot.data["strategy"]["auto_trade"]["dry_run"] = dry_run
+            ctx.config_snapshot.data["strategy"]["auto_trade"]["enabled"] = True
+
+        run_id = ctx.run_journal.start_run("auto_trade", ctx.config_version)
+        from hermes.pipeline.auto_trade import run
+        result = run(ctx, run_id)
+        ctx.run_journal.complete_run(run_id, artifacts={"result": "ok"})
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    finally:
+        ctx.conn.close()
+
+
+@mcp.tool()
+@_safe
+def trade_paper_status() -> str:
+    """查询模拟盘状态（持仓 + 资金 + 最近交易记录）。"""
+    from hermes.pipeline.paper_account import PaperAccount
+    paper = PaperAccount()
+    positions = paper.get_positions()
+    balance = paper.get_balance()
+
+    # 最近的自动交易事件
+    from hermes.pipeline.context import build_context
+    ctx = build_context()
+    try:
+        recent = ctx.event_store.query(
+            event_type="auto_trade.executed",
+            limit=10,
+        )
+        trades = [ev.get("payload", {}) for ev in recent]
+    except Exception:
+        trades = []
+    finally:
+        ctx.conn.close()
+
+    return json.dumps({
+        "positions": [
+            {"code": p.code, "name": p.name, "shares": p.shares,
+             "avg_cost": p.avg_cost, "current_price": p.current_price,
+             "pnl": p.pnl, "pnl_pct": p.pnl_pct}
+            for p in positions
+        ],
+        "balance": {
+            "total_asset": balance.total_asset,
+            "available_cash": balance.available_cash,
+            "market_value": balance.market_value,
+        },
+        "recent_trades": trades,
+    }, ensure_ascii=False, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Tools — 模拟交易（手动）
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

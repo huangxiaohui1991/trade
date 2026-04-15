@@ -23,6 +23,8 @@ Hermes 是一个 A 股量化交易辅助系统，采用"四维评分 + 风格双
 | `trade_trade_events` | 交易记录 | 无 |
 | `trade_run_pipeline` | 运行 pipeline | 有（幂等） |
 | `trade_backtest` | 策略回测 | 有 |
+| `trade_auto_trade` | 模拟盘自动交易（选股→评分→风控→买卖） | 有 |
+| `trade_paper_status` | 模拟盘状态（持仓+资金+交易记录） | 无 |
 
 ## 关键交易规则
 

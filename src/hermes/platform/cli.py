@@ -430,6 +430,15 @@ def run_pipeline(
                 result = sentiment_run(ctx, run_id)
                 typer.echo(f"  监控{result['monitored']}只 告警{len(result['alerts'])}条")
 
+            elif pipeline_type == "auto_trade":
+                from hermes.pipeline.auto_trade import run as auto_trade_run
+                result = auto_trade_run(ctx, run_id)
+                if not result.get("enabled"):
+                    typer.echo("  ⏭️ auto_trade 未启用")
+                else:
+                    mode = "[DRY]" if result.get("dry_run") else ""
+                    typer.echo(f"  {mode} 买入{len(result['buys'])}笔 卖出{len(result['sells'])}笔")
+
             else:
                 ctx.run_journal.fail_run(run_id, f"Unknown pipeline: {pipeline_type}")
                 typer.echo(f"❌ Unknown pipeline: {pipeline_type}", err=True)

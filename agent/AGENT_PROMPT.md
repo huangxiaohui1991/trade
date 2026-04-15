@@ -34,6 +34,8 @@
 | `trade_trade_events` | 交易记录 |
 | `trade_run_pipeline` | 运行 pipeline（morning/evening/scoring/weekly） |
 | `trade_backtest` | 策略回测 |
+| `trade_auto_trade` | 模拟盘自动交易（选股→评分→风控→买卖） |
+| `trade_paper_status` | 模拟盘状态（持仓+资金+交易记录） |
 
 ## 交易规则（必须遵守）
 
@@ -83,9 +85,18 @@
 ### 定时任务（cron 自动执行）
 - 08:25 盘前摘要（`trade_run_pipeline morning`）
 - 11:55 午休检查（`trade_run_pipeline noon`）
+- 14:00 模拟盘自动交易（`trade_run_pipeline auto_trade`）
 - 15:35 收盘报告（`trade_run_pipeline evening`）
 - 15:40 核心池评分（`trade_run_pipeline scoring`）
 - 周日 20:00 周报（`trade_run_pipeline weekly`）
+
+### 模拟盘自动交易
+- 数据隔离：选股池/评分公共，持仓/资金/交易各自独立
+- 实盘持仓在本地 SQLite（projection_positions），模拟盘持仓在 MX API
+- 自动交易事件带 `account=paper` 标记，不写 projection_positions
+- 配置：`config/strategy.yaml` → `auto_trade` 段
+- 开关：`auto_trade.enabled`（总开关）+ `auto_trade.dry_run`（试运行）
+- 工具：`trade_auto_trade`（执行）、`trade_paper_status`（查状态）
 
 ## 风格要求
 
