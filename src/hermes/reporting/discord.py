@@ -170,8 +170,17 @@ def format_scoring_embed(scores: list[dict], date_str: str = "") -> dict:
         name = s.get("name", s.get("code", ""))
         veto = s.get("veto_triggered", False)
         emoji = "❌" if veto else _score_emoji(score)
-        detail = f"技{s.get('technical_score', 0):.0f} 基{s.get('fundamental_score', 0):.0f} " \
-                 f"资{s.get('flow_score', 0):.0f} 舆{s.get('sentiment_score', 0):.0f}"
+        # 从 dimensions 列表取分项
+        if "dimensions" in s:
+            dim_map = {d["name"]: d for d in s["dimensions"]}
+            tech = dim_map.get("technical", {}).get("score", 0)
+            fund = dim_map.get("fundamental", {}).get("score", 0)
+            flow = dim_map.get("flow", {}).get("score", 0)
+            sent = dim_map.get("sentiment", {}).get("score", 0)
+            detail = f"技{round(tech)} 基{round(fund)} 资{round(flow)} 舆{round(sent)}"
+        else:
+            detail = f"技{int(s.get('technical_score', 0))} 基{int(s.get('fundamental_score', 0))} " \
+                     f"资{int(s.get('flow_score', 0))} 舆{int(s.get('sentiment_score', 0))}"
         fields.append(_field(f"{emoji} {name}", f"**{score:.1f}** · {detail}"))
 
     return _embed(
