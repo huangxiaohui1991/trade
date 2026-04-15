@@ -20,6 +20,7 @@ COLORS = {
     "weekly": 0x00695C,
     "stop_alert": 0xC62828,
     "profit_alert": 0x2E7D32,
+    "sentiment": 0xFF6F00,
     "info": 0x37474F,
 }
 
@@ -252,4 +253,44 @@ def format_weekly_embed(data: dict) -> dict:
         color=COLORS["weekly"],
         fields=fields,
         footer="Hermes · weekly_review",
+    )
+
+
+def format_sentiment_embed(alerts: list[dict]) -> dict:
+    """舆情告警 → Discord embed dict。"""
+    now = datetime.now().strftime("%H:%M")
+    fields = []
+
+    # 按 level 分组：negative 优先
+    order = {"negative": 0, "event": 1, "positive": 2}
+    sorted_alerts = sorted(alerts, key=lambda a: order.get(a.get("level", ""), 9))
+
+    for a in sorted_alerts[:20]:  # Discord 最多 25 fields
+        emoji = a.get("emoji", "📰")
+        name = a.get("name", "")
+        code = a.get("code", "")
+        summary = a.get("summary", "")
+        fields.append(_field(
+            f"{emoji} {name}({code})",
+            summary,
+            inline=False,
+        ))
+
+    neg = sum(1 for a in alerts if a.get("level") == "negative")
+    pos = sum(1 for a in alerts if a.get("level") == "positive")
+    evt = sum(1 for a in alerts if a.get("level") == "event")
+    desc_parts = []
+    if neg:
+        desc_parts.append(f"🔴 {neg} 负面")
+    if pos:
+        desc_parts.append(f"🟢 {pos} 正面")
+    if evt:
+        desc_parts.append(f"📢 {evt} 事件")
+
+    return _embed(
+        title=f"📰 舆情速报 — {now}",
+        description=" · ".join(desc_parts) or f"共 {len(alerts)} 条",
+        color=COLORS["sentiment"],
+        fields=fields,
+        footer="Hermes · sentiment_monitor",
     )

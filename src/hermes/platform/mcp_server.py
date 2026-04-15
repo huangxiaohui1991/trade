@@ -543,7 +543,8 @@ def trade_backtest(start: str, end: str, preset: str = "保守验证C") -> str:
 @_safe
 def trade_run_pipeline(pipeline_type: str) -> str:
     """运行指定 pipeline（完整流程，带幂等检查）。"""
-    if _run_journal.is_completed_today(pipeline_type):
+    # sentiment 每30分钟跑一次，不做幂等检查
+    if pipeline_type != "sentiment" and _run_journal.is_completed_today(pipeline_type):
         return json.dumps({"status": "skipped", "reason": f"{pipeline_type} 今日已完成"}, ensure_ascii=False)
 
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
@@ -571,6 +572,8 @@ def trade_run_pipeline(pipeline_type: str) -> str:
             from hermes.pipeline.evening import run
         elif pipeline_type == "weekly":
             from hermes.pipeline.weekly import run
+        elif pipeline_type == "sentiment":
+            from hermes.pipeline.sentiment import run
         else:
             _run_journal.fail_run(run_id, f"Unknown pipeline: {pipeline_type}")
             return json.dumps({"error": f"Unknown pipeline: {pipeline_type}"}, ensure_ascii=False)
