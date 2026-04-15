@@ -124,6 +124,27 @@ class OrderManager:
             (now, now, order_id),
         )
 
+        # 同步更新余额
+        trade_amount = fill_price_cents * row["shares"] + fee_cents
+        if row["side"] == "buy":
+            # 现金减少，总资产不变（现金→持仓）
+            self._conn.execute(
+                """UPDATE projection_balances
+                   SET cash_cents = cash_cents - ?,
+                       updated_at = ?
+                   WHERE scope = 'main'""",
+                (trade_amount, now),
+            )
+        else:  # sell
+            # 现金增加，总资产不变（持仓→现金）
+            self._conn.execute(
+                """UPDATE projection_balances
+                   SET cash_cents = cash_cents + ?,
+                       updated_at = ?
+                   WHERE scope = 'main'""",
+                (trade_amount, now),
+            )
+
     def cancel_order(
         self,
         order_id: str,
