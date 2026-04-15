@@ -84,6 +84,57 @@ class MXAsyncClient:
         """数据查询。"""
         return await self.post("/api/claw/query", {"toolQuery": query})
 
+    # ------------------------------------------------------------------
+    # 自选股管理
+    # ------------------------------------------------------------------
+
+    async def get_self_select(self) -> dict[str, Any]:
+        """查询自选股列表。"""
+        return await self.post("/api/claw/self-select/get", {})
+
+    async def manage_self_select(self, query: str) -> dict[str, Any]:
+        """管理自选股（添加/删除，自然语言）。"""
+        return await self.post("/api/claw/self-select/manage", {"query": query})
+
+    # ------------------------------------------------------------------
+    # 模拟交易
+    # ------------------------------------------------------------------
+
+    async def mock_positions(self) -> dict[str, Any]:
+        """查询模拟持仓。"""
+        return await self.post("/api/claw/mockTrading/positions", {"moneyUnit": 1})
+
+    async def mock_balance(self) -> dict[str, Any]:
+        """查询模拟账户资金。"""
+        return await self.post("/api/claw/mockTrading/balance", {"moneyUnit": 1})
+
+    async def mock_orders(self) -> dict[str, Any]:
+        """查询模拟委托记录。"""
+        return await self.post("/api/claw/mockTrading/orders", {"fltOrderDrt": 0, "fltOrderStatus": 0})
+
+    async def mock_trade(
+        self, trade_type: str, stock_code: str, quantity: int,
+        price: float | None = None, use_market_price: bool = False,
+    ) -> dict[str, Any]:
+        """模拟买入/卖出。"""
+        body: dict[str, Any] = {
+            "type": trade_type,
+            "stockCode": stock_code,
+            "quantity": quantity,
+            "useMarketPrice": use_market_price,
+        }
+        if not use_market_price and price is not None:
+            body["price"] = price
+        return await self.post("/api/claw/mockTrading/trade", body)
+
+    async def mock_cancel(self, order_id: str | None = None, cancel_all: bool = False) -> dict[str, Any]:
+        """模拟撤单。"""
+        if cancel_all:
+            body: dict[str, Any] = {"type": "all"}
+        else:
+            body = {"type": "order", "orderId": order_id or ""}
+        return await self.post("/api/claw/mockTrading/cancel", body)
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()

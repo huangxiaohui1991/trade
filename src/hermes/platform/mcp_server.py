@@ -410,6 +410,128 @@ def trade_screener(query: str = "") -> str:
     }, ensure_ascii=False, default=str)
 
 
+# ---------------------------------------------------------------------------
+# Tools — 妙想数据查询
+# ---------------------------------------------------------------------------
+
+async def _mx_call(coro_fn):
+    """在单个 event loop 中执行 MX API 调用并关闭 client。"""
+    from hermes.market.mx_async import MXAsyncClient
+    client = MXAsyncClient()
+    try:
+        return await coro_fn(client)
+    finally:
+        await client.close()
+
+
+@mcp.tool()
+@_safe
+def trade_mx_data(query: str) -> str:
+    """妙想金融数据查询（自然语言，如"双环传动最近3年营收"）。"""
+    result = asyncio.run(_mx_call(lambda c: c.query_data(query)))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Tools — 自选股管理
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_safe
+def trade_watchlist() -> str:
+    """查询东方财富自选股列表。"""
+    result = asyncio.run(_mx_call(lambda c: c.get_self_select()))
+
+    # 提取关键数据
+    data = result.get("data", {})
+    all_results = data.get("allResults", {})
+    result_data = all_results.get("result", {})
+    data_list = result_data.get("dataList", [])
+
+    stocks = []
+    for s in data_list:
+        stocks.append({
+            "code": s.get("SECURITY_CODE", ""),
+            "name": s.get("SECURITY_SHORT_NAME", ""),
+            "price": s.get("NEWEST_PRICE"),
+            "change_pct": s.get("CHG"),
+        })
+    return json.dumps({"count": len(stocks), "stocks": stocks}, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_watchlist_manage(action: str) -> str:
+    """管理自选股（自然语言，如"把贵州茅台加入自选"、"删除双环传动"）。"""
+    result = asyncio.run(_mx_call(lambda c: c.manage_self_select(action)))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Tools — 模拟交易
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_safe
+def trade_mock_portfolio() -> str:
+    """查询妙想模拟盘持仓。"""
+    result = asyncio.run(_mx_call(lambda c: c.mock_positions()))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_mock_balance() -> str:
+    """查询妙想模拟盘账户资金。"""
+    result = asyncio.run(_mx_call(lambda c: c.mock_balance()))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_mock_orders() -> str:
+    """查询妙想模拟盘委托记录。"""
+    result = asyncio.run(_mx_call(lambda c: c.mock_orders()))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_mock_buy(code: str, shares: int, price: float = 0) -> str:
+    """模拟盘买入。price=0 为市价委托，shares 须为 100 的整数倍。"""
+    if shares % 100 != 0:
+        return json.dumps({"error": "shares 必须为 100 的整数倍"}, ensure_ascii=False)
+    use_market = price <= 0
+    result = asyncio.run(_mx_call(
+        lambda c: c.mock_trade("buy", code, shares, price if not use_market else None, use_market)
+    ))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_mock_sell(code: str, shares: int, price: float = 0) -> str:
+    """模拟盘卖出。price=0 为市价委托，shares 须为 100 的整数倍。"""
+    if shares % 100 != 0:
+        return json.dumps({"error": "shares 必须为 100 的整数倍"}, ensure_ascii=False)
+    use_market = price <= 0
+    result = asyncio.run(_mx_call(
+        lambda c: c.mock_trade("sell", code, shares, price if not use_market else None, use_market)
+    ))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_mock_cancel(order_id: str = "") -> str:
+    """模拟盘撤单。order_id 留空则撤销全部未成交委托。"""
+    cancel_all = not order_id.strip()
+    result = asyncio.run(_mx_call(
+        lambda c: c.mock_cancel(order_id if not cancel_all else None, cancel_all)
+    ))
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
 @mcp.tool()
 @_safe
 def trade_backtest(start: str, end: str, preset: str = "保守验证C") -> str:
