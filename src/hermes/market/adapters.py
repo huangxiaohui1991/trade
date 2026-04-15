@@ -98,44 +98,104 @@ class AkShareMarketAdapter:
         return await asyncio.to_thread(self._get_index_sync, symbols)
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
+        """主入口：优先东财全量，失败则降级到新浪分时。"""
         try:
             import akshare as ak
+
             # 过滤掉港股代码
             a_codes = [c for c in codes if not is_hk_code(c)]
             if not a_codes:
                 return {}
-            df = ak.stock_zh_a_spot_em()
-            if df is None or df.empty:
-                return {}
 
-            code_set = set(a_codes)
-            result = {}
-            for _, row in df.iterrows():
-                code = str(row.get("代码", "")).strip()
-                if code not in code_set:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                code_set = set(a_codes)
+                result = {}
+                for _, row in df.iterrows():
+                    code = str(row.get("代码", "")).strip()
+                    if code not in code_set:
+                        continue
+                    result[code] = StockQuote(
+                        code=code,
+                        name=str(row.get("名称", "")),
+                        price=float(row.get("最新价", 0) or 0),
+                        open=float(row.get("今开", 0) or 0),
+                        high=float(row.get("最高", 0) or 0),
+                        low=float(row.get("最低", 0) or 0),
+                        close=float(row.get("最新价", 0) or 0),
+                        volume=int(row.get("成交量", 0) or 0),
+                        amount=float(row.get("成交额", 0) or 0),
+                        change_pct=float(row.get("涨跌幅", 0) or 0),
+                    )
+                if result:
+                    return result
+        except Exception:
+            pass
+
+        # 东财断线，降级到新浪分时（收盘后场景，每只股票单独请求）
+        return self._get_realtime_from_sina_tick(codes)
+
+    def _get_realtime_from_sina_tick(self, codes: list[str]) -> dict[str, StockQuote]:
+        """新浪分时降级：用当日最后一笔的价格和成交额估算实时行情。
+
+        仅在东财 stock_zh_a_spot_em 断线时使用。
+        收盘后可用，日内数据有限（无盘前集合竞价价格）。
+        """
+        from datetime import date
+
+        result = {}
+        today = date.today().strftime("%Y%m%d")
+
+        for code in codes:
+            if is_hk_code(code):
+                continue
+            try:
+                import akshare as ak
+
+                # 标准化新浪格式
+                symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
+                df = ak.stock_intraday_sina(symbol=symbol, date=today)
+                if df is None or df.empty:
                     continue
+
+                last_row = df.iloc[-1]
+                price = float(last_row["price"])
+                prev_price = float(last_row["prev_price"]) if last_row["prev_price"] else price
+                change_pct = ((price - prev_price) / prev_price * 100) if prev_price > 0 else 0.0
+
+                # 成交额 = sum(price * volume)，新浪分时 volume 是累计成交量
+                total_volume = float(df["volume"].sum()) if "volume" in df.columns else 0.0
+                amount = float(last_row["volume"]) * price if "volume" in df.columns else 0.0
+
                 result[code] = StockQuote(
                     code=code,
-                    name=str(row.get("名称", "")),
-                    price=float(row.get("最新价", 0) or 0),
-                    open=float(row.get("今开", 0) or 0),
-                    high=float(row.get("最高", 0) or 0),
-                    low=float(row.get("最低", 0) or 0),
-                    close=float(row.get("最新价", 0) or 0),
-                    volume=int(row.get("成交量", 0) or 0),
-                    amount=float(row.get("成交额", 0) or 0),
-                    change_pct=float(row.get("涨跌幅", 0) or 0),
+                    name=str(df.iloc[0]["name"]) if "name" in df.columns else code,
+                    price=price,
+                    open=0.0,  # 新浪分时无开盘价
+                    high=float(df["price"].max()),
+                    low=float(df["price"].min()),
+                    close=price,
+                    volume=int(total_volume),
+                    amount=amount,
+                    change_pct=round(change_pct, 2),
                 )
-            return result
-        except Exception:
-            return {}
+            except Exception:
+                continue
+
+        return result
 
     def _get_kline_sync(self, code: str, period: str, count: int) -> Optional[pd.DataFrame]:
+        """主入口：优先东财日线，失败则降级到腾讯日线。"""
+        result = self._get_kline_from_em(code, count)
+        if result is not None and not result.empty:
+            return result
+        return self._get_kline_from_tx(code, count)
+
+    def _get_kline_from_em(self, code: str, count: int) -> Optional[pd.DataFrame]:
+        """东财日线（复权）。"""
         try:
             import akshare as ak
-            from datetime import datetime, timedelta
 
-            # 适配 akshare 接口格式：沪市加 sh，深市加 sz
             if code.startswith(("6", "9")):
                 symbol = f"sh{code}"
             else:
@@ -145,12 +205,42 @@ class AkShareMarketAdapter:
             if df is None or df.empty:
                 return None
 
-            # 按日期升序，取最近足够多数据
+            df = df.sort_values("date").tail(count * 2).reset_index(drop=True)
+            df["涨跌幅"] = df["close"].pct_change() * 100
+            return df
+        except Exception:
+            return None
+
+    def _get_kline_from_tx(self, code: str, count: int) -> Optional[pd.DataFrame]:
+        """腾讯日线降级：无成交量（volume=0），其他字段齐全。
+
+        适用：东财 stock_zh_a_daily 断线时。
+        """
+        try:
+            import akshare as ak
+            from datetime import datetime, timedelta
+
+            if code.startswith(("6", "9")):
+                symbol = f"sh{code}"
+            else:
+                symbol = f"sz{code}"
+
+            end = datetime.today().strftime("%Y%m%d")
+            start = (datetime.today() - timedelta(days=count * 4)).strftime("%Y%m%d")
+            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start, end_date=end)
+            if df is None or df.empty:
+                return None
+
             df = df.sort_values("date").tail(count * 2).reset_index(drop=True)
 
-            # 添加涨跌幅列（用 close 计算）
-            df["涨跌幅"] = df["close"].pct_change() * 100
+            # 腾讯日线无 volume，用 amount/close 估算成交量（单位一致时有效）
+            # 保留 amount 列，volume 置 0（不影响技术指标计算，仅影响 amount 相关维度）
+            if "volume" not in df.columns:
+                df["volume"] = 0
+            if "amount" not in df.columns:
+                df["amount"] = 0.0
 
+            df["涨跌幅"] = df["close"].pct_change() * 100
             return df
         except Exception:
             return None
@@ -212,9 +302,25 @@ class AkShareFlowAdapter:
         return await asyncio.to_thread(self._get_flow_sync, code, days)
 
     def _get_flow_sync(self, code: str, days: int) -> Optional[FundFlow]:
+        """主入口：优先东财，失败则降级到腾讯 tick。"""
         try:
             if is_hk_code(code):
                 return None
+            # 1. 优先东财资金流
+            result = self._get_flow_from_em(code, days)
+            if result is not None:
+                return result
+            # 2. 东财断线，降级到腾讯分笔
+            result = self._get_flow_from_tx_tick(code)
+            if result is not None:
+                return result
+            return None
+        except Exception:
+            return None
+
+    def _get_flow_from_em(self, code: str, days: int) -> Optional[FundFlow]:
+        """东财资金流接口，失败时返回 None（ caller 会尝试腾讯降级）。"""
+        try:
             import akshare as ak
             market = "sh" if code.startswith(("6", "9")) else "sz"
             df = ak.stock_individual_fund_flow(stock=code, market=market)
@@ -236,6 +342,50 @@ class AkShareFlowAdapter:
 
             return FundFlow(
                 net_inflow_1d=total_net,
+                consecutive_outflow_days=outflow_streak,
+            )
+        except Exception:
+            return None
+
+    def _get_flow_from_tx_tick(self, code: str) -> Optional[FundFlow]:
+        """腾讯分笔成交降级：按买盘/卖盘汇总估算主力净流入。
+
+        适用场景：东财 stock_individual_fund_flow 接口断线时。
+        注意：腾讯 tick 只有当日数据，days 参数被忽略。
+        """
+        try:
+            import akshare as ak
+
+            # 标准化为腾讯格式：sh600415 / sz000001
+            if code.startswith(("6", "9")):
+                symbol = f"sh{code}"
+            else:
+                symbol = f"sz{code}"
+
+            df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
+            if df is None or df.empty:
+                return None
+
+            buy_mask = df["性质"].str.contains("买", na=False)
+            sell_mask = df["性质"].str.contains("卖", na=False)
+
+            buy_amount = df.loc[buy_mask, "成交金额"].sum()
+            sell_amount = df.loc[sell_mask, "成交金额"].sum()
+            total_amount = buy_amount + sell_amount
+
+            net_inflow = buy_amount - sell_amount  # 正=净流入，负=净流出
+
+            # 主买占比（主力参与度）
+            main_force_ratio = buy_amount / total_amount if total_amount > 0 else 0.0
+
+            # 连续流出判断：今日净流出且金额 > 5000万 → outflow_streak=1（腾讯tick只当日）
+            # 明日需要重新获取才知道是否连续，所以最多记1天
+            outflow_streak = 1 if (net_inflow < -5_000_000) else 0
+
+            return FundFlow(
+                net_inflow_1d=net_inflow,
+                net_inflow_5d=net_inflow,  # 腾讯tick仅当日，退化为单日
+                main_force_ratio=main_force_ratio,
                 consecutive_outflow_days=outflow_streak,
             )
         except Exception:
