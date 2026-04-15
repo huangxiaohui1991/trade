@@ -8,10 +8,13 @@ Protocol 定义标准接口，adapter 实现具体数据源。
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Optional, Protocol, runtime_checkable
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 from hermes.market.models import (
     FinancialReport,
@@ -247,7 +250,8 @@ class AkShareMarketAdapter:
             return None
 
     def _get_index_sync(self, symbols: list[str]) -> dict[str, IndexQuote]:
-        # 指数行情需要单独实现，暂返回空
+        # 指数行情未实现，由 MXMarketAdapter 提供，此处仅作兜底
+        _logger.debug("[AkShareMarket] get_index 未实现，返回空")
         return {}
 
 
@@ -566,9 +570,13 @@ class MXMarketAdapter:
                     below_ma60_days=below_days,
                 )
             if result and any(v.price > 0 for v in result.values()):
-                return result
-        except Exception:
-            pass
+                # MX 可能只返回部分指数，缺失的由 akshare 兜底补全
+                missing = [n for n in code_map if n not in result]
+                if not missing:
+                    return result
+                # 有缺失，继续走 akshare 兜底（只补缺失的）
+        except Exception as e:
+            _logger.warning(f"[MXMarket] MX 指数行情获取失败: {e}")
 
         # akshare 兜底（价格 + 均线）
         try:
@@ -914,6 +922,7 @@ class AkShareHKMarketAdapter:
         return await asyncio.to_thread(self._get_kline_sync, code, period, count)
 
     async def get_index(self, symbols: list[str]) -> dict[str, IndexQuote]:
+        _logger.debug("[AkShareHKMarket] 港股指数暂不支持")
         return {}  # 港股指数暂不支持
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
@@ -996,10 +1005,12 @@ class AkShareHKFinancialAdapter:
                 if df is not None and not df.empty:
                     # 只能拿到估值，没有 ROE 等
                     return FinancialReport()
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug(f"[AkShareHKFinancial] {code} 百度估值接口失败: {e}")
 
             # 港股财务数据有限，返回空报告（不阻塞评分，降级处理）
+            _logger.info(f"[AkShareHKFinancial] {code} 港股财务数据有限，降级返回空报告")
             return FinancialReport()
-        except Exception:
+        except Exception as e:
+            _logger.warning(f"[AkShareHKFinancial] {code} 财务数据获取异常: {e}")
             return None

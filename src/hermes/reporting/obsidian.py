@@ -16,12 +16,15 @@ reporting/obsidian.py — Obsidian vault 投影
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from hermes.platform.events import EventStore
+
+_logger = logging.getLogger(__name__)
 
 
 class ObsidianProjector:
@@ -39,6 +42,7 @@ class ObsidianProjector:
 
     def _write(self, relative_path: str, content: str) -> Optional[str]:
         if not self._vault:
+            _logger.debug("[obsidian] vault 路径未配置，跳过写入: %s", relative_path)
             return None
         full = self._vault / relative_path
         full.parent.mkdir(parents=True, exist_ok=True)

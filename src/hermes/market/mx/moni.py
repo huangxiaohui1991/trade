@@ -25,7 +25,7 @@ def dispatch_trade_command(command: str, **kwargs: Any) -> Dict[str, Any]:
         from scripts.mx.cli_tools import dispatch_mx_command
         return dispatch_mx_command(command, **kwargs)
     except ImportError:
-        pass
+        _logger.warning("[moni] V1 scripts.mx.cli_tools 已废弃且不可用，跳过")
 
     # Fallback: 直接调 MXMoni API
     try:

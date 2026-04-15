@@ -130,8 +130,8 @@ def format_evening_embed(data: dict) -> dict:
     fields = []
 
     for name, info in data.get("market", {}).items():
-        price = info.get("price", 0)
-        chg = info.get("chg_pct", 0)
+        price = info.get("price", 0) or 0
+        chg = info.get("change_pct", info.get("chg_pct", 0)) or 0
         fields.append(_field(name, f"`{price:.2f}` ({chg:+.2f}%)"))
 
     positions = data.get("positions", [])

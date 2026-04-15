@@ -104,7 +104,8 @@ def build_context(db_path: Optional[Path] = None) -> PipelineContext:
         registry = ConfigRegistry()
         config_snapshot = registry.freeze(conn)
         cfg = config_snapshot.data.get("strategy", {})
-    except Exception:
+    except Exception as e:
+        _logger.warning(f"[context] 配置加载失败，使用空配置: {e}")
         config_snapshot = None
         cfg = {}
 

@@ -137,7 +137,8 @@ def _get_pushed_hashes(conn, hours: int = 24) -> set[str]:
             except Exception:
                 pass
         return hashes
-    except Exception:
+    except Exception as e:
+        _logger.warning(f"[sentiment] 读取已推送 hash 失败: {e}")
         return set()
 
 
@@ -175,7 +176,8 @@ def _get_cached_items(conn, symbol: str, ttl_minutes: int = 30) -> list[dict] | 
             return None
         payload = json.loads(row["payload_json"])
         return payload.get("items", [])
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"[sentiment] 缓存读取失败 {symbol}: {e}")
         return None
 
 
