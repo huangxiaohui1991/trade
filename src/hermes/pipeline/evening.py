@@ -32,6 +32,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 2. 持仓 + 风控（带 MA 数据 + 配置文件参数）
     positions = ctx.exec_svc.get_positions()
     risk_results = check_position_risks(ctx, positions, run_id)
+
+    # check_position_risks 内部会通过 _update_position_price 把最新收盘价
+    # 写入 projection_positions，但内存中的 positions 仍是旧快照。
+    # 重新读一次，确保后续 Obsidian 日志 / Discord embed 用的是最新盈亏。
+    positions = ctx.exec_svc.get_positions()
+
     risk_alerts = []
     stop_embeds = []
 
