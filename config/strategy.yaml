@@ -225,8 +225,8 @@ backtest_presets:
 # 模拟盘自动交易
 # ---------------------------------------------------------------------------
 auto_trade:
-  enabled: false               # 总开关（true 启用）
-  dry_run: true                # 试运行模式（只记录不下单）
+  enabled: true                # 正式开启
+  dry_run: false               # 真实交易
   max_daily_trades: 4          # 单日最大交易次数（买+卖）
   sell_urgency: immediate      # 自动卖出的风控级别（immediate / end_of_day / advisory）
   # 买入时间窗口（避免尾盘波动）
