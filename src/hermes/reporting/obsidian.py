@@ -192,13 +192,27 @@ class ObsidianProjector:
     # ------------------------------------------------------------------
 
     def write_account_overview(self, capital: float = 0, cash: float = 0) -> str:
-        """生成账户总览。"""
+        """生成账户总览。
+        
+        如果 cash 未传入，从 projection_balances 读；
+        若 balance 也为空，则用总资产 - 持仓市值估算现金。
+        """
         rows = self._conn.execute(
             "SELECT * FROM projection_positions ORDER BY entry_date"
         ).fetchall()
 
         now = self._now()
         total_market = sum((r["current_price_cents"] or r["avg_cost_cents"]) * r["shares"] for r in rows) / 100
+
+        # 尝试从余额表读现金
+        if cash == 0:
+            row = self._conn.execute("SELECT cash_cents, total_asset_cents FROM projection_balances LIMIT 1").fetchone()
+            if row and row["cash_cents"]:
+                cash = row["cash_cents"] / 100
+            else:
+                # 无 balance 数据时，用总资产估算（需要在调用时传入 capital）
+                cash = (capital - total_market) if capital else 0
+
         total_asset = cash + total_market
 
         lines = [

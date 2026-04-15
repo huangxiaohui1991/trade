@@ -63,6 +63,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 4. Obsidian
     ctx.obsidian.write_portfolio_status()
+    ctx.obsidian.write_account_overview()
 
     log_lines = [f"## 收盘报告", "", f"大盘信号: **{signal}**", ""]
     if positions:
