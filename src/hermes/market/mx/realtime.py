@@ -10,13 +10,34 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 _logger = logging.getLogger(__name__)
 
-EM_API_KEY = os.environ.get("EM_API_KEY", "")
+# 复用 client.py 的 env 加载逻辑
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
+
+def _load_env():
+    """从项目根目录 .env 加载环境变量（不覆盖已有值）。"""
+    env_path = _PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_env()
+
+EM_API_KEY = os.environ.get("MX_APIKEY", "")
 MX_SEARCH_URL = "https://ai-saas.eastmoney.com/proxy/b/mcp/tool/searchData"
 
 _CACHE: Dict[str, tuple] = {}
@@ -29,6 +50,7 @@ def _now_min() -> str:
 
 def _http_post(query: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
     if not EM_API_KEY:
+        _logger.warning("[mx] MX_APIKEY not configured, MX API disabled")
         return None
     try:
         body = {
@@ -42,7 +64,12 @@ def _http_post(query: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
             resp = client.post(MX_SEARCH_URL, json=body,
                                headers={"Content-Type": "application/json", "em_api_key": EM_API_KEY})
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            # key 无效时返回明确错误
+            if result and result.get("status") == -1 and result.get("code") == 403:
+                _logger.warning(f"[mx] MX API key invalid: {result.get('message')}")
+                return None
+            return result
     except Exception as e:
         _logger.debug(f"mx request failed: {e}")
         return None

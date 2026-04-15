@@ -348,6 +348,8 @@ class MXMarketAdapter:
             return {}
 
     def _get_index_sync(self) -> dict[str, IndexQuote]:
+        """获取指数行情，优先 MX，失败则用 akshare 兜底。"""
+        # 优先 MX
         try:
             from hermes.market.mx.realtime import get_market_index_mx
             raw = get_market_index_mx()
@@ -364,6 +366,39 @@ class MXMarketAdapter:
                     ma60=data.get("ma60", 0),
                     above_ma20=data.get("above_ma20", False),
                     below_ma60_days=data.get("below_ma60_days", 0),
+                )
+            # result 不为空且有有效数据才用 MX
+            if result and any(v.price > 0 or v.change_pct not in (None, 0)
+                              for v in result.values()):
+                return result
+        except Exception:
+            pass
+
+        # akshare 兜底
+        try:
+            import akshare as ak
+            df = ak.stock_zh_index_spot_sina()
+            # 上证、深证、创业板、科创50
+            code_map = {
+                "上证指数": "sh000001",
+                "深证成指": "sz399001",
+                "创业板指": "sz399006",
+                "科创50": "sh000688",
+            }
+            result = {}
+            for name, code in code_map.items():
+                row = df[df["代码"] == code]
+                if row.empty:
+                    continue
+                r = row.iloc[0]
+                result[name] = IndexQuote(
+                    symbol=code,
+                    name=name,
+                    price=float(r.get("最新价", 0) or 0),
+                    change_pct=float(r.get("涨跌幅", 0) or 0),
+                    ma20=0, ma60=0,
+                    above_ma20=False,
+                    below_ma60_days=0,
                 )
             return result
         except Exception:

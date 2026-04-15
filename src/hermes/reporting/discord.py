@@ -72,9 +72,9 @@ def format_morning_embed(data: dict) -> dict:
 
     # 大盘指数
     for name, info in data.get("market", {}).items():
-        price = info.get("price", 0)
-        chg = info.get("chg_pct", 0)
-        fields.append(_field(name, f"`{price:.2f}` ({chg:+.2f}%)"))
+        price = info.get("price", 0) or 0
+        chg = info.get("chg_pct", info.get("change_pct", 0)) or 0
+        fields.append(_field(name, f"`{price:.2f}` ({chg:+.2f}%)", inline=True))
 
     # 持仓
     positions = data.get("positions", [])

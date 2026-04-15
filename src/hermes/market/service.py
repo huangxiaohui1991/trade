@@ -160,9 +160,10 @@ class MarketService:
                 for sym, quote in indices.items():
                     name = quote.name
                     index_data[name] = {
+                        "price": quote.price,
+                        "change_pct": quote.change_pct,
                         "above_ma20": quote.above_ma20,
                         "below_ma60_days": quote.below_ma60_days,
-                        "change_pct": quote.change_pct,
                     }
                 if index_data:
                     break
