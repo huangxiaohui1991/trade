@@ -83,6 +83,7 @@ class Position:
     current_price_cents: int = 0
     unrealized_pnl_cents: int = 0
     updated_at: str = ""
+    currency: str = "CNY"  # "CNY" | "HKD"
 
     @property
     def avg_cost(self) -> float:

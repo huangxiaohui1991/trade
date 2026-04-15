@@ -35,6 +35,7 @@ class PositionManager:
         style: str,
         run_id: str,
         entry_day_low_cents: int = 0,
+        currency: str = "CNY",
     ) -> Position:
         """开仓 → 追加 position.opened 事件 → 更新投影。"""
         now = _now_iso()
@@ -63,16 +64,17 @@ class PositionManager:
             highest_since_entry_cents=avg_cost_cents,
             current_price_cents=avg_cost_cents,
             updated_at=now,
+            currency=currency,
         )
 
         self._conn.execute(
             """INSERT OR REPLACE INTO projection_positions
                (code, name, style, shares, avg_cost_cents, entry_date,
                 entry_day_low_cents, highest_since_entry_cents,
-                current_price_cents, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                current_price_cents, updated_at, currency)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, name, style, shares, avg_cost_cents, today,
-             entry_day_low_cents, avg_cost_cents, avg_cost_cents, now),
+             entry_day_low_cents, avg_cost_cents, avg_cost_cents, now, currency),
         )
 
         return pos
@@ -151,6 +153,7 @@ class PositionManager:
             current_price_cents=row["current_price_cents"] or 0,
             unrealized_pnl_cents=row["unrealized_pnl_cents"] or 0,
             updated_at=row["updated_at"],
+            currency=row["currency"] if "currency" in row.keys() else "CNY",
         )
 
 
