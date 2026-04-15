@@ -78,6 +78,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 6. Obsidian
     ctx.obsidian.write_portfolio_status()
+
+    # 盘前信号快照
+    ctx.obsidian.write_signal_snapshot(
+        run_id=run_id,
+        market_state_detail=market_state.detail,
+        market_signal=signal,
+        decision={"action": decision_action},
+    )
+
     log_lines = [f"## 盘前摘要", f"", f"大盘信号: **{signal}** (仓位系数 {multiplier})", ""]
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
@@ -93,6 +102,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             emoji = "✅" if s["score"] >= 7 else ("🟡" if s["score"] >= 5 else "❌")
             log_lines.append(f"- {s['name']} {emoji} {s['score']:.1f}")
     ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
+
+    # 刷新当日输出索引
+    ctx.obsidian.write_daily_output_index(run_id)
 
     # 7. Discord embed
     discord_data = {

@@ -406,6 +406,10 @@ def trade_screener(query: str = "") -> str:
             }])
             added.append({"code": code, "name": s.get("name", ""), "score": total})
 
+    # 写 Obsidian 筛选结果
+    obsidian = ObsidianProjector(_event_store, _conn, _resolve_vault())
+    obsidian.write_screening_result(run_id, q, run_scores, added)
+
     return json.dumps({
         "screened": len(results), "scored": run_scores, "added_to_watch": added,
     }, ensure_ascii=False, default=str)
@@ -744,6 +748,11 @@ def trade_run_pipeline(pipeline_type: str) -> str:
             from hermes.pipeline.evening import run
         elif pipeline_type == "weekly":
             from hermes.pipeline.weekly import run
+        elif pipeline_type == "monthly":
+            from hermes.pipeline.weekly import _generate_monthly_review
+            _generate_monthly_review(ctx, run_id, datetime.now(timezone.utc))
+            _run_journal.complete_run(run_id, artifacts={"result": "ok"})
+            return json.dumps({"status": "completed", "run_id": run_id, "pipeline": "monthly"}, ensure_ascii=False)
         elif pipeline_type == "sentiment":
             from hermes.pipeline.sentiment import run
         else:

@@ -123,8 +123,53 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     except Exception as e:
         _logger.warning(f"[auto_trade] Discord 推送异常: {e}")
 
-    # Obsidian 日志
+    # Obsidian 日志 + 模拟盘日报
     _write_obsidian_log(ctx, run_id, buys, sells, dry_run)
+
+    # 刷新最新持仓/资金（交易后可能变化）
+    final_positions = paper.get_positions()
+    final_balance = paper.get_balance()
+
+    # 写模拟盘完整日报
+    ctx.obsidian.write_paper_report(
+        run_id=run_id,
+        positions=final_positions,
+        balance={
+            "total_asset": final_balance.total_asset,
+            "available_cash": final_balance.available_cash,
+            "market_value": final_balance.market_value,
+        },
+        buys=buys,
+        sells=sells,
+        market_signal=signal.value,
+        market_indices=market_state.detail.get("indices", {}),
+        dry_run=dry_run,
+    )
+
+    # 追加交易记录
+    trade_rows = []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    for s in sells:
+        trade_rows.append({
+            "time": now_str, "side": "sell",
+            "name": s.get("name", ""), "code": s.get("code", ""),
+            "shares": s.get("shares", 0), "price": s.get("price", 0),
+            "amount": s.get("shares", 0) * s.get("price", 0),
+            "reason": f"[{s.get('reason', '')}] {s.get('risk_description', '')}".strip(),
+        })
+    for b in buys:
+        trade_rows.append({
+            "time": now_str, "side": "buy",
+            "name": b.get("name", ""), "code": b.get("code", ""),
+            "shares": b.get("shares", 0), "price": b.get("price", 0),
+            "amount": b.get("shares", 0) * b.get("price", 0),
+            "reason": f"[BUY_CORE_POOL] 评分 {b.get('score', 0):.1f}",
+        })
+    if trade_rows:
+        ctx.obsidian.append_paper_trade_log(trade_rows)
+
+    # 刷新当日输出索引
+    ctx.obsidian.write_daily_output_index(run_id)
 
     result = {
         "enabled": True,

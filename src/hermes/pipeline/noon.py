@@ -110,6 +110,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend(["", "### 操作提示"] + [f"- {t}" for t in tips])
     ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
 
+    # 刷新当日输出索引
+    ctx.obsidian.write_daily_output_index(run_id)
+
     # 5. Discord
     embed = _format_noon_embed({
         "date": date.today().isoformat(), "signal": signal,

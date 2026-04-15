@@ -152,6 +152,11 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     ctx.obsidian.write_scoring_report(run_id, run_scores)
     ctx.obsidian.write_core_pool()
     ctx.obsidian.write_watch_pool()
+    ctx.obsidian.write_decision_pool()
+    ctx.obsidian.write_candidate_pool_overview()
+
+    # 池子调整建议（有变动时自动写入）
+    ctx.obsidian.write_pool_adjustment(run_id, demoted, removed)
 
     # 日志追加
     lines = [f"## 核心池评分", ""]
@@ -167,6 +172,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         for r in removed:
             lines.append(f"- ❌ {r.get('name', '')}({r['code']}) 移出池子（评分 {r['score']:.1f}）")
     ctx.obsidian.write_daily_log(run_id, "\n".join(lines))
+
+    # 刷新当日输出索引
+    ctx.obsidian.write_daily_output_index(run_id)
 
     # 7. Discord embed
     embed = format_scoring_embed(run_scores, date.today().isoformat())

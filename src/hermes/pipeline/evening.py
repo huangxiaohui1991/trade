@@ -65,6 +65,19 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     ctx.obsidian.write_portfolio_status()
     ctx.obsidian.write_account_overview()
 
+    # 信号快照（收盘后生成当日完整快照）
+    ctx.obsidian.write_signal_snapshot(
+        run_id=run_id,
+        market_state_detail=market_state.detail,
+        market_signal=signal,
+    )
+    # 当日输出索引（聚合当日所有 pipeline 运行）
+    ctx.obsidian.write_daily_output_index(run_id)
+    # 候选池总览
+    ctx.obsidian.write_candidate_pool_overview()
+    # 决策池
+    ctx.obsidian.write_decision_pool()
+
     log_lines = [f"## 收盘报告", "", f"大盘信号: **{signal}**", ""]
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
