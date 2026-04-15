@@ -177,7 +177,7 @@ def format_scoring_embed(scores: list[dict], date_str: str = "") -> dict:
             fund = dim_map.get("fundamental", {}).get("score", 0)
             flow = dim_map.get("flow", {}).get("score", 0)
             sent = dim_map.get("sentiment", {}).get("score", 0)
-            detail = f"技{round(tech)} 基{round(fund)} 资{round(flow)} 舆{round(sent)}"
+            detail = f"技{tech:.1f} 基{fund:.1f} 资{flow:.1f} 舆{sent:.1f}"
         else:
             detail = f"技{int(s.get('technical_score', 0))} 基{int(s.get('fundamental_score', 0))} " \
                      f"资{int(s.get('flow_score', 0))} 舆{int(s.get('sentiment_score', 0))}"
