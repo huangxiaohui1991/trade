@@ -230,8 +230,11 @@ class Scorer:
         if t and "below_ma20" in self.veto_rules and not t.above_ma20:
             signals.append("below_ma20")
 
-        if t and "limit_up_today" in self.veto_rules and abs(t.change_pct) >= 9.9:
-            signals.append("limit_up_today")
+        if t and "limit_up_today" in self.veto_rules:
+            # 涨跌停判断：科创板(688)为20%，其他为10%
+            threshold = 19.9 if s.code.startswith("688") else 9.9
+            if abs(t.change_pct) >= threshold:
+                signals.append("limit_up_today")
 
         if s.flow and "consecutive_outflow" in self.veto_rules:
             if s.flow.consecutive_outflow_days >= 3:
