@@ -205,7 +205,93 @@ def events_count(
         conn.close()
 
 
-# ── score commands ─────────────────────────────────────────────
+# ── history commands ────────────────────────────────────────────
+
+@app.command("fetch-history")
+def fetch_history(
+    code: str = typer.Argument(..., help="股票代码（支持 600036 / sh.600036 / sz.000001）"),
+    period: str = typer.Option("daily", help="周期: daily | weekly | monthly | 5 | 15 | 30 | 60"),
+    start_date: str = typer.Option("", help="开始日期 YYYY-MM-DD（空则往前推 count 条）"),
+    end_date: str = typer.Option("", help="结束日期 YYYY-MM-DD（空则默认今天）"),
+    count: int = typer.Option(500, help="最大条数（start_date 为空时生效）"),
+    adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """通过 baostock 拉取历史 K 线并写入 market_bars 表。"""
+    import asyncio
+    conn = connect(db_path)
+    try:
+        from hermes.market.adapters import BaoStockMarketAdapter
+        from hermes.market.store import MarketStore
+
+        adapter = BaoStockMarketAdapter()
+        store = MarketStore(conn)
+
+        if start_date:
+            df = asyncio.run(adapter.get_kline(
+                code, period=period,
+                start_date=start_date or None, end_date=end_date or None,
+                adjustflag=adjustflag,
+            ))
+        else:
+            df = asyncio.run(adapter.get_kline(
+                code, period=period, count=count, adjustflag=adjustflag,
+            ))
+
+        if df is None or df.empty:
+            typer.echo(f"❌ 获取数据失败: {code}", err=True)
+            raise typer.Exit(1)
+
+        rows = store.save_bars(code, df, source="baostock")
+        conn.commit()
+
+        result = {
+            "status": "ok", "code": code, "period": period,
+            "adjustflag": adjustflag, "fetched": len(df), "saved": rows,
+            "date_range": f"{df['日期'].iloc[0]} ~ {df['日期'].iloc[-1]}",
+        }
+        if as_json:
+            typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            typer.echo(f"✅ {code} {period} [{adjustflag}] → 写入 {rows} 条 ({result['date_range']})")
+    finally:
+        conn.close()
+
+
+@app.command("backtest")
+def run_backtest_cmd(
+    codes: str = typer.Argument(..., help="逗号分隔股票代码，如 600036,000001,000002"),
+    start: str = typer.Argument(..., help="回测开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
+    preset: str = typer.Option("保守验证C", help="策略 preset（对应 strategy.yaml）"),
+    initial_cash: float = typer.Option(100000.0, help="初始资金（元）"),
+    adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """运行历史回测（生产级四维评分引擎 + baostock 数据）。"""
+    from hermes.backtest.engine import run_backtest
+
+    result = run_backtest(
+        codes=codes, start=start, end=end,
+        preset=preset, initial_cash=initial_cash, adjustflag=adjustflag,
+    )
+
+    if "error" in result:
+        typer.echo(f"\u274c {result['error']}", err=True)
+        raise typer.Exit(1)
+
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(f"📊 回测报告 [{result['preset']}] {start} ~ {end}")
+        typer.echo(f"  初始资金: {result['initial_cash']:.0f}  最终: {result['final_value']:.2f}")
+        typer.echo(f"  总收益率: {result['total_return_pct']:.2f}%  年化: {result['annual_return_pct']:.2f}%")
+        typer.echo(f"  最大回撤: {result['max_drawdown_pct']:.2f}%  胜率: {result['win_rate_pct']:.1f}%")
+        typer.echo(f"  夏普比率: {result.get('sharpe_ratio', 0):.2f}")
+        typer.echo(f"  交易: {result['total_trades']}笔 买/{result['buy_trades']} 卖/{result['sell_trades']} 胜/{result.get('winning_trades', 0)} 负/{result.get('losing_trades', 0)}")
+        typer.echo(f"  持仓中: {result['positions_open']} 只")
+
 
 @app.command("score")
 def score_stock(

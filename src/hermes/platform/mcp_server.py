@@ -35,6 +35,7 @@ from hermes.market.adapters import (
     MXMarketAdapter,
     MXSentimentAdapter,
     MXScreenerAdapter,
+    BaoStockMarketAdapter,
 )
 from hermes.market.store import MarketStore
 from hermes.reporting.projectors import ProjectionUpdater
@@ -534,9 +535,110 @@ def trade_mock_cancel(order_id: str = "") -> str:
 
 @mcp.tool()
 @_safe
-def trade_backtest(start: str, end: str, preset: str = "保守验证C") -> str:
-    """运行策略回测。"""
-    return json.dumps({"error": "回测功能待 V2 回测引擎实现", "start": start, "end": end, "preset": preset}, ensure_ascii=False)
+def trade_fetch_history(
+    code: str,
+    period: str = "daily",
+    start_date: str = "",
+    end_date: str = "",
+    count: int = 500,
+    adjustflag: str = "2",
+) -> str:
+    """通过 baostock 拉取历史 K 线并写入数据库。
+
+    用途：回测前准备历史数据，或补充缺失数据。
+    数据写入 market_bars 表，可被回测引擎和评分引擎消费。
+
+    Args:
+        code: 股票代码（支持 600036 / sh.600036 / sz.000001）
+        period: 日线周期
+            daily/d=日K | weekly/w=周K | monthly/m=月K
+            5/15/30/60=对应分钟K
+        start_date: 开始日期 "YYYY-MM-DD"（空则自动往前推 count 条）
+        end_date: 结束日期 "YYYY-MM-DD"（空则默认今天）
+        count: 最大条数（start_date 为空时生效，默认 500）
+        adjustflag: 复权类型
+            2=前复权（回测推荐）| 1=后复权 | 3=不复权
+    """
+    _init()
+    try:
+        adapter = BaoStockMarketAdapter()
+        store = MarketStore(_conn)
+
+        if start_date:
+            df = asyncio.run(adapter.get_kline(
+                code, period=period,
+                start_date=start_date, end_date=end_date or None,
+                adjustflag=adjustflag,
+            ))
+        else:
+            df = asyncio.run(adapter.get_kline(
+                code, period=period, count=count,
+                adjustflag=adjustflag,
+            ))
+
+        if df is None or df.empty:
+            return json.dumps({"error": f"获取数据失败: {code}", "code": code}, ensure_ascii=False)
+
+        rows = store.save_bars(code, df, source="baostock")
+        _conn.commit()
+
+        return json.dumps({
+            "status": "ok",
+            "code": code,
+            "period": period,
+            "adjustflag": adjustflag,
+            "fetched": len(df),
+            "saved": rows,
+            "date_range": f"{df['日期'].iloc[0]} ~ {df['日期'].iloc[-1]}",
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"error": str(e), "code": code}, ensure_ascii=False)
+
+
+@mcp.tool()
+@_safe
+def trade_backtest(
+    codes: str,
+    start: str,
+    end: str,
+    preset: str = "保守验证C",
+    initial_cash: float = 100000.0,
+    adjustflag: str = "2",
+) -> str:
+    """运行策略历史回测（生产级四维评分引擎 + baostock 数据）。
+
+    数据流：baostock → TechnicalIndicators → StockSnapshot
+            → Scorer.score() → ScoreResult
+            → Decider.decide() → DecisionIntent
+            → SimulatedBroker撮合 → 持仓/收益
+
+    Args:
+        codes: 逗号分隔的股票代码，如 "600036,000001,000002"
+        start: 回测开始日期 "YYYY-MM-DD"
+        end: 回测结束日期 "YYYY-MM-DD"
+        preset: 策略 preset（对应 config/strategy.yaml 中的 backtest_presets）
+        initial_cash: 初始资金（元）
+        adjustflag: 数据复权类型 2=前复权 1=后复权 3=不复权
+    """
+    _init()
+    try:
+        from hermes.backtest.engine import run_backtest
+
+        result = run_backtest(
+            codes=codes, start=start, end=end,
+            preset=preset, initial_cash=initial_cash, adjustflag=adjustflag,
+        )
+
+        if "error" in result:
+            return json.dumps({"status": "failed", "error": result["error"]}, ensure_ascii=False)
+
+        return json.dumps({"status": "completed", **result}, ensure_ascii=False, default=str)
+
+    except Exception as e:
+        import traceback as tb
+        return json.dumps({"status": "failed", "error": str(e), "trace": tb.format_exc()}, ensure_ascii=False)
+
 
 
 @mcp.tool()
