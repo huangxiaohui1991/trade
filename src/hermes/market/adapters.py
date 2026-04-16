@@ -104,22 +104,37 @@ class AkShareMarketAdapter:
         return await asyncio.to_thread(self._get_index_sync, symbols)
 
     async def get_sector_heatmap(self) -> list[dict]:
-        """获取东财行业板块热力图数据。
+        """获取行业板块热力图数据。
 
-        返回字段：板块名称、现价（相对涨幅）、涨跌幅、成交额、上涨家数、下跌家数。
+        优先东财（stock_board_industry_name_em），失败则降级新浪行业
+        （stock_sector_spot），两者独立数据源。
+        返回字段：板块名称、涨跌幅、成交额、上涨家数、下跌家数。
         按涨跌幅降序排列。
         """
         return await asyncio.to_thread(self._get_sector_heatmap_sync)
 
     def _get_sector_heatmap_sync(self) -> list[dict]:
-        """同步实现：拉东财行业板块行情。"""
+        """同步实现：拉东财行业板块行情，失败则降级到新浪行业。"""
+        # 方式1：东财行业板块
+        df = self._fetch_em_industry()
+        if df is not None:
+            return df
+
+        # 方式2：新浪行业（独立数据源）
+        df2 = self._fetch_sina_industry()
+        if df2 is not None:
+            return df2
+
+        _logger.warning("[AkShareMarket] 行业板块：东财和新浪均获取失败")
+        return []
+
+    def _fetch_em_industry(self) -> Optional[list[dict]]:
+        """拉东财行业板块（stock_board_industry_name_em）。"""
         try:
             import akshare as ak
             df = ak.stock_board_industry_name_em()
             if df is None or df.empty:
-                return []
-            # 东财返回列名：板块名称、涨跌幅、成交额、上涨家数、下跌家数...
-            # 清洗后重命名字段
+                return None
             rename = {
                 "板块名称": "name",
                 "涨跌幅": "change_pct",
@@ -127,7 +142,6 @@ class AkShareMarketAdapter:
                 "上涨家数": "up_count",
                 "下跌家数": "down_count",
             }
-            # 动态匹配列名（akshare 版本不同列名可能有差异）
             col_map = {}
             for old, new in rename.items():
                 for col in df.columns:
@@ -135,16 +149,12 @@ class AkShareMarketAdapter:
                         col_map[col] = new
                         break
             if not col_map:
-                return []
+                return None
             df = df.rename(columns=col_map)
-            # 只保留已知列，容错
             keep = ["name", "change_pct", "amount", "up_count", "down_count"]
             df = df[[c for c in keep if c in df.columns]]
-            # 排序
             df = df.sort_values("change_pct", ascending=False).reset_index(drop=True)
-            # 转换为 list of dict
             records = df.to_dict("records")
-            # 格式化数值
             for r in records:
                 r["change_pct"] = float(r.get("change_pct", 0) or 0)
                 r["amount"] = float(r.get("amount", 0) or 0)
@@ -152,8 +162,36 @@ class AkShareMarketAdapter:
                 r["down_count"] = int(r.get("down_count", 0) or 0)
             return records
         except Exception as e:
-            _logger.warning(f"[AkShareMarket] 行业板块数据获取失败: {e}")
-            return []
+            _logger.warning(f"[AkShareMarket] 东财行业板块获取失败: {e}")
+            return None
+
+    def _fetch_sina_industry(self) -> Optional[list[dict]]:
+        """拉新浪行业板块（stock_sector_spot），与东财独立。"""
+        try:
+            import akshare as ak
+            df = ak.stock_sector_spot(indicator="新浪行业")
+            if df is None or df.empty:
+                return None
+            # 新浪列名：板块、涨跌幅、总成交额、公司家数
+            df = df.rename(columns={
+                "板块": "name",
+                "涨跌幅": "change_pct",
+                "总成交额": "amount",
+                "公司家数": "up_count",
+            })
+            keep = ["name", "change_pct", "amount", "up_count"]
+            df = df[[c for c in keep if c in df.columns]]
+            df = df.sort_values("change_pct", ascending=False).reset_index(drop=True)
+            records = df.to_dict("records")
+            for r in records:
+                r["change_pct"] = float(r.get("change_pct", 0) or 0)
+                r["amount"] = float(r.get("amount", 0) or 0)
+                r["up_count"] = int(r.get("up_count", 0) or 0)
+                r["down_count"] = 0  # 新浪无涨跌家数，置 0
+            return records
+        except Exception as e:
+            _logger.warning(f"[AkShareMarket] 新浪行业板块获取失败: {e}")
+            return None
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
         """主入口：优先东财全量，失败则降级到新浪分时。"""
