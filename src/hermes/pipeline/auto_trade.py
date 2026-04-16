@@ -79,9 +79,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # ------------------------------------------------------------------
     # 2. 大盘信号
     # ------------------------------------------------------------------
-    market_state = asyncio.run(ctx.market_svc.collect_market_state(run_id))
+    market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))
     signal = market_state.signal
     _logger.info(f"[auto_trade] 大盘信号: {signal.value}")
+
+    # 同步指数数据到 projection_market_state 表
+    if index_data:
+        ctx.projector.sync_market_state(index_data)
 
     sells: list[dict] = []
     buys: list[dict] = []

@@ -163,6 +163,14 @@ class ProjectionUpdater:
             if "error" in data:
                 continue
             symbol = data.get("symbol", name)
+            price = data.get("price") or data.get("close")
+            change_pct = data.get("change_pct", 0)
+            # 计算 MA 相对位置百分比（price 可能为 0，但 ma20/ma60 本身来自日线数据）
+            ma20 = data.get("ma20", 0)
+            ma60 = data.get("ma60", 0)
+            ma20_pct = ((price / ma20 - 1) * 100) if price and ma20 and ma20 > 0 else None
+            ma60_pct = ((price / ma60 - 1) * 100) if price and ma60 and ma60 > 0 else None
+            
             self._conn.execute(
                 """INSERT OR REPLACE INTO projection_market_state
                    (index_symbol, name, signal, price_cents, change_pct,
@@ -171,10 +179,10 @@ class ProjectionUpdater:
                 (
                     symbol, name,
                     data.get("signal", ""),
-                    int(data.get("close", 0) * 100) if data.get("close") else None,
-                    data.get("change_pct"),
-                    data.get("ma20_pct"),
-                    data.get("ma60_pct"),
+                    int(price * 100) if price else None,
+                    change_pct,
+                    ma20_pct,
+                    ma60_pct,
                     now,
                 ),
             )

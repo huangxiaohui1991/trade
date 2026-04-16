@@ -455,6 +455,28 @@ def run_pipeline(
         ctx.conn.close()
 
 
+@app.command("refresh-positions")
+def refresh_positions_cmd(
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+):
+    """刷新持仓实时价格并写 DB（自动跳过缓存未过期的）。"""
+    from hermes.pipeline.context import build_context
+
+    ctx = build_context(db_path)
+    try:
+        from hermes.pipeline.helpers import refresh_position_prices
+
+        prices = refresh_position_prices(ctx)
+        if not prices:
+            typer.echo("无持仓")
+        else:
+            typer.echo(f"已刷新 {len(prices)} 只持仓:")
+            for code, price in prices.items():
+                typer.echo(f"  {code}  ¥{price:.2f}")
+    finally:
+        ctx.conn.close()
+
+
 def main():
     app()
 

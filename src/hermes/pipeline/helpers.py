@@ -120,6 +120,60 @@ def _update_position_price(ctx: PipelineContext, code: str, price: float):
         _logger.warning(f"[helpers] 更新持仓价格失败 {code}: {e}")
 
 
+def refresh_position_prices(ctx: PipelineContext) -> dict[str, float]:
+    """
+    刷新所有持仓的实时价格，写入 projection_positions。
+
+    优先从 MarketStore 缓存读取（TTL 30s），缓存命中则不请求 provider。
+    返回刷新后的价格字典 {code: price}。
+    """
+    positions = ctx.exec_svc.get_positions()
+    if not positions:
+        return {}
+
+    refreshed = {}
+
+    # 尝试从缓存获取，miss 的走 provider
+    codes_to_fetch = []
+    for pos in positions:
+        if ctx.market_svc._store:
+            cached = ctx.market_svc._store.get_cached(pos.code, "quote")
+            if cached and "close" in cached:
+                # 缓存命中，直接更新（价格未变也写，确保 updated_at 刷新）
+                try:
+                    price = float(cached["close"])
+                    _update_position_price(ctx, pos.code, price)
+                    refreshed[pos.code] = price
+                    continue
+                except (ValueError, TypeError):
+                    pass
+        codes_to_fetch.append({"code": pos.code, "name": pos.name})
+
+    # 批量拉取未命中缓存的
+    if codes_to_fetch:
+        try:
+            snapshots = asyncio.run(ctx.market_svc.collect_batch(codes_to_fetch, None))
+            for snap in snapshots:
+                if snap.quote and snap.quote.close > 0:
+                    _update_position_price(ctx, snap.code, snap.quote.close)
+                    refreshed[snap.code] = snap.quote.close
+                    # 写入缓存（下次优先命中）
+                    if ctx.market_svc._store:
+                        ctx.market_svc._store.save_observation(
+                            source="market_service",
+                            kind="quote",
+                            symbol=snap.code,
+                            payload={"close": snap.quote.close, "name": snap.quote.name},
+                            run_id=None,
+                        )
+        except Exception as e:
+            _logger.warning(f"[helpers] 批量刷新持仓价格失败: {e}")
+
+    ctx.conn.commit()
+    _logger.info(f"[helpers] 刷新持仓价格: {len(refreshed)} 只")
+    return refreshed
+
+
 def get_current_exposure(ctx: PipelineContext) -> tuple[float, int]:
     """
     计算当前仓位占比和本周买入次数。

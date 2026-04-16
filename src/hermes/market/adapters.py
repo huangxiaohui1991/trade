@@ -484,9 +484,132 @@ class MXMarketAdapter:
         return await asyncio.to_thread(self._get_realtime_sync, codes)
 
     async def get_kline(self, code: str, period: str = "daily", count: int = 120) -> Optional[pd.DataFrame]:
-        return None
+        return await asyncio.to_thread(self._get_kline_sync, code, period, count)
 
-    async def get_index(self, symbols: list[str]) -> dict[str, IndexQuote]:
+    def _get_kline_sync(self, code: str, period: str = "daily", count: int = 120) -> Optional[pd.DataFrame]:
+        """从 MX finskillshub API 获取日K线历史数据。
+
+        策略：query= "code 近N个交易日 日K线"，DTO 0 含：
+          - headName[]    → 日期列（最新→最旧，降序）
+          - 100000000017969 → 开盘价
+          - 100000000017975 → 收盘价
+          - 100000000019180 → 是否涨停（辅助）
+        数据只有开/收，没有 high/low/vol，compute_technical_indicators
+        用收盘价计算均线/R SI/MACD，只需 close 列存在即可（其他列填0）。
+
+        兜底：AkShare 东财日线。
+        """
+        if period != "daily":
+            return None  # 只支持日线
+
+        import akshare as ak
+
+        # 先试 MX
+        mx_df = self._get_kline_from_mx(code, count)
+        if mx_df is not None and not mx_df.empty:
+            return mx_df
+
+        # MX 失败 → AkShare 东财
+        try:
+            symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
+            df = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+            if df is None or df.empty:
+                return None
+            df = df.sort_values("date").tail(count * 2).reset_index(drop=True)
+            df["涨跌幅"] = df["close"].pct_change() * 100
+            return df
+        except Exception:
+            return None
+
+    def _get_kline_from_mx(self, code: str, count: int) -> Optional[pd.DataFrame]:
+        """调用 MX finskillshub query 接口拉日K线。"""
+        try:
+            import httpx
+        except ImportError:
+            return None
+
+        # 加载 MX API key（与 realtime.py 相同逻辑）
+        import os
+        from pathlib import Path
+
+        def _load_key():
+            key = os.environ.get("MX_APIKEY", "").strip()
+            if key:
+                return key
+            p = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+            if p.exists():
+                for line in open(p, encoding="utf-8"):
+                    line = line.strip()
+                    if line.startswith("MX_APIKEY=") and len(line) > 10:
+                        return line.split("=", 1)[1].strip()
+            return ""
+
+        api_key = _load_key()
+        if not api_key:
+            return None
+
+        # MX finnhub 返回结构：
+        # DTO 0: headName=日期[], 100000000017969=开盘[], 100000000017975=收盘[]
+        # 日期列从新→旧排列，需要反转
+        _FID_OPEN = "100000000017969"
+        _FID_CLOSE = "100000000017975"
+
+        try:
+            resp = httpx.post(
+                "https://mkapi2.dfcfs.com/finskillshub/api/claw/query",
+                json={"toolQuery": f"{code} 近{count}个交易日 日K线"},
+                headers={"Content-Type": "application/json", "apikey": api_key},
+                timeout=15.0,
+            )
+            data = resp.json()
+        except Exception:
+            return None
+
+        try:
+            inner = data.get("data", {}).get("data", {})
+            dto_list = inner.get("searchDataResultDTO", {}).get("dataTableDTOList", [])
+        except Exception:
+            return None
+
+        dto = None
+        for d in dto_list:
+            raw = d.get("rawTable", {})
+            if _FID_OPEN in raw and _FID_CLOSE in raw:
+                dto = d
+                break
+        if dto is None:
+            return None
+
+        raw = dto.get("rawTable", {})
+        head = raw.get("headName", [])
+
+        if not isinstance(head, list) or len(head) < 2:
+            return None
+
+        dates = list(reversed(head))            # 新→旧 → 旧→新
+        opens = list(reversed(raw.get(_FID_OPEN, [])))
+        closes = list(reversed(raw.get(_FID_CLOSE, [])))
+
+        rows = min(len(dates), count * 2)
+        rows = max(rows, 5)
+
+        import pandas as pd
+        df = pd.DataFrame({
+            "date":   dates[-rows:],
+            "open":   [float(o) for o in opens[-rows:]],
+            "close":  [float(c) for c in closes[-rows:]],
+            # MX 没有这些字段，akshare adapter 的 compute_technical_indicators
+            # 只强制要求 close，其余列填 0 或 NaN
+            "high":   [float(c) for c in closes[-rows:]],   # 近似
+            "low":    [float(c) for c in closes[-rows:]],   # 近似
+            "volume": [0] * rows,
+        })
+        df["涨跌幅"] = df["close"].pct_change() * 100
+        return df
+
+    async def _get_index_sync(self) -> dict[str, IndexQuote]:
+        """获取指数行情，优先 MX，失败则用 akshare 兜底。
+        均线/above_ma20/below_ma60_days 由 akshare 日线数据计算。"""
         return await asyncio.to_thread(self._get_index_sync)
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:

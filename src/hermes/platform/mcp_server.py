@@ -177,7 +177,7 @@ def _safe(fn):
 @_safe
 def trade_market_signal() -> str:
     """获取大盘择时信号（GREEN/YELLOW/RED/CLEAR）和仓位系数。"""
-    state = asyncio.run(_market_svc.collect_market_state())
+    state, _ = asyncio.run(_market_svc.collect_market_state())
     return json.dumps({
         "signal": state.signal.value,
         "multiplier": state.multiplier,
@@ -215,8 +215,13 @@ def trade_score_batch(codes: str = "") -> str:
         stock_list = [{"code": r["code"], "name": r["name"] or ""} for r in rows]
 
     snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
-    market_state = asyncio.run(_market_svc.collect_market_state(run_id))
+    market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     decisions = _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
+
+    # 同步指数数据到 projection_market_state 表
+    if index_data:
+        projector = ProjectionUpdater(_event_store, _conn)
+        projector.sync_market_state(index_data)
 
     # Collect results from event_log
     events = _event_store.query(event_type="score.calculated")
@@ -381,8 +386,13 @@ def trade_screener(query: str = "") -> str:
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
     run_id = f"screener_{datetime.now().strftime('%H%M%S')}"
     snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
-    market_state = asyncio.run(_market_svc.collect_market_state(run_id))
+    market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
+
+    # 同步指数数据到 projection_market_state 表
+    if index_data:
+        projector = ProjectionUpdater(_event_store, _conn)
+        projector.sync_market_state(index_data)
 
     events = _event_store.query(event_type="score.calculated")
     run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]

@@ -41,7 +41,11 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     snapshots = asyncio.run(ctx.market_svc.collect_batch(stock_list, run_id))
 
     # 3. 大盘信号
-    market_state = asyncio.run(ctx.market_svc.collect_market_state(run_id))
+    market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))
+
+    # 同步指数数据到 projection_market_state 表
+    if index_data:
+        ctx.projector.sync_market_state(index_data)
 
     # 3.5 获取当前仓位和本周买入次数（修复 #3：之前始终为 0）
     current_exposure_pct, weekly_buy_count = get_current_exposure(ctx)

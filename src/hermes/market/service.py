@@ -147,8 +147,13 @@ class MarketService:
     async def collect_market_state(
         self,
         run_id: Optional[str] = None,
-    ) -> MarketState:
-        """拉取指数数据 → 计算大盘信号。"""
+    ) -> tuple[MarketState, dict]:
+        """拉取指数数据 → 计算大盘信号。
+
+        Returns:
+            (MarketState, index_data) — index_data 含每个指数的原始行情，
+            可用于写入 projection_market_state 表。
+        """
         from hermes.strategy.timer import compute_market_signal
 
         index_data = {}
@@ -160,8 +165,11 @@ class MarketService:
                 for sym, quote in indices.items():
                     name = quote.name
                     index_data[name] = {
+                        "symbol": quote.symbol,
                         "price": quote.price,
                         "change_pct": quote.change_pct,
+                        "ma20": quote.ma20,
+                        "ma60": quote.ma60,
                         "above_ma20": quote.above_ma20,
                         "below_ma60_days": quote.below_ma60_days,
                     }
@@ -185,7 +193,7 @@ class MarketService:
                 run_id=run_id,
             )
 
-        return state
+        return state, index_data
 
     # ------------------------------------------------------------------
     # 内部：带 fallback 的数据获取
