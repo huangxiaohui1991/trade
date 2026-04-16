@@ -27,6 +27,30 @@ from hermes.risk.models import RiskParams
 _logger = logging.getLogger(__name__)
 
 
+def _get_highest_since_entry(code: str, entry_date: date, current_price: float) -> float:
+    """
+    从 AkShare 日线获取持仓期内的历史最高收盘价。
+
+    用于移动止盈标杆。若获取失败则 fallback 到 current_price
+    （即原有的"标杆=现价，移动止盈不生效"行为）。
+    """
+    try:
+        import akshare as ak
+        symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
+        df = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+        if df is None or df.empty:
+            return current_price
+        import pandas as pd
+        df["date"] = pd.to_datetime(df["date"])
+        df = df[df["date"] >= pd.Timestamp(entry_date)]
+        if df.empty:
+            return current_price
+        return float(df["close"].max())
+    except Exception as e:
+        _logger.warning(f"[auto_trade] 获取 {code} 历史最高价失败: {e}")
+        return current_price
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -245,8 +269,7 @@ def _check_and_sell(
 
         params = get_risk_params(style, risk_cfg)
 
-        # 估算 entry_date（MX API 不提供，用 30 天前近似）
-        # TODO: 从事件日志中查找实际买入日期
+        # 获取实际买入日期（从事件日志）
         entry_date = date.today()
         paper_events = ctx.event_store.query(
             event_type="auto_trade.executed",
@@ -261,13 +284,16 @@ def _check_and_sell(
                     pass
                 break
 
+        # 持仓期内历史最高收盘价（用于移动止盈标杆）
+        highest_since_entry = _get_highest_since_entry(pos.code, entry_date, pos.current_price)
+
         signals = check_exit_signals(
             code=pos.code,
             avg_cost=pos.avg_cost,
             current_price=pos.current_price,
             entry_date=entry_date,
             today=date.today(),
-            highest_since_entry=pos.current_price,  # MX 不提供最高价，用现价近似
+            highest_since_entry=highest_since_entry,
             entry_day_low=pos.avg_cost,
             params=params,
             ma20=ma_info.get("ma20", 0),
