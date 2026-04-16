@@ -367,3 +367,82 @@ def format_sentiment_embed(alerts: list[dict]) -> dict:
         fields=fields,
         footer="Hermes · sentiment_monitor",
     )
+
+
+def format_sector_heatmap_embed(sectors: list[dict], title: str = "") -> dict:
+    """行业热力图 → Discord embed dict。
+
+    Args:
+        sectors: get_sector_heatmap() 返回的板块列表（已按涨跌幅降序）
+        title: 自定义标题前缀（如 "盘前" / "收盘"）
+    """
+    if not sectors:
+        return _embed(
+            title="🏭 行业热力图",
+            description="板块数据获取失败",
+            color=COLORS["info"],
+            fields=[],
+            footer="Hermes · sector_heatmap",
+        )
+
+    # 涨幅前 5 / 跌幅前 5
+    gainers = [s for s in sectors if s.get("change_pct", 0) > 0][:5]
+    losers = [s for s in sectors if s.get("change_pct", 0) < 0][-5:]
+
+    fields = []
+
+    # 涨幅前排
+    if gainers:
+        gainer_lines = []
+        for s in gainers:
+            pct = s.get("change_pct", 0)
+            amount = s.get("amount", 0)
+            amount_str = f"¥{amount / 1e8:.1f}亿" if amount >= 1e8 else f"¥{amount / 1e4:.0f}万"
+            gainer_lines.append(f"🔺 {s.get('name', '')} `{pct:+.2f}%` {amount_str}")
+        fields.append(_field("\u200b", "**🔥 涨幅前 5**", inline=False))
+        for line in gainer_lines:
+            fields.append(_field("\u200b", line, inline=False))
+
+    # 跌幅前排
+    if losers:
+        loser_lines = []
+        for s in losers:
+            pct = s.get("change_pct", 0)
+            amount = s.get("amount", 0)
+            amount_str = f"¥{amount / 1e8:.1f}亿" if amount >= 1e8 else f"¥{amount / 1e4:.0f}万"
+            loser_lines.append(f"🔻 {s.get('name', '')} `{pct:+.2f}%` {amount_str}")
+        fields.append(_field("\u200b", "**❄️ 跌幅前 5**", inline=False))
+        for line in loser_lines:
+            fields.append(_field("\u200b", line, inline=False))
+
+    # 成交额 top 3（主线板块）
+    by_amount = sorted(sectors, key=lambda s: s.get("amount", 0), reverse=True)[:3]
+    if by_amount:
+        amount_lines = []
+        for s in by_amount:
+            pct = s.get("change_pct", 0)
+            amount = s.get("amount", 0)
+            amount_str = f"¥{amount / 1e8:.1f}亿"
+            sign = "+" if pct >= 0 else ""
+            amount_lines.append(f"  {s.get('name', '')} {sign}{pct:.2f}% · {amount_str}")
+        fields.append(_field("\u200b", "**📊 成交额前 3（主线）**", inline=False))
+        for line in amount_lines:
+            fields.append(_field("\u200b", line, inline=False))
+
+    # 涨跌家数统计
+    total_up = sum(s.get("up_count", 0) for s in sectors)
+    total_down = sum(s.get("down_count", 0) for s in sectors)
+    fields.append(_field(
+        "板块统计",
+        f"上涨 **{total_up}** 个 | 下跌 **{total_down}** 个 | 共 **{len(sectors)}** 个板块",
+        inline=False,
+    ))
+
+    prefix = f"{title} · " if title else ""
+    return _embed(
+        title=f"{prefix}🏭 行业热力图",
+        description=f"共 {len(sectors)} 个行业板块",
+        color=COLORS["info"],
+        fields=fields,
+        footer="Hermes · sector_heatmap",
+    )

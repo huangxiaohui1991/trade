@@ -280,3 +280,17 @@ class MarketService:
                 _logger.info(f"[technical] {code} provider kline failed: {e}")
                 continue
         return None
+
+    async def collect_sector_heatmap(self) -> list[dict]:
+        """获取行业板块热力图数据（成交额前 AkShare）。"""
+        for provider in self._market:
+            if not hasattr(provider, "get_sector_heatmap"):
+                continue
+            try:
+                data = await provider.get_sector_heatmap()
+                if data:
+                    return data
+            except Exception as e:
+                _logger.warning(f"[sector_heatmap] provider failed: {e}")
+                continue
+        return []

@@ -116,6 +116,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend(["", "### 风控提示"] + [f"- ⚠️ {a}" for a in alerts])
     if tips:
         log_lines.extend(["", "### 操作提示"] + [f"- {t}" for t in tips])
+
+    # 行业热力图
+    heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap())
+    _logger.info(f"[noon] 行业热力图: {len(heatmap_sectors)} 个板块")
+    if heatmap_sectors:
+        from hermes.pipeline.evening import _format_heatmap_markdown
+        log_lines.extend(["", "### 行业热力图"] + _format_heatmap_markdown(heatmap_sectors))
+    else:
+        log_lines.extend(["", "### 行业热力图", "数据获取失败"])
+
     ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
 
     # 刷新当日输出索引
@@ -128,10 +138,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     })
 
     try:
+        from hermes.reporting.discord import format_sector_heatmap_embed
         from hermes.reporting.discord_sender import send_embed
         ok, err = send_embed(embed)
         if not ok:
             _logger.warning(f"[noon] Discord 推送失败: {err}")
+        heatmap_embed = format_sector_heatmap_embed(heatmap_sectors, title="午休")
+        ok2, err2 = send_embed(heatmap_embed)
+        if not ok2:
+            _logger.warning(f"[noon] 热力图 Discord 推送失败: {err2}")
     except Exception as e:
         _logger.warning(f"[noon] Discord 推送异常: {e}")
 

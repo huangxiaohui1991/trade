@@ -103,6 +103,58 @@ class AkShareMarketAdapter:
         # AkShare 不负责指数行情，指数由 MXMarketAdapter 提供（见 _get_index_sync stub）
         return await asyncio.to_thread(self._get_index_sync, symbols)
 
+    async def get_sector_heatmap(self) -> list[dict]:
+        """获取东财行业板块热力图数据。
+
+        返回字段：板块名称、现价（相对涨幅）、涨跌幅、成交额、上涨家数、下跌家数。
+        按涨跌幅降序排列。
+        """
+        return await asyncio.to_thread(self._get_sector_heatmap_sync)
+
+    def _get_sector_heatmap_sync(self) -> list[dict]:
+        """同步实现：拉东财行业板块行情。"""
+        try:
+            import akshare as ak
+            df = ak.stock_board_industry_name_em()
+            if df is None or df.empty:
+                return []
+            # 东财返回列名：板块名称、涨跌幅、成交额、上涨家数、下跌家数...
+            # 清洗后重命名字段
+            rename = {
+                "板块名称": "name",
+                "涨跌幅": "change_pct",
+                "成交额": "amount",
+                "上涨家数": "up_count",
+                "下跌家数": "down_count",
+            }
+            # 动态匹配列名（akshare 版本不同列名可能有差异）
+            col_map = {}
+            for old, new in rename.items():
+                for col in df.columns:
+                    if old in col:
+                        col_map[col] = new
+                        break
+            if not col_map:
+                return []
+            df = df.rename(columns=col_map)
+            # 只保留已知列，容错
+            keep = ["name", "change_pct", "amount", "up_count", "down_count"]
+            df = df[[c for c in keep if c in df.columns]]
+            # 排序
+            df = df.sort_values("change_pct", ascending=False).reset_index(drop=True)
+            # 转换为 list of dict
+            records = df.to_dict("records")
+            # 格式化数值
+            for r in records:
+                r["change_pct"] = float(r.get("change_pct", 0) or 0)
+                r["amount"] = float(r.get("amount", 0) or 0)
+                r["up_count"] = int(r.get("up_count", 0) or 0)
+                r["down_count"] = int(r.get("down_count", 0) or 0)
+            return records
+        except Exception as e:
+            _logger.warning(f"[AkShareMarket] 行业板块数据获取失败: {e}")
+            return []
+
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
         """主入口：优先东财全量，失败则降级到新浪分时。"""
         try:
