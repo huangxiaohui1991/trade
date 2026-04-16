@@ -500,7 +500,8 @@ class MXMarketAdapter:
         兜底：AkShare 东财日线。
         """
         if period != "daily":
-            return None  # 只支持日线
+            _logger.warning(f"[MXMarket] get_kline 不支持 period={period}，仅支持 daily")
+            return None
 
         import akshare as ak
 
@@ -606,11 +607,6 @@ class MXMarketAdapter:
         })
         df["涨跌幅"] = df["close"].pct_change() * 100
         return df
-
-    async def _get_index_sync(self) -> dict[str, IndexQuote]:
-        """获取指数行情，优先 MX，失败则用 akshare 兜底。
-        均线/above_ma20/below_ma60_days 由 akshare 日线数据计算。"""
-        return await asyncio.to_thread(self._get_index_sync)
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
         try:
