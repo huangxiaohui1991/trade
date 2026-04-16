@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Protocol, runtime_checkable
 
 import pandas as pd
@@ -582,23 +583,33 @@ class MXMarketAdapter:
         # 注意：stock_zh_index_spot_sina 在批量请求时对部分指数（深证/创业板）返回 0，
         # 改用 stock_zh_index_daily 的最新收盘价作为价格来源，更稳定
         try:
+            # Phase 1: 并行拉取所有指数日线数据
+            def _fetch_daily(code):
+                try:
+                    return code, ak.stock_zh_index_daily(symbol=code)
+                except Exception:
+                    return code, None
+
+            codes = list(code_map.values())
+            with ThreadPoolExecutor(max_workers=min(len(codes), 4)) as executor:
+                daily_map: dict[str, Optional[pd.DataFrame]] = {
+                    code: df for code, df in executor.map(_fetch_daily, codes)
+                }
+
+            # Phase 2: 主线程更新 result（已有 MX 数据的补充价格/MA，没有的创建新记录）
             for name, code in code_map.items():
+                daily_df = daily_map.get(code)
                 if name in result:
-                    # MX 已返回数据，用日线数据补充 akshare 实时价格
+                    # MX 已返回数据，用日线补充价格（如果 MX 价格无效）和 MA
                     existing = result[name]
-                    try:
-                        daily_df = ak.stock_zh_index_daily(symbol=code)
-                        if not daily_df.empty:
-                            latest_close = float(daily_df["close"].iloc[-1])
-                            prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
-                            if (existing.price or 0) <= 0 or existing.price != latest_close:
-                                existing.price = latest_close
-                            # 用日线涨跌幅（更可靠）
-                            daily_chg = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
-                            if abs(existing.change_pct) < 0.01 and abs(daily_chg) > 0.01:
-                                existing.change_pct = daily_chg
-                    except Exception:
-                        pass
+                    if daily_df is not None and not daily_df.empty:
+                        latest_close = float(daily_df["close"].iloc[-1])
+                        prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
+                        if (existing.price or 0) <= 0 or existing.price != latest_close:
+                            existing.price = latest_close
+                        daily_chg = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                        if abs(existing.change_pct) < 0.01 and abs(daily_chg) > 0.01:
+                            existing.change_pct = daily_chg
                     # 补全 MA（如果 MX 没有的话）
                     if not existing.ma20 and not existing.ma60:
                         ma20, ma60, above_ma20, below_days = _compute_ma(code)
@@ -606,33 +617,26 @@ class MXMarketAdapter:
                         existing.ma60 = ma60
                         existing.above_ma20 = above_ma20
                         existing.below_ma60_days = below_days
-                    continue
-
-                # 完全没有数据，走 akshare 日线路径
-                try:
-                    daily_df = ak.stock_zh_index_daily(symbol=code)
-                except Exception:
-                    daily_df = None
-
-                price_val = 0.0
-                change_val = 0.0
-                if daily_df is not None and not daily_df.empty:
-                    latest_close = float(daily_df["close"].iloc[-1])
-                    prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
-                    price_val = latest_close
-                    change_val = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
-
-                ma20, ma60, above_ma20, below_days = _compute_ma(code)
-                result[name] = IndexQuote(
-                    symbol=code,
-                    name=name,
-                    price=price_val,
-                    change_pct=change_val,
-                    ma20=ma20,
-                    ma60=ma60,
-                    above_ma20=above_ma20,
-                    below_ma60_days=below_days,
-                )
+                else:
+                    # 完全没有数据，用日线构建完整记录
+                    price_val = 0.0
+                    change_val = 0.0
+                    if daily_df is not None and not daily_df.empty:
+                        latest_close = float(daily_df["close"].iloc[-1])
+                        prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
+                        price_val = latest_close
+                        change_val = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+                    ma20, ma60, above_ma20, below_days = _compute_ma(code)
+                    result[name] = IndexQuote(
+                        symbol=code,
+                        name=name,
+                        price=price_val,
+                        change_pct=change_val,
+                        ma20=ma20,
+                        ma60=ma60,
+                        above_ma20=above_ma20,
+                        below_ma60_days=below_days,
+                    )
             return result
         except Exception:
             return {}

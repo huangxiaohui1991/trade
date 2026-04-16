@@ -348,26 +348,28 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
         if (month_start_dt + timedelta(days=i)).weekday() < 5
     )
 
-    ctx.obsidian.write_monthly_review({
-        "month_str": month_str,
-        "trading_days": trading_days,
-        "buy_count": buy_count,
-        "sell_count": sell_count,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "profit_loss_ratio": plr,
-        "net_pnl_cents": net_pnl_cents,
-        "total_profit_cents": total_profit,
-        "total_loss_cents": total_loss,
-        "max_drawdown_cents": 0,  # TODO: 从每日快照计算
-        "avg_profit_cents": avg_profit,
-        "avg_loss_cents": avg_loss,
-        "weekly_summaries": weekly_summaries,
-        "worst_trades": worst_trades,
-        "pool_changes": pool_changes,
-        "paper_stats": paper_stats,
-        "risk_params": risk_params,
-    })
-
-    _logger.info(f"[weekly] 月复盘已生成: {month_str}")
+    try:
+        ctx.obsidian.write_monthly_review({
+            "month_str": month_str,
+            "trading_days": trading_days,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "profit_loss_ratio": plr,
+            "net_pnl_cents": net_pnl_cents,
+            "total_profit_cents": total_profit,
+            "total_loss_cents": total_loss,
+            "max_drawdown_cents": 0,  # TODO: 从每日快照计算
+            "avg_profit_cents": avg_profit,
+            "avg_loss_cents": avg_loss,
+            "weekly_summaries": weekly_summaries,
+            "worst_trades": worst_trades,
+            "pool_changes": pool_changes,
+            "paper_stats": paper_stats,
+            "risk_params": risk_params,
+        })
+        _logger.info(f"[weekly] 月复盘已生成: {month_str}")
+    except Exception as e:
+        _logger.warning(f"[weekly] 月复盘生成失败: {e}")
