@@ -579,21 +579,55 @@ class MXMarketAdapter:
             _logger.warning(f"[MXMarket] MX 指数行情获取失败: {e}")
 
         # akshare 兜底（价格 + 均线）
+        # 注意：stock_zh_index_spot_sina 在批量请求时对部分指数（深证/创业板）返回 0，
+        # 改用 stock_zh_index_daily 的最新收盘价作为价格来源，更稳定
         try:
-            spot = ak.stock_zh_index_spot_sina()
             for name, code in code_map.items():
                 if name in result:
+                    # MX 已返回数据，用日线数据补充 akshare 实时价格
+                    existing = result[name]
+                    try:
+                        daily_df = ak.stock_zh_index_daily(symbol=code)
+                        if not daily_df.empty:
+                            latest_close = float(daily_df["close"].iloc[-1])
+                            prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
+                            if (existing.price or 0) <= 0 or existing.price != latest_close:
+                                existing.price = latest_close
+                            # 用日线涨跌幅（更可靠）
+                            daily_chg = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                            if abs(existing.change_pct) < 0.01 and abs(daily_chg) > 0.01:
+                                existing.change_pct = daily_chg
+                    except Exception:
+                        pass
+                    # 补全 MA（如果 MX 没有的话）
+                    if not existing.ma20 and not existing.ma60:
+                        ma20, ma60, above_ma20, below_days = _compute_ma(code)
+                        existing.ma20 = ma20
+                        existing.ma60 = ma60
+                        existing.above_ma20 = above_ma20
+                        existing.below_ma60_days = below_days
                     continue
-                row = spot[spot["代码"] == code]
-                if row.empty:
-                    continue
-                r = row.iloc[0]
+
+                # 完全没有数据，走 akshare 日线路径
+                try:
+                    daily_df = ak.stock_zh_index_daily(symbol=code)
+                except Exception:
+                    daily_df = None
+
+                price_val = 0.0
+                change_val = 0.0
+                if daily_df is not None and not daily_df.empty:
+                    latest_close = float(daily_df["close"].iloc[-1])
+                    prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
+                    price_val = latest_close
+                    change_val = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+
                 ma20, ma60, above_ma20, below_days = _compute_ma(code)
                 result[name] = IndexQuote(
                     symbol=code,
                     name=name,
-                    price=float(r.get("最新价", 0) or 0),
-                    change_pct=float(r.get("涨跌幅", 0) or 0),
+                    price=price_val,
+                    change_pct=change_val,
                     ma20=ma20,
                     ma60=ma60,
                     above_ma20=above_ma20,
