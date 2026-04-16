@@ -27,6 +27,19 @@ COLORS = {
 SIGNAL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}
 SIGNAL_CN = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
 
+SIGNAL_TYPE_CN = {
+    "stop_loss": "止损",
+    "trailing_stop": "移动止盈",
+    "time_stop": "时间止损",
+    "ma_exit": "MA 跌破离场",
+    "style_switch": "风格切换",
+}
+URGENCY_CN = {
+    "immediate": "立即处理",
+    "end_of_day": "收盘前处理",
+    "advisory": "提醒",
+}
+
 
 def _field(name: str, value: str, inline: bool = True) -> dict:
     return {"name": name[:256], "value": str(value)[:1024], "inline": inline}
@@ -211,12 +224,63 @@ def format_stop_alert_embed(signal: dict) -> dict:
 
     fields = [
         _field("代码", code),
-        _field("类型", signal_type),
-        _field("紧急度", urgency),
+        _field("类型", SIGNAL_TYPE_CN.get(signal_type, signal_type)),
+        _field("紧急度", URGENCY_CN.get(urgency, urgency)),
         _field("说明", desc, inline=False),
     ]
 
     return _embed(title=title, color=color, fields=fields, footer="Hermes · risk_alert")
+
+
+def format_combined_stop_alert_embed(signals: list[dict]) -> dict:
+    """合并风控告警 → 单张 Discord embed dict。"""
+    if not signals:
+        return _embed(title="⚠️ 风控告警", color=COLORS["stop_alert"], fields=[])
+
+    # 按紧急度排序：immediate > end_of_day > advisory
+    urgency_order = {"immediate": 0, "end_of_day": 1, "advisory": 2}
+    sorted_signals = sorted(signals, key=lambda s: urgency_order.get(s.get("urgency", ""), 9))
+
+    title_map = {
+        "stop_loss": "🔴 止损触发",
+        "trailing_stop": "🟠 移动止盈触发",
+        "time_stop": "⏰ 时间止损",
+        "ma_exit": "📉 MA 跌破离场",
+    }
+
+    fields = []
+    for s in sorted_signals:
+        code = s.get("code", "")
+        signal_type = s.get("signal_type", "")
+        urgency = s.get("urgency", "")
+        desc = s.get("description", "")
+        emoji = title_map.get(signal_type, "⚠️").split()[0]
+        type_cn = SIGNAL_TYPE_CN.get(signal_type, signal_type)
+        urgency_cn = URGENCY_CN.get(urgency, urgency)
+        fields.append(_field(
+            f"{emoji} {code}",
+            f"{type_cn} · {urgency_cn}\n{desc}",
+            inline=False,
+        ))
+
+    # 统计摘要
+    immediate_count = sum(1 for s in signals if s.get("urgency") == "immediate")
+    eod_count = sum(1 for s in signals if s.get("urgency") == "end_of_day")
+    summary_parts = []
+    if immediate_count:
+        summary_parts.append(f"🔴 {immediate_count} 立即处理")
+    if eod_count:
+        summary_parts.append(f"📉 {eod_count} 收盘前处理")
+
+    desc = " | ".join(summary_parts) if summary_parts else f"共 {len(signals)} 条风控触发"
+
+    return _embed(
+        title=f"⚠️ 风控告警（{len(signals)}）",
+        description=desc,
+        color=COLORS["stop_alert"],
+        fields=fields,
+        footer="Hermes · risk_alert",
+    )
 
 
 def format_weekly_embed(data: dict) -> dict:

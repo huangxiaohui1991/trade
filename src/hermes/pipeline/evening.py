@@ -17,7 +17,7 @@ from datetime import date
 
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import check_position_risks
-from hermes.reporting.discord import format_evening_embed, format_stop_alert_embed
+from hermes.reporting.discord import format_evening_embed, format_combined_stop_alert_embed
 
 _logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     positions = ctx.exec_svc.get_positions()
 
     risk_alerts = []
-    stop_embeds = []
+    stop_signals = []
 
     for pos, signals in risk_results:
         # 写风控事件
@@ -61,10 +61,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
                 metadata={"run_id": run_id},
             )
             risk_alerts.append(f"⚠️ {pos.name}({pos.code}): {s.description}")
-            stop_embeds.append(format_stop_alert_embed({
+            stop_signals.append({
                 "code": pos.code, "signal_type": s.signal_type,
                 "description": s.description, "urgency": s.urgency,
-            }))
+            })
 
     # 3. 收盘报告
     report = ctx.reporter.generate_evening_report(run_id)
@@ -119,14 +119,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         ok, err = send_embed(embed)
         if not ok:
             _logger.warning(f"[evening] Discord 推送失败: {err}")
-        # 止损告警单独推送
-        for se in stop_embeds:
-            send_embed(se, content="⚠️ 风控告警")
+        # 风控告警合并为单张卡片推送
+        if stop_signals:
+            combined_alert = format_combined_stop_alert_embed(stop_signals)
+            send_embed(combined_alert, content="⚠️ 风控告警")
     except Exception as e:
         _logger.warning(f"[evening] Discord 推送异常: {e}")
 
     return {
         "signal": signal, "positions": len(positions),
-        "risk_alerts": risk_alerts, "stop_embeds": stop_embeds,
+        "risk_alerts": risk_alerts, "stop_signals": stop_signals,
         "discord_embed": embed,
     }
