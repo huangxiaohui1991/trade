@@ -80,9 +80,17 @@ class MarketStore:
         return json.loads(row["payload_json"])
 
     def get_cached(self, symbol: str, kind: str) -> Optional[dict]:
-        """TTL 缓存检查，使用默认 TTL。"""
+        """TTL 缓存检查，使用默认 TTL。返回 None 如果缓存数据不完整。"""
         ttl = TTL_CONFIG.get(kind, 300)
-        return self.get_latest_observation(symbol, kind, max_age_seconds=ttl)
+        data = self.get_latest_observation(symbol, kind, max_age_seconds=ttl)
+        if data is None:
+            return None
+        # 校验字段完整性：旧缓存（kind='quote' 只存了 close/name）不完整，拒绝复用
+        if kind == "quote":
+            required = {"code", "name", "price", "open", "high", "low", "volume", "amount", "change_pct"}
+            if not required.issubset(data.keys()):
+                return None
+        return data
 
     def save_bars(self, symbol: str, bars_df: pd.DataFrame, source: str = "akshare") -> int:
         """追加到 market_bars（金额存分），返回写入行数。"""
