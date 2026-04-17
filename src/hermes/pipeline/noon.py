@@ -94,6 +94,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         pos_data.append({
             "name": pos.name, "code": pos.code, "shares": pos.shares,
             "cost": pos.avg_cost, "price": current, "pnl_pct": pnl_pct,
+            "currency": getattr(pos, "currency", "CNY"),
         })
 
     # 3. 加仓提示

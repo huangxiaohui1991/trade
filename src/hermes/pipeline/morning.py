@@ -100,7 +100,8 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
         for p in positions:
-            log_lines.append(f"- {p.name}({p.code}) {p.shares}股 成本¥{p.avg_cost:.2f}")
+            sym = "HK$" if getattr(p, "currency", "CNY") == "HKD" else "¥"
+            log_lines.append(f"- {p.name}({p.code}) {p.shares}股 成本{sym}{p.avg_cost:.2f}")
     else:
         log_lines.append("当前空仓")
     if risk_alerts:
@@ -129,7 +130,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "date": local_today_str(),
         "market_signal": signal,
         "market": market_state.detail.get("indices", {}),
-        "positions": [{"name": p.name, "shares": p.shares, "price": p.current_price or p.avg_cost} for p in positions],
+        "positions": [{"name": p.name, "shares": p.shares, "price": p.current_price or p.avg_cost, "currency": getattr(p, "currency", "CNY")} for p in positions],
         "core_pool": core_pool[:5],
         "decision": {
             "action": decision_action,

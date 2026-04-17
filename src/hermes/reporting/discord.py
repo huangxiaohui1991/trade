@@ -98,9 +98,11 @@ def format_morning_embed(data: dict) -> dict:
     if positions:
         fields.append(_field("\u200b", "**💼 持仓**", inline=False))
         for pos in positions:
+            currency = pos.get("currency", "CNY")
+            sym = "HK$" if currency == "HKD" else "¥"
             fields.append(_field(
                 pos.get("name", ""),
-                f"{pos.get('shares', 0)} 股 @ `¥{pos.get('price', 0):.2f}`",
+                f"{pos.get('shares', 0)} 股 @ `{sym}{pos.get('price', 0):.2f}`",
             ))
     else:
         fields.append(_field("💼 持仓", "空仓", inline=False))
