@@ -18,40 +18,9 @@ from datetime import date
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import check_position_risks
 from hermes.reporting.discord import format_evening_embed, format_combined_stop_alert_embed
+from hermes.reporting.market_formatters import format_sector_heatmap_markdown
 
 _logger = logging.getLogger(__name__)
-
-
-def _format_heatmap_markdown(sectors: list[dict]) -> list[str]:
-    """把板块数据格式化为 markdown 表格（收盘版）。"""
-    if not sectors:
-        return ["数据获取失败"]
-    # 成交额格式
-    def fmt_amount(a: float) -> str:
-        if a >= 1e8:
-            return f"{a/1e8:.1f}亿"
-        return f"{a/1e4:.0f}万"
-    lines = []
-    gainers = [s for s in sectors if s.get("change_pct", 0) > 0][:5]
-    losers = [s for s in sectors if s.get("change_pct", 0) < 0][-5:]
-    if gainers:
-        lines.append("| 板块 | 涨跌幅 | 成交额 |")
-        lines.append("|------|--------|--------|")
-        for s in gainers:
-            pct = s.get("change_pct", 0)
-            lines.append(f"| 🔺 {s.get('name', '')} | `{pct:+.2f}%` | {fmt_amount(s.get('amount', 0))} |")
-    if losers:
-        lines.append("")
-        lines.append("| 板块 | 涨跌幅 | 成交额 |")
-        lines.append("|------|--------|--------|")
-        for s in losers:
-            pct = s.get("change_pct", 0)
-            lines.append(f"| 🔻 {s.get('name', '')} | `{pct:+.2f}%` | {fmt_amount(s.get('amount', 0))} |")
-    total_up = sum(s.get("up_count", 0) for s in sectors)
-    total_down = sum(s.get("down_count", 0) for s in sectors)
-    lines.append("")
-    lines.append(f"*全市场 {len(sectors)} 个板块：上涨 **{total_up}** 个 / 下跌 **{total_down}** 个*")
-    return lines
 
 
 def run(ctx: PipelineContext, run_id: str) -> dict:
@@ -134,7 +103,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap())
     _logger.info(f"[evening] 行业热力图: {len(heatmap_sectors)} 个板块")
     if heatmap_sectors:
-        heatmap_lines = _format_heatmap_markdown(heatmap_sectors)
+        heatmap_lines = format_sector_heatmap_markdown(heatmap_sectors)
         log_lines.extend(["", "### 行业热力图"] + heatmap_lines)
     else:
         log_lines.extend(["", "### 行业热力图", "数据获取失败"])

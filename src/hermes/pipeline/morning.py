@@ -20,6 +20,7 @@ from datetime import date
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import check_position_risks
 from hermes.reporting.discord import format_morning_embed
+from hermes.reporting.market_formatters import format_sector_heatmap_markdown
 
 _logger = logging.getLogger(__name__)
 
@@ -114,8 +115,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap())
     _logger.info(f"[morning] 行业热力图: {len(heatmap_sectors)} 个板块")
     if heatmap_sectors:
-        from hermes.pipeline.evening import _format_heatmap_markdown
-        log_lines.extend(["", "### 行业热力图"] + _format_heatmap_markdown(heatmap_sectors))
+        log_lines.extend(["", "### 行业热力图"] + format_sector_heatmap_markdown(heatmap_sectors))
     else:
         log_lines.extend(["", "### 行业热力图", "数据获取失败"])
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from hermes.reporting.market_formatters import top_sector_movers
+
 
 # Discord 品牌色
 COLORS = {
@@ -39,6 +41,7 @@ URGENCY_CN = {
     "end_of_day": "收盘前处理",
     "advisory": "提醒",
 }
+MAX_EMBED_FIELDS = 25
 
 
 def _field(name: str, value: str, inline: bool = True) -> dict:
@@ -249,7 +252,11 @@ def format_combined_stop_alert_embed(signals: list[dict]) -> dict:
     }
 
     fields = []
-    for s in sorted_signals:
+    max_signal_fields = MAX_EMBED_FIELDS
+    if len(sorted_signals) > MAX_EMBED_FIELDS:
+        max_signal_fields = MAX_EMBED_FIELDS - 1
+
+    for s in sorted_signals[:max_signal_fields]:
         code = s.get("code", "")
         signal_type = s.get("signal_type", "")
         urgency = s.get("urgency", "")
@@ -260,6 +267,14 @@ def format_combined_stop_alert_embed(signals: list[dict]) -> dict:
         fields.append(_field(
             f"{emoji} {code}",
             f"{type_cn} · {urgency_cn}\n{desc}",
+            inline=False,
+        ))
+
+    remaining = len(sorted_signals) - max_signal_fields
+    if remaining > 0:
+        fields.append(_field(
+            "其余告警",
+            f"还有 **{remaining}** 条未展开，请查看日志或后续处理。",
             inline=False,
         ))
 
@@ -386,8 +401,7 @@ def format_sector_heatmap_embed(sectors: list[dict], title: str = "") -> dict:
         )
 
     # 涨幅前 5 / 跌幅前 5
-    gainers = [s for s in sectors if s.get("change_pct", 0) > 0][:5]
-    losers = [s for s in sectors if s.get("change_pct", 0) < 0][-5:]
+    gainers, losers = top_sector_movers(sectors, limit=5)
 
     fields = []
 
