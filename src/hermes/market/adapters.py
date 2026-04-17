@@ -17,6 +17,7 @@ import pandas as pd
 
 _logger = logging.getLogger(__name__)
 
+from hermes.platform.time import local_now, local_today
 from hermes.market.models import (
     FinancialReport,
     FundFlow,
@@ -240,7 +241,7 @@ class AkShareMarketAdapter:
         from datetime import date
 
         result = {}
-        today = date.today().strftime("%Y%m%d")
+        today = local_today().strftime("%Y%m%d")
 
         for code in codes:
             if is_hk_code(code):
@@ -1033,7 +1034,7 @@ class BaoStockMarketAdapter:
             # 计算日期范围（当指定 count 而非起止日期时）
             if start_date is None and count > 0:
                 from datetime import datetime, timedelta
-                end_dt = datetime.now()
+                end_dt = local_now().replace(tzinfo=None)
                 if freq == "d":
                     days = min(count * 3, 5000)
                 elif freq in ("w", "m"):

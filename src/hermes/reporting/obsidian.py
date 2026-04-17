@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from hermes.platform.events import EventStore
+from hermes.platform.time import iso_to_local, local_date_bounds_utc
+from hermes.platform.time import local_now_str, local_today_str
 
 _logger = logging.getLogger(__name__)
 
@@ -57,10 +58,10 @@ class ObsidianProjector:
         return str(full)
 
     def _now(self) -> str:
-        return datetime.now().strftime("%Y-%m-%d %H:%M")
+        return local_now_str()
 
     def _today(self) -> str:
-        return datetime.now().strftime("%Y-%m-%d")
+        return local_today_str()
 
     # ------------------------------------------------------------------
     # 01-状态/持仓/持仓概览.md
@@ -318,7 +319,7 @@ class ObsidianProjector:
         """写入评分报告。"""
         today = self._today()
         now = self._now()
-        ts = datetime.now().strftime("%H%M%S")
+        ts = local_now_str("%H%M%S")
 
         lines = [
             "---",
@@ -585,10 +586,11 @@ class ObsidianProjector:
         today = self._today()
         now = self._now()
 
+        start_utc, end_utc = local_date_bounds_utc(today)
         runs = self._conn.execute(
             "SELECT run_id, run_type, status, started_at, finished_at, error_message "
-            "FROM run_log WHERE started_at >= ? ORDER BY started_at",
-            (today,),
+            "FROM run_log WHERE started_at >= ? AND started_at < ? ORDER BY started_at",
+            (start_utc, end_utc),
         ).fetchall()
 
         # 按 run_type 聚合，取最新一次
@@ -627,8 +629,8 @@ class ObsidianProjector:
             label = type_labels.get(rt, rt)
             status = info["status"]
             status_emoji = "✅" if status == "completed" else ("⚠️" if status == "warning" else ("🔴" if status == "failed" else "🔄"))
-            started = (info["started_at"] or "")[:16].replace("T", " ")
-            finished = (info["finished_at"] or "—")[:16].replace("T", " ")
+            started = iso_to_local(info["started_at"]).strftime("%Y-%m-%d %H:%M") if info["started_at"] else "—"
+            finished = iso_to_local(info["finished_at"]).strftime("%Y-%m-%d %H:%M") if info["finished_at"] else "—"
             err = info["error_message"] or "—"
             lines.append(f"| {label} | {status_emoji} {status} | {started} | {finished} | {err} |")
 
@@ -762,7 +764,7 @@ class ObsidianProjector:
         """写入筛选结果（综合 + 市场扫描候选）。"""
         today = self._today()
         now = self._now()
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = local_now_str("%Y%m%d_%H%M%S")
         added_to_watch = added_to_watch or []
 
         lines = [
@@ -864,7 +866,7 @@ class ObsidianProjector:
 
         today = self._today()
         now = self._now()
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = local_now_str("%Y%m%d_%H%M%S")
 
         lines = [
             "---",
@@ -930,7 +932,7 @@ class ObsidianProjector:
         """
         today = self._today()
         now = self._now()
-        ts = datetime.now().strftime("%Y%m%d")
+        ts = local_now_str("%Y%m%d")
         market_indices = market_indices or {}
 
         total_asset = balance.get("total_asset", 0)

@@ -20,6 +20,8 @@ from datetime import date, datetime, timezone
 
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.paper_account import PaperAccount, PaperPosition, PaperBalance
+from hermes.platform.time import iso_to_local, local_date_bounds_utc, local_now
+from hermes.platform.time import local_now_str, local_today, local_today_str
 from hermes.strategy.models import Action, MarketSignal, Style
 from hermes.risk.rules import check_exit_signals, get_risk_params
 from hermes.risk.models import RiskParams
@@ -176,7 +178,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 追加交易记录
     trade_rows = []
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_str = local_now_str()
     for s in sells:
         trade_rows.append({
             "time": now_str, "side": "sell",
@@ -270,7 +272,7 @@ def _check_and_sell(
         params = get_risk_params(style, risk_cfg)
 
         # 获取实际买入日期（从事件日志）
-        entry_date = date.today()
+        entry_date = local_today()
         paper_events = ctx.event_store.query(
             event_type="auto_trade.executed",
             stream=f"paper:{pos.code}",
@@ -279,7 +281,7 @@ def _check_and_sell(
             p = ev.get("payload", {})
             if p.get("side") == "buy":
                 try:
-                    entry_date = date.fromisoformat(ev["occurred_at"][:10])
+                    entry_date = iso_to_local(ev["occurred_at"]).date()
                 except (ValueError, KeyError):
                     pass
                 break
@@ -292,7 +294,7 @@ def _check_and_sell(
             avg_cost=pos.avg_cost,
             current_price=pos.current_price,
             entry_date=entry_date,
-            today=date.today(),
+            today=local_today(),
             highest_since_entry=highest_since_entry,
             entry_day_low=pos.avg_cost,
             params=params,
@@ -392,9 +394,9 @@ def _score_and_buy(
 
     # 本周模拟盘买入次数
     from datetime import timedelta
-    today = datetime.now()
-    monday = today - timedelta(days=today.weekday())
-    since = monday.strftime("%Y-%m-%d")
+    today = local_now()
+    monday = today.date() - timedelta(days=today.weekday())
+    since, _ = local_date_bounds_utc(monday)
     weekly_events = ctx.event_store.query(
         event_type="auto_trade.executed",
         since=since,
@@ -480,11 +482,10 @@ def _get_buy_candidates(
 
     candidates = []
     seen = set()
-    today_str = date.today().isoformat()
+    today_start_utc, today_end_utc = local_date_bounds_utc()
 
     for ev in recent_decisions:
-        # 只取今天的决策
-        if not ev.get("occurred_at", "").startswith(today_str):
+        if not (today_start_utc <= ev.get("occurred_at", "") < today_end_utc):
             continue
         p = ev.get("payload", {})
         if p.get("action") != "BUY":
@@ -597,7 +598,7 @@ def _record_summary_event(ctx: PipelineContext, run_id: str, buys: list, sells: 
         stream_type="paper_trade",
         event_type="auto_trade.summary",
         payload={
-            "date": date.today().isoformat(),
+            "date": local_today_str(),
             "dry_run": dry_run,
             "buy_count": len(buys),
             "sell_count": len(sells),
@@ -614,7 +615,7 @@ def _format_auto_trade_embed(
     """格式化 Discord embed。"""
     from hermes.reporting.discord import _embed, _field, SIGNAL_EMOJI, COLORS
 
-    date_str = date.today().isoformat()
+    date_str = local_today_str()
     sig = market_state.signal.value
     sig_emoji = SIGNAL_EMOJI.get(sig, "")
     title_prefix = "🧪 " if dry_run else "🤖 "

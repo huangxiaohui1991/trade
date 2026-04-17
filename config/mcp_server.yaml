@@ -3,6 +3,7 @@
 # 启动方式：
 #   hermes mcp
 #   或: python -m hermes.platform.mcp_server
+# 业务日期解释默认按 Asia/Shanghai；事件时间戳仍使用 UTC ISO
 #
 # 外部 Agent 连接配置示例（放到 Agent 自己的 MCP 配置中）：
 #   {

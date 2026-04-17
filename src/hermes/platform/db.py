@@ -8,10 +8,13 @@ WAL 模式启用，支持读写并发。
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from typing import Optional
 
-_SCHEMA_VERSION = 1
+_BASE_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -127,6 +130,7 @@ CREATE TABLE IF NOT EXISTS projection_positions (
     highest_since_entry_cents INTEGER,
     current_price_cents INTEGER,
     unrealized_pnl_cents INTEGER,
+    currency        TEXT NOT NULL DEFAULT 'CNY',
     updated_at      TEXT NOT NULL
 );
 
@@ -222,26 +226,78 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS _schema_version (
+               version     INTEGER PRIMARY KEY,
+               applied_at  TEXT NOT NULL
+           )"""
+    )
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_version (version, applied_at) VALUES (?, ?)",
+        (version, _now_iso()),
+    )
+
+
+def _bootstrap_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(_SCHEMA_SQL)
+    conn.executescript(_SCHEMA_SQL_2)
+    conn.executescript(_SCHEMA_SQL_3)
+    _ensure_schema_version_table(conn)
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    if not _column_exists(conn, "projection_positions", "currency"):
+        conn.execute(
+            "ALTER TABLE projection_positions "
+            "ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'"
+        )
+
+
+_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_to_v2,
+}
+
+
+def _apply_migrations(conn: sqlite3.Connection, current_version: int) -> int:
+    """Apply incremental migrations and return the final schema version."""
+    version = current_version
+    for target_version in sorted(_MIGRATIONS):
+        if target_version <= version:
+            continue
+        _MIGRATIONS[target_version](conn)
+        _set_schema_version(conn, target_version)
+        version = target_version
+    return version
+
+
 def init_db(db_path: Optional[Path] = None) -> Path:
     """Create all tables if they don't exist. Returns the db path."""
     path = db_path or _default_db_path()
     conn = connect(path)
     try:
-        conn.executescript(_SCHEMA_SQL)
-        conn.executescript(_SCHEMA_SQL_2)
-        conn.executescript(_SCHEMA_SQL_3)
+        _bootstrap_schema(conn)
 
-        # Record schema version
-        existing = conn.execute(
-            "SELECT version FROM _schema_version ORDER BY version DESC LIMIT 1"
-        ).fetchone()
-        if not existing or existing[0] < _SCHEMA_VERSION:
-            from datetime import datetime, timezone
+        current_version = get_schema_version(conn)
+        if current_version == 0:
+            _set_schema_version(conn, _BASE_SCHEMA_VERSION)
+            current_version = _BASE_SCHEMA_VERSION
 
-            conn.execute(
-                "INSERT OR REPLACE INTO _schema_version (version, applied_at) VALUES (?, ?)",
-                (_SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
-            )
+        current_version = _apply_migrations(conn, current_version)
+        if current_version < _SCHEMA_VERSION:
+            _set_schema_version(conn, _SCHEMA_VERSION)
         return path
     finally:
         conn.close()

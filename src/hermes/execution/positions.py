@@ -8,15 +8,16 @@ execution/positions.py — 持仓投影（从 event_log 重建）
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from hermes.execution.models import Position
 from hermes.platform.events import EventStore
+from hermes.platform.time import iso_to_local, local_today_str, utc_now_iso
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 class PositionManager:
@@ -39,7 +40,7 @@ class PositionManager:
     ) -> Position:
         """开仓 → 追加 position.opened 事件 → 更新投影。"""
         now = _now_iso()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = local_today_str()
 
         self._events.append(
             stream=f"position:{code}",
@@ -52,6 +53,7 @@ class PositionManager:
                 "avg_cost_cents": avg_cost_cents,
                 "style": style,
                 "entry_day_low_cents": entry_day_low_cents,
+                "currency": currency,
             },
             metadata={"run_id": run_id},
         )
@@ -97,8 +99,8 @@ class PositionManager:
         avg_cost_cents = row["avg_cost_cents"]
         holding_days = 0
         try:
-            entry = datetime.strptime(row["entry_date"], "%Y-%m-%d")
-            holding_days = (datetime.now(timezone.utc) - entry.replace(tzinfo=timezone.utc)).days
+            entry = datetime.strptime(row["entry_date"], "%Y-%m-%d").date()
+            holding_days = (iso_to_local(_now_iso()).date() - entry).days
         except (ValueError, TypeError):
             pass
 
@@ -206,6 +208,7 @@ class PositionProjector:
                         highest_since_entry_cents=p.get("avg_cost_cents", 0),
                         current_price_cents=p.get("avg_cost_cents", 0),
                         updated_at=ev.get("occurred_at", ""),
+                        currency=p.get("currency", "CNY"),
                     )
                 elif et == "position.closed":
                     pos = None  # 已清仓
@@ -216,12 +219,12 @@ class PositionProjector:
                     """INSERT OR REPLACE INTO projection_positions
                        (code, name, style, shares, avg_cost_cents, entry_date,
                         entry_day_low_cents, highest_since_entry_cents,
-                        current_price_cents, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        current_price_cents, updated_at, currency)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pos.code, pos.name, pos.style, pos.shares,
                      pos.avg_cost_cents, pos.entry_date,
                      pos.entry_day_low_cents, pos.highest_since_entry_cents,
-                     pos.current_price_cents, pos.updated_at),
+                     pos.current_price_cents, pos.updated_at, pos.currency),
                 )
                 positions.append(pos)
 

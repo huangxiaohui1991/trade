@@ -13,15 +13,16 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
+from hermes.platform.time import local_now_str, utc_now_iso
+
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 def _config_dir() -> Path:
@@ -81,7 +82,7 @@ class ConfigRegistry:
         if existing:
             version = existing[0]
         else:
-            version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{config_hash[:8]}"
+            version = f"v{local_now_str('%Y%m%d_%H%M%S')}_{config_hash[:8]}"
             conn.execute(
                 """INSERT INTO config_versions
                    (config_version, config_hash, config_json, created_at)

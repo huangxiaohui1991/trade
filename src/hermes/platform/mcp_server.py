@@ -20,7 +20,23 @@ import traceback
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:
+    class FastMCP:  # type: ignore[override]
+        """Minimal fallback so non-MCP environments can still import tool code."""
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def tool(self, *_args, **_kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        def run(self, *_args, **_kwargs):
+            raise RuntimeError("mcp package is not installed")
 
 from hermes.platform.db import connect, init_db
 from hermes.platform.events import EventStore
@@ -48,6 +64,7 @@ from hermes.strategy.scorer import Scorer
 from hermes.strategy.decider import Decider
 from hermes.strategy.service import StrategyService
 from hermes.strategy.timer import compute_market_signal
+from hermes.platform.time import local_now, local_now_str, local_today
 
 _logger = logging.getLogger(__name__)
 
@@ -190,7 +207,7 @@ def trade_market_signal() -> str:
 def trade_score_stock(code: str) -> str:
     """对单只股票进行四维评分。"""
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
-    run_id = f"score_{code}_{datetime.now().strftime('%H%M%S')}"
+    run_id = f"score_{code}_{local_now_str('%H%M%S')}"
 
     snapshot = asyncio.run(_market_svc.collect_snapshot(code, run_id=run_id))
     result = _strategy_svc.score_single(snapshot, run_id, config_version)
@@ -202,7 +219,7 @@ def trade_score_stock(code: str) -> str:
 def trade_score_batch(codes: str = "") -> str:
     """批量评分。codes 为逗号分隔的股票代码，留空则评核心池。"""
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
-    run_id = f"batch_{datetime.now().strftime('%H%M%S')}"
+    run_id = f"batch_{local_now_str('%H%M%S')}"
 
     if codes.strip():
         stock_list = [{"code": c.strip(), "name": ""} for c in codes.split(",") if c.strip()]
@@ -269,7 +286,7 @@ def trade_check_risk(code: str) -> str:
 
     style = Style(pos.style) if pos.style in ("slow_bull", "momentum") else Style.UNKNOWN
     params = get_risk_params(style)
-    today = date.today()
+    today = local_today()
 
     try:
         entry_date = datetime.strptime(pos.entry_date, "%Y-%m-%d").date()
@@ -384,7 +401,7 @@ def trade_screener(query: str = "") -> str:
     stock_list = stock_list[:scan_limit]
 
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
-    run_id = f"screener_{datetime.now().strftime('%H%M%S')}"
+    run_id = f"screener_{local_now_str('%H%M%S')}"
     snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
@@ -760,7 +777,7 @@ def trade_run_pipeline(pipeline_type: str) -> str:
             from hermes.pipeline.weekly import run
         elif pipeline_type == "monthly":
             from hermes.pipeline.weekly import _generate_monthly_review
-            _generate_monthly_review(ctx, run_id, datetime.now(timezone.utc))
+            _generate_monthly_review(ctx, run_id, local_now())
             _run_journal.complete_run(run_id, artifacts={"result": "ok"})
             return json.dumps({"status": "completed", "run_id": run_id, "pipeline": "monthly"}, ensure_ascii=False)
         elif pipeline_type == "sentiment":

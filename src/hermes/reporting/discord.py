@@ -7,8 +7,9 @@ reporting 不反写任何业务表。
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Optional
+
+from hermes.platform.time import local_now_iso, local_now_str, local_today_str
 
 
 # Discord 品牌色
@@ -56,7 +57,7 @@ def _embed(
         e["fields"] = fields
     if footer:
         e["footer"] = {"text": footer}
-    e["timestamp"] = datetime.now().astimezone().isoformat()
+    e["timestamp"] = local_now_iso()
     return e
 
 
@@ -78,7 +79,7 @@ def _pnl_emoji(v: float) -> str:
 
 def format_morning_embed(data: dict) -> dict:
     """盘前摘要 → Discord embed dict。"""
-    date_str = data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    date_str = data.get("date", local_today_str())
     signal = data.get("market_signal", "")
     sig_tag = f"{SIGNAL_EMOJI.get(signal, '')} {SIGNAL_CN.get(signal, signal)}"
 
@@ -138,7 +139,7 @@ def format_morning_embed(data: dict) -> dict:
 
 def format_evening_embed(data: dict) -> dict:
     """收盘报告 → Discord embed dict。"""
-    date_str = data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    date_str = data.get("date", local_today_str())
 
     fields = []
 
@@ -176,7 +177,7 @@ def format_evening_embed(data: dict) -> dict:
 def format_scoring_embed(scores: list[dict], date_str: str = "") -> dict:
     """评分报告 → Discord embed dict。"""
     if not date_str:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = local_today_str()
 
     fields = []
     for s in scores[:15]:  # Discord 最多 25 fields
@@ -322,7 +323,7 @@ def format_weekly_embed(data: dict) -> dict:
 
 def format_sentiment_embed(alerts: list[dict]) -> dict:
     """舆情告警 → Discord embed dict。"""
-    now = datetime.now().strftime("%H:%M")
+    now = local_now_str("%H:%M")
     fields = []
 
     # 按 level 分组：negative 优先

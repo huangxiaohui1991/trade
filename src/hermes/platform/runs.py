@@ -10,20 +10,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import timedelta
 from typing import Optional
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _today_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+from hermes.platform.time import local_date_bounds_utc, local_now, utc_now
+from hermes.platform.time import utc_now_iso
 
 
 def _make_run_id(run_type: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = local_now().strftime("%Y%m%d_%H%M%S")
     short = uuid.uuid4().hex[:6]
     return f"run_{run_type}_{ts}_{short}"
 
@@ -48,14 +43,14 @@ class RunJournal:
                (run_id, run_type, scope, config_version, data_cutoff,
                 status, started_at)
                VALUES (?, ?, ?, ?, ?, 'running', ?)""",
-            (run_id, run_type, scope, config_version, data_cutoff, _now_iso()),
+            (run_id, run_type, scope, config_version, data_cutoff, utc_now_iso()),
         )
 
         # Mark config as activated if first use
         self._conn.execute(
             """UPDATE config_versions SET activated_at = ?
                WHERE config_version = ? AND activated_at IS NULL""",
-            (_now_iso(), config_version),
+            (utc_now_iso(), config_version),
         )
         return run_id
 
@@ -70,7 +65,7 @@ class RunJournal:
                SET status = 'completed', finished_at = ?, artifacts_json = ?
                WHERE run_id = ?""",
             (
-                _now_iso(),
+                utc_now_iso(),
                 json.dumps(artifacts or {}, ensure_ascii=False, default=str),
                 run_id,
             ),
@@ -82,18 +77,18 @@ class RunJournal:
             """UPDATE run_log
                SET status = 'failed', finished_at = ?, error_message = ?
                WHERE run_id = ?""",
-            (_now_iso(), error[:4000], run_id),
+            (utc_now_iso(), error[:4000], run_id),
         )
 
     def is_completed_today(self, run_type: str, scope: str = "cn_a") -> bool:
         """Idempotency check: has this run_type completed today?"""
-        today = _today_str()
+        start_utc, end_utc = local_date_bounds_utc()
         row = self._conn.execute(
             """SELECT 1 FROM run_log
                WHERE run_type = ? AND scope = ? AND status = 'completed'
                  AND started_at >= ? AND started_at < ?
                LIMIT 1""",
-            (run_type, scope, today, today + "T23:59:59"),
+            (run_type, scope, start_utc, end_utc),
         ).fetchone()
         return row is not None
 
@@ -102,11 +97,12 @@ class RunJournal:
     ) -> Optional[dict]:
         """Get the most recent run of a given type, optionally filtered by date."""
         if date:
+            start_utc, end_utc = local_date_bounds_utc(date)
             row = self._conn.execute(
                 """SELECT * FROM run_log
                    WHERE run_type = ? AND started_at >= ? AND started_at < ?
                    ORDER BY started_at DESC LIMIT 1""",
-                (run_type, date, date + "T23:59:59"),
+                (run_type, start_utc, end_utc),
             ).fetchone()
         else:
             row = self._conn.execute(
@@ -119,9 +115,7 @@ class RunJournal:
 
     def get_failed_runs(self, days: int = 7) -> list[dict]:
         """Get recent failed runs for replay consideration."""
-        from datetime import timedelta
-
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (utc_now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             """SELECT * FROM run_log
                WHERE status = 'failed' AND started_at >= ?
