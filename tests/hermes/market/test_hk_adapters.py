@@ -10,6 +10,7 @@ from hermes.market.adapters import (
     AkShareHKMarketAdapter,
     AkShareHKFinancialAdapter,
     AkShareMarketAdapter,
+    MXMarketAdapter,
     AkShareFinancialAdapter,
     AkShareFlowAdapter,
 )
@@ -86,6 +87,48 @@ class TestHKAdapterRouting:
             adapter.get_kline("09927")
         )
         assert result is None
+
+    def test_mx_market_kline_skips_hk(self, monkeypatch):
+        """MXMarketAdapter._get_kline_sync should short-circuit HK codes."""
+        adapter = MXMarketAdapter()
+
+        def _should_not_call(*args, **kwargs):
+            raise AssertionError("MX HK kline path should not be called")
+
+        monkeypatch.setattr(adapter, "_get_kline_from_mx", _should_not_call)
+        result = adapter._get_kline_sync("09927", "daily", 10)
+        assert result is None
+
+    def test_mx_market_realtime_skips_hk(self, monkeypatch):
+        """MXMarketAdapter.get_realtime should filter HK codes before dispatch."""
+        adapter = MXMarketAdapter()
+        captured = {}
+
+        def _fake_get_realtime_sync(codes):
+            captured["codes"] = list(codes)
+            return {
+                "600066": StockQuote(
+                    code="600066",
+                    name="宇通客车",
+                    price=25.1,
+                    open=24.8,
+                    high=25.2,
+                    low=24.7,
+                    close=25.1,
+                    volume=1000,
+                    amount=2000,
+                    change_pct=1.2,
+                )
+            }
+
+        monkeypatch.setattr(adapter, "_get_realtime_sync", _fake_get_realtime_sync)
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter.get_realtime(["09927", "600066"])
+        )
+
+        assert captured["codes"] == ["600066"]
+        assert "09927" not in result
+        assert result["600066"].close == 25.1
 
 
 # ── HK kline format ──

@@ -573,13 +573,18 @@ class MXMarketAdapter:
     """妙想行情 adapter。"""
 
     async def get_realtime(self, codes: list[str]) -> dict[str, StockQuote]:
-        return await asyncio.to_thread(self._get_realtime_sync, codes)
+        a_codes = [code for code in codes if not is_hk_code(code)]
+        if not a_codes:
+            return {}
+        return await asyncio.to_thread(self._get_realtime_sync, a_codes)
 
     async def get_index(self, symbols: list[str]) -> dict[str, IndexQuote]:
         """获取 A 股指数行情（内部 hardcode 四大指数，无视 symbols 参数）。"""
         return await asyncio.to_thread(self._get_index_sync)
 
     async def get_kline(self, code: str, period: str = "daily", count: int = 120) -> Optional[pd.DataFrame]:
+        if is_hk_code(code):
+            return None
         return await asyncio.to_thread(self._get_kline_sync, code, period, count)
 
     def _get_kline_sync(self, code: str, period: str = "daily", count: int = 120) -> Optional[pd.DataFrame]:
@@ -595,6 +600,10 @@ class MXMarketAdapter:
 
         兜底：AkShare 东财日线。
         """
+        if is_hk_code(code):
+            _logger.debug(f"[MXMarket] get_kline 跳过港股代码: {code}")
+            return None
+
         if period != "daily":
             _logger.warning(f"[MXMarket] get_kline 不支持 period={period}，仅支持 daily")
             return None
@@ -706,6 +715,9 @@ class MXMarketAdapter:
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
         try:
+            codes = [code for code in codes if not is_hk_code(code)]
+            if not codes:
+                return {}
             from hermes.market.mx.realtime import get_realtime_mx
             raw = get_realtime_mx(codes)
             result = {}

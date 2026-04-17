@@ -1,8 +1,11 @@
 """Tests for market/store.py and market/service.py"""
 
 import asyncio
+import pandas as pd
 import pytest
 
+from hermes.market import service as market_service_module
+from hermes.market.adapters import AkShareHKMarketAdapter
 from hermes.market.models import (
     FinancialReport,
     FundFlow,
@@ -10,6 +13,7 @@ from hermes.market.models import (
     SentimentData,
     StockQuote,
     StockSnapshot,
+    TechnicalIndicators,
 )
 from hermes.market.store import MarketStore
 from hermes.market.service import MarketService
@@ -79,6 +83,30 @@ class MockMarketProvider:
 
     async def get_index(self, symbols):
         return {}
+
+
+class TrackingAShareKlineProvider(MockMarketProvider):
+    def __init__(self, kline=None):
+        super().__init__()
+        self.calls = []
+        self._kline = kline if kline is not None else pd.DataFrame({"close": [1.0]})
+
+    async def get_kline(self, code, period="daily", count=120):
+        self.calls.append(code)
+        return self._kline
+
+
+class TrackingHKKlineProvider(AkShareHKMarketAdapter):
+    def __init__(self, kline=None):
+        self.calls = []
+        self._kline = kline if kline is not None else pd.DataFrame({"close": [1.0]})
+
+    async def get_realtime(self, codes):
+        return {}
+
+    async def get_kline(self, code, period="daily", count=120):
+        self.calls.append(code)
+        return self._kline
 
 
 class MockFinancialProvider:
@@ -222,3 +250,82 @@ class TestMarketService:
 
         obs = store.get_latest_observation("002138", "snapshot")
         assert obs is not None
+
+    def test_hk_technical_uses_only_hk_provider(self, store, monkeypatch):
+        a_provider = TrackingAShareKlineProvider()
+        hk_provider = TrackingHKKlineProvider()
+        monkeypatch.setattr(
+            market_service_module,
+            "compute_technical_indicators",
+            lambda kline, quote: TechnicalIndicators(ma20=81.4),
+        )
+
+        svc = MarketService(
+            market_providers=[a_provider, hk_provider],
+            store=store,
+        )
+
+        technical = asyncio.get_event_loop().run_until_complete(
+            svc._get_technical("09927", None)
+        )
+
+        assert technical is not None
+        assert technical.ma20 == 81.4
+        assert a_provider.calls == []
+        assert hk_provider.calls == ["09927"]
+
+    def test_a_share_technical_skips_hk_provider(self, store, monkeypatch):
+        a_provider = TrackingAShareKlineProvider()
+        hk_provider = TrackingHKKlineProvider()
+        monkeypatch.setattr(
+            market_service_module,
+            "compute_technical_indicators",
+            lambda kline, quote: TechnicalIndicators(ma20=15.0),
+        )
+
+        svc = MarketService(
+            market_providers=[hk_provider, a_provider],
+            store=store,
+        )
+
+        technical = asyncio.get_event_loop().run_until_complete(
+            svc._get_technical("600066", None)
+        )
+
+        assert technical is not None
+        assert technical.ma20 == 15.0
+        assert hk_provider.calls == []
+        assert a_provider.calls == ["600066"]
+
+    def test_hk_quote_falls_back_to_hk_kline_only(self, store):
+        a_provider = TrackingAShareKlineProvider(
+            pd.DataFrame([{"close": 88.9, "open": 88.0, "high": 89.5, "low": 87.8, "volume": 1, "amount": 1}])
+        )
+        hk_provider = TrackingHKKlineProvider(
+            pd.DataFrame([{
+                "date": "2026-04-16",
+                "open": 80.2,
+                "high": 82.0,
+                "low": 79.8,
+                "close": 81.4,
+                "volume": 470600,
+                "amount": 37750650,
+                "涨跌幅": 1.12,
+                "名称": "赛力斯(港股)",
+            }])
+        )
+
+        svc = MarketService(
+            market_providers=[a_provider, hk_provider],
+            store=store,
+        )
+
+        quote = asyncio.get_event_loop().run_until_complete(
+            svc._get_quote("09927")
+        )
+
+        assert quote is not None
+        assert quote.close == 81.4
+        assert quote.name == "赛力斯(港股)"
+        assert a_provider.calls == []
+        assert hk_provider.calls == ["09927"]

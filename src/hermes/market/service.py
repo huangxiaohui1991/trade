@@ -212,6 +212,16 @@ class MarketService:
             except Exception as e:
                 _logger.info(f"[quote] {code} provider failed: {e}")
                 continue
+
+        for provider in self._iter_kline_providers(code):
+            try:
+                kline = await provider.get_kline(code, "daily", 2)
+                quote = self._quote_from_kline(code, kline)
+                if quote is not None:
+                    return quote
+            except Exception as e:
+                _logger.info(f"[quote] {code} provider kline fallback failed: {e}")
+                continue
         return None
 
     async def _get_financial(self, code: str) -> Optional[object]:
@@ -265,10 +275,7 @@ class MarketService:
 
     async def _get_technical(self, code: str, quote: Optional[StockQuote]) -> Optional[TechnicalIndicators]:
         """从 K 线计算技术指标。"""
-        # 优先用 market providers 的 K 线
-        for provider in self._market:
-            if not hasattr(provider, "get_kline"):
-                continue
+        for provider in self._iter_kline_providers(code):
             try:
                 kline = await provider.get_kline(code, "daily", 120)
                 if kline is not None and not kline.empty:
@@ -277,6 +284,55 @@ class MarketService:
                 _logger.info(f"[technical] {code} provider kline failed: {e}")
                 continue
         return None
+
+    def _iter_kline_providers(self, code: str):
+        """为指定代码挑选合适的 K 线 provider。"""
+        from hermes.market.adapters import AkShareHKMarketAdapter, is_hk_code
+
+        want_hk = is_hk_code(code)
+        for provider in self._market:
+            if not hasattr(provider, "get_kline"):
+                continue
+            if want_hk and not isinstance(provider, AkShareHKMarketAdapter):
+                continue
+            if not want_hk and isinstance(provider, AkShareHKMarketAdapter):
+                continue
+            yield provider
+
+    def _quote_from_kline(self, code: str, kline) -> Optional[StockQuote]:
+        """从日 K 最后一根 bar 构造一个收盘快照。"""
+        if kline is None or kline.empty:
+            return None
+
+        row = kline.iloc[-1]
+
+        def _num(*keys: str, default: float = 0.0) -> float:
+            for key in keys:
+                value = row.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return default
+
+        close = _num("close", "收盘")
+        if close <= 0:
+            return None
+
+        return StockQuote(
+            code=code,
+            name=str(row.get("name") or row.get("名称") or row.get("证券名称") or code),
+            price=close,
+            open=_num("open", "开盘", default=close),
+            high=_num("high", "最高", default=close),
+            low=_num("low", "最低", default=close),
+            close=close,
+            volume=int(_num("volume", "成交量")),
+            amount=_num("amount", "成交额"),
+            change_pct=_num("涨跌幅", "pct_change"),
+        )
 
     async def collect_sector_heatmap(self) -> list[dict]:
         """获取行业板块热力图数据（成交额前 AkShare）。"""
