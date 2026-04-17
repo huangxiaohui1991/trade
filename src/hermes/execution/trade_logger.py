@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
 from typing import Optional
 
 from hermes.platform.events import EventStore
+from hermes.platform.time import local_now_str, utc_now_iso
 from hermes.reporting.obsidian import ObsidianProjector
 from hermes.reporting.reports import ReportGenerator
 
@@ -62,8 +62,7 @@ class TradeLogger:
 
             # 写交易日志
             try:
-                today = datetime.now().strftime("%Y-%m-%d")
-                now = datetime.now().strftime("%H:%M:%S")
+                now = local_now_str("%H:%M:%S")
                 emoji = "🟢 买入" if side == "buy" else "🔴 卖出"
                 log_entry = f"\n## {now} {emoji}\n\n- {name}({code}) {shares}股 @ ¥{price:.2f}\n"
                 self._obsidian.write_daily_log(run_id, log_entry)
@@ -72,7 +71,7 @@ class TradeLogger:
 
         # 写 report_artifacts
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = utc_now_iso()
             self._conn.execute(
                 """INSERT INTO report_artifacts
                    (artifact_id, run_id, report_type, format, content, delivered_to, created_at)

@@ -2,15 +2,28 @@
 
 当前仓库采用“同仓分目录”结构：
 
-- `scripts/`、`config/`、`data/` 放代码、配置和运行数据
+- `src/`、`config/`、`data/` 放代码、配置和运行数据
 - `trade-vault/` 放 Obsidian 内容区
-- Python 运行环境统一使用 `.venv/`
+- `bin/trade` 作为统一 CLI 入口，默认使用 `.venv/`
 
 常用约定：
 
-- 默认 vault 路径由 [config/paths.yaml](/Users/hxh/Documents/a-stock-trading/config/paths.yaml:1) 指向 `trade-vault/`
+- 默认 vault 路径由 `config/paths.yaml` 指向 `trade-vault/`
 - 如需临时覆盖，可设置环境变量 `AStockVault`
-- 运行自检可用：`python -m scripts.cli.trade doctor --json`
+- 运行自检可用：`bin/trade doctor --json`
+- 业务日期、日报归档、run 幂等判断统一按 `Asia/Shanghai` 处理；审计时间戳仍保存为 UTC ISO
+
+常用命令：
+
+- `bin/trade doctor --json`：环境自检
+- `bin/trade db migrate`：初始化或升级数据库 schema
+- `bin/trade db status`：查看数据库状态
+- `bin/trade run-pipeline morning`：执行盘前 pipeline
+- `bin/trade run-pipeline scoring`：执行评分 pipeline
+- `bin/trade run-pipeline auto_trade`：执行模拟盘自动交易
+- `bin/trade fetch-history 600036 --count 500`：拉取历史 K 线
+- `bin/trade backtest 600036,000001 2025-01-01 2025-12-31`：运行回测
+- `bin/trade mcp`：启动 MCP Server
 
 `trade-vault/` 结构示例：
 

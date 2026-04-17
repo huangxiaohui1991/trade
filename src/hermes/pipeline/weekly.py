@@ -14,9 +14,10 @@ pipeline/weekly.py — 周报
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from hermes.pipeline.context import PipelineContext
+from hermes.platform.time import iso_to_local, local_date_bounds_utc, local_now
 
 _logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     """执行周报 pipeline。"""
 
     # 1. 本周时间范围
-    now = datetime.now(timezone.utc)
+    now = local_now()
     week_start_dt = now - timedelta(days=now.weekday())
     week_end_dt = week_start_dt + timedelta(days=6)
     week_start = week_start_dt.strftime("%Y-%m-%d")
@@ -33,12 +34,14 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     week_start_display = week_start_dt.strftime("%m/%d")
     week_end_display = week_end_dt.strftime("%m/%d")
 
-    # 2. 实盘交易统计
-    filled_events = ctx.event_store.query(event_type="order.filled")
-    closed_events = ctx.event_store.query(event_type="position.closed")
+    week_start_utc, _ = local_date_bounds_utc(week_start_dt.date())
 
-    week_fills = [e for e in filled_events if e.get("occurred_at", "")[:10] >= week_start]
-    week_closes = [e for e in closed_events if e.get("occurred_at", "")[:10] >= week_start]
+    # 2. 实盘交易统计
+    filled_events = ctx.event_store.query(event_type="order.filled", since=week_start_utc)
+    closed_events = ctx.event_store.query(event_type="position.closed", since=week_start_utc)
+
+    week_fills = [e for e in filled_events if iso_to_local(e.get("occurred_at", "")).date() >= week_start_dt.date()]
+    week_closes = [e for e in closed_events if iso_to_local(e.get("occurred_at", "")).date() >= week_start_dt.date()]
 
     buy_count = sum(1 for e in week_fills if e["payload"].get("side") == "buy")
     sell_count = sum(1 for e in week_fills if e["payload"].get("side") == "sell")
@@ -68,7 +71,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     for e in week_fills:
         p = e["payload"]
         trades.append({
-            "date": e.get("occurred_at", "")[:10],
+            "date": iso_to_local(e.get("occurred_at", "")).date().isoformat(),
             "code": p.get("code", ""),
             "name": p.get("name", ""),
             "side": p.get("side", ""),
@@ -89,8 +92,8 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
                 break
 
     # 5. 池子变动
-    pool_demoted = ctx.event_store.query(event_type="pool.demoted", since=week_start)
-    pool_removed = ctx.event_store.query(event_type="pool.removed", since=week_start)
+    pool_demoted = ctx.event_store.query(event_type="pool.demoted", since=week_start_utc)
+    pool_removed = ctx.event_store.query(event_type="pool.removed", since=week_start_utc)
     pool_changes = []
     for e in pool_demoted:
         p = e["payload"]
@@ -118,9 +121,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
                  for r in pool_rows]
 
     # 7. 模拟盘统计
-    paper_events = ctx.event_store.query(
-        event_type="auto_trade.executed", since=week_start,
-    )
+    paper_events = ctx.event_store.query(event_type="auto_trade.executed", since=week_start_utc)
     paper_buys = sum(1 for e in paper_events
                      if e.get("payload", {}).get("side") == "buy"
                      and e.get("metadata", {}).get("account") == "paper")
@@ -213,10 +214,11 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
     """生成月复盘。"""
     month_str = now.strftime("%Y-%m")
     month_start = now.replace(day=1).strftime("%Y-%m-%d")
+    month_start_utc, _ = local_date_bounds_utc(month_start)
 
     # 实盘统计
-    filled_events = ctx.event_store.query(event_type="order.filled", since=month_start)
-    closed_events = ctx.event_store.query(event_type="position.closed", since=month_start)
+    filled_events = ctx.event_store.query(event_type="order.filled", since=month_start_utc)
+    closed_events = ctx.event_store.query(event_type="position.closed", since=month_start_utc)
 
     buy_count = sum(1 for e in filled_events if e["payload"].get("side") == "buy")
     sell_count = sum(1 for e in filled_events if e["payload"].get("side") == "sell")
@@ -239,7 +241,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
                 "code": e["payload"].get("code", ""),
                 "name": e["payload"].get("name", ""),
                 "pnl_cents": pnl,
-                "date": e.get("occurred_at", "")[:10],
+                "date": iso_to_local(e.get("occurred_at", "")).date().isoformat(),
             })
 
     worst_trades.sort(key=lambda x: x["pnl_cents"])  # 最亏的排前面
@@ -257,7 +259,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
     weekly_map: dict[str, dict] = {}
     for e in filled_events:
         try:
-            d = datetime.fromisoformat(e["occurred_at"][:10])
+            d = iso_to_local(e["occurred_at"])
             wk = d.strftime("%Y-W%W")
         except Exception:
             continue
@@ -272,7 +274,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
 
     for e in closed_events:
         try:
-            d = datetime.fromisoformat(e["occurred_at"][:10])
+            d = iso_to_local(e["occurred_at"])
             wk = d.strftime("%Y-W%W")
         except Exception:
             continue
@@ -289,8 +291,8 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
     weekly_summaries = sorted(weekly_map.values(), key=lambda x: x["week"])
 
     # 池子变动
-    pool_demoted = ctx.event_store.query(event_type="pool.demoted", since=month_start)
-    pool_removed = ctx.event_store.query(event_type="pool.removed", since=month_start)
+    pool_demoted = ctx.event_store.query(event_type="pool.demoted", since=month_start_utc)
+    pool_removed = ctx.event_store.query(event_type="pool.removed", since=month_start_utc)
     pool_changes = []
     for e in pool_demoted:
         p = e["payload"]
@@ -298,7 +300,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
             "code": p.get("code", ""), "name": p.get("name", ""),
             "change_type": "demoted",
             "reason": f"降级: {p.get('reason', '')}",
-            "date": e.get("occurred_at", "")[:10],
+            "date": iso_to_local(e.get("occurred_at", "")).date().isoformat(),
         })
     for e in pool_removed:
         p = e["payload"]
@@ -306,13 +308,11 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
             "code": p.get("code", ""), "name": p.get("name", ""),
             "change_type": "removed",
             "reason": f"移出: 评分 {p.get('score', 0)}",
-            "date": e.get("occurred_at", "")[:10],
+            "date": iso_to_local(e.get("occurred_at", "")).date().isoformat(),
         })
 
     # 模拟盘统计
-    paper_events = ctx.event_store.query(
-        event_type="auto_trade.executed", since=month_start,
-    )
+    paper_events = ctx.event_store.query(event_type="auto_trade.executed", since=month_start_utc)
     paper_buys = sum(1 for e in paper_events
                      if e.get("payload", {}).get("side") == "buy"
                      and e.get("metadata", {}).get("account") == "paper")
@@ -342,7 +342,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
     }
 
     # 估算交易日数（工作日）
-    month_start_dt = datetime.fromisoformat(month_start)
+    month_start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     trading_days = sum(
         1 for i in range((now - month_start_dt).days + 1)
         if (month_start_dt + timedelta(days=i)).weekday() < 5

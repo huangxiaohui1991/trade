@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
 
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import get_current_exposure
+from hermes.platform.time import local_today_str
 from hermes.reporting.discord import format_scoring_embed
 
 _logger = logging.getLogger(__name__)
@@ -181,7 +181,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     ctx.obsidian.write_daily_output_index(run_id)
 
     # 7. Discord embed
-    embed = format_scoring_embed(run_scores, date.today().isoformat())
+    embed = format_scoring_embed(run_scores, local_today_str())
 
     _logger.info(f"[scoring] 完成: {len(run_scores)} 只评分")
 

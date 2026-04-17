@@ -6,6 +6,7 @@ platform/cli.py — CLI 入口 (typer)
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from hermes.platform.db import connect, init_db, get_schema_version
 from hermes.platform.events import EventStore
 from hermes.platform.config import ConfigRegistry
 from hermes.platform.runs import RunJournal
+from hermes.platform.time import MARKET_TZ
 
 app = typer.Typer(name="trade", help="Hermes 交易系统 CLI")
 db_app = typer.Typer(name="db", help="数据库管理")
@@ -27,6 +29,95 @@ app.add_typer(db_app)
 app.add_typer(config_app)
 app.add_typer(runs_app)
 app.add_typer(events_app)
+
+
+def _resolve_vault_path() -> Optional[Path]:
+    paths_file = Path(__file__).resolve().parent.parent.parent.parent / "config" / "paths.yaml"
+    if not paths_file.exists():
+        return None
+
+    try:
+        import yaml
+
+        with open(paths_file, encoding="utf-8") as f:
+            paths = yaml.safe_load(f) or {}
+    except Exception:
+        return None
+
+    raw_path = paths.get("vault_path")
+    if not raw_path:
+        return None
+
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = paths_file.parent.parent / path
+    return path
+
+
+@app.command("doctor")
+def doctor(
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """环境自检：数据库、配置、vault、MCP 依赖。"""
+    path = init_db(db_path)
+    conn = connect(db_path)
+    try:
+        version = get_schema_version(conn)
+        event_count = conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
+        run_count = conn.execute("SELECT COUNT(*) FROM run_log").fetchone()[0]
+        config_count = conn.execute("SELECT COUNT(*) FROM config_versions").fetchone()[0]
+
+        registry = ConfigRegistry()
+        snapshot = registry.freeze(conn)
+
+        vault_path = _resolve_vault_path()
+        result = {
+            "status": "ok",
+            "db": {
+                "path": str(path),
+                "schema_version": version,
+                "events": event_count,
+                "runs": run_count,
+                "config_versions": config_count,
+            },
+            "config": {
+                "version": snapshot.version,
+                "hash": snapshot.hash,
+            },
+            "vault": {
+                "path": str(vault_path) if vault_path else "",
+                "exists": bool(vault_path and vault_path.exists()),
+            },
+            "mcp": {
+                "installed": importlib.util.find_spec("mcp.server.fastmcp") is not None,
+            },
+            "timezone": str(MARKET_TZ),
+        }
+
+        if as_json:
+            typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        typer.echo("Hermes Doctor")
+        typer.echo(f"  DB: {result['db']['path']}")
+        typer.echo(f"  Schema version: {result['db']['schema_version']}")
+        typer.echo(
+            f"  Events/Runs/Configs: "
+            f"{result['db']['events']}/{result['db']['runs']}/{result['db']['config_versions']}"
+        )
+        typer.echo(
+            f"  Config: {result['config']['version']} "
+            f"(hash={result['config']['hash']})"
+        )
+        typer.echo(
+            f"  Vault: {result['vault']['path'] or '未配置'} "
+            f"(exists={result['vault']['exists']})"
+        )
+        typer.echo(f"  MCP installed: {result['mcp']['installed']}")
+        typer.echo(f"  Business timezone: {result['timezone']}")
+    finally:
+        conn.close()
 
 
 # ── db commands ───────────────────────────────────────────────

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from hermes.pipeline.context import PipelineContext
 from hermes.execution.models import Position
+from hermes.platform.time import local_date_bounds_utc, local_now, local_today
 from hermes.risk.models import ExitSignal, RiskParams
 from hermes.risk.rules import check_exit_signals, get_risk_params
 from hermes.strategy.models import Style
@@ -64,9 +65,9 @@ def check_position_risks(
         style = Style(pos.style) if pos.style in ("slow_bull", "momentum") else Style.UNKNOWN
         params = get_risk_params(style, risk_cfg)
         try:
-            entry_date = date.fromisoformat(pos.entry_date) if pos.entry_date else date.today()
+            entry_date = date.fromisoformat(pos.entry_date) if pos.entry_date else local_today()
         except ValueError:
-            entry_date = date.today()
+            entry_date = local_today()
 
         ma_info = ma_data.get(pos.code, {})
 
@@ -75,7 +76,7 @@ def check_position_risks(
             avg_cost=pos.avg_cost,
             current_price=pos.current_price or pos.avg_cost,
             entry_date=entry_date,
-            today=date.today(),
+            today=local_today(),
             highest_since_entry=pos.highest_since_entry_cents / 100 if pos.highest_since_entry_cents else pos.avg_cost,
             entry_day_low=pos.entry_day_low_cents / 100 if pos.entry_day_low_cents else pos.avg_cost,
             params=params,
@@ -191,11 +192,9 @@ def get_current_exposure(ctx: PipelineContext) -> tuple[float, int]:
     exposure_pct = total_market / (capital * 100) if capital > 0 else 0.0
 
     # 本周买入次数：查 event_log
-    from datetime import datetime, timedelta
-    today = datetime.now()
-    # 本周一
-    monday = today - timedelta(days=today.weekday())
-    since = monday.strftime("%Y-%m-%d")
+    today = local_now()
+    monday = today.date() - timedelta(days=today.weekday())
+    since, _ = local_date_bounds_utc(monday)
 
     buy_count = ctx.event_store.count(
         event_type="position.opened",

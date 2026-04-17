@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
 
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import check_position_risks
+from hermes.platform.time import local_today_str
 from hermes.reporting.discord import format_evening_embed, format_combined_stop_alert_embed
 from hermes.reporting.market_formatters import format_sector_heatmap_markdown
 
@@ -112,7 +112,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 6. Discord embed
     discord_data = {
-        "date": date.today().isoformat(),
+        "date": local_today_str(),
         "market": market_state.detail.get("indices", {}),
         "positions": [{
             "name": p.name, "shares": p.shares,

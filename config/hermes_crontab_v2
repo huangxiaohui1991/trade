@@ -1,6 +1,7 @@
 # Hermes V2 crontab
 #
 # 安装：crontab -e，粘贴以下内容（调整 REPO_ROOT）
+# 说明：以下时间按机器本地时区执行，建议服务器/本机统一设置为 Asia/Shanghai
 
 REPO_ROOT="/Users/huangxiaohui/Documents/workspace/trade"
 TRADE="$REPO_ROOT/bin/trade"

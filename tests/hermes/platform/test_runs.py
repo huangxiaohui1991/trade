@@ -108,3 +108,25 @@ def test_multiple_runs_same_type(journal):
     last = j.get_last_run("scoring")
     assert last["run_id"] == r2
     assert last["status"] == "completed"
+
+
+def test_get_last_run_uses_shanghai_business_day(journal):
+    j, conn, cv = journal
+    conn.execute(
+        """INSERT INTO run_log
+           (run_id, run_type, scope, config_version, status, started_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            "run_manual_1",
+            "morning",
+            "cn_a",
+            cv,
+            "completed",
+            "2026-04-17T16:30:00+00:00",
+        ),
+    )
+
+    assert j.get_last_run("morning", date="2026-04-17") is None
+    last = j.get_last_run("morning", date="2026-04-18")
+    assert last is not None
+    assert last["run_id"] == "run_manual_1"

@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
 
 from hermes.pipeline.context import PipelineContext
 from hermes.pipeline.helpers import check_position_risks
+from hermes.platform.time import local_today_str
 from hermes.reporting.discord import _embed, _field, COLORS
 from hermes.reporting.market_formatters import format_sector_heatmap_markdown
 
@@ -133,7 +133,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 5. Discord
     embed = _format_noon_embed({
-        "date": date.today().isoformat(), "signal": signal,
+        "date": local_today_str(), "signal": signal,
         "positions": pos_data, "alerts": alerts, "tips": tips,
     })
 

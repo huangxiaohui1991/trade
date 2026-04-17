@@ -10,14 +10,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
 from hermes.platform.events import EventStore
+from hermes.platform.time import local_date_bounds_utc, local_today_str, local_now_str
+from hermes.platform.time import local_today, utc_now_iso
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 class ReportGenerator:
@@ -36,7 +37,7 @@ class ReportGenerator:
         if not scores:
             return f"# 评分报告\n\n> run_id: {run_id}\n\n无评分数据。\n"
 
-        lines = [f"# 评分报告", f"", f"> run_id: {run_id}", f"> 时间: {_now_iso()[:19]}", ""]
+        lines = [f"# 评分报告", f"", f"> run_id: {run_id}", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
         lines.append("| 代码 | 名称 | 总分 | 技术 | 基本面 | 资金 | 舆情 | 风格 | 否决 |")
         lines.append("|------|------|------|------|--------|------|------|------|------|")
 
@@ -64,7 +65,7 @@ class ReportGenerator:
             "SELECT * FROM projection_positions ORDER BY entry_date"
         ).fetchall()
 
-        lines = ["# 持仓报告", "", f"> 时间: {_now_iso()[:19]}", ""]
+        lines = ["# 持仓报告", "", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
 
         if not rows:
             lines.append("当前无持仓。")
@@ -124,7 +125,7 @@ class ReportGenerator:
 
     def generate_morning_report(self, run_id: str) -> str:
         """盘前摘要：从 projection 表 + 最近事件生成。"""
-        lines = ["# 盘前摘要", "", f"> run_id: {run_id}", f"> 时间: {_now_iso()[:19]}", ""]
+        lines = ["# 盘前摘要", "", f"> run_id: {run_id}", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
 
         # 大盘状态
         market_rows = self._conn.execute(
@@ -156,7 +157,7 @@ class ReportGenerator:
 
     def generate_evening_report(self, run_id: str) -> str:
         """收盘报告：从当日事件 + 投影生成。"""
-        lines = ["# 收盘报告", "", f"> run_id: {run_id}", f"> 时间: {_now_iso()[:19]}", ""]
+        lines = ["# 收盘报告", "", f"> run_id: {run_id}", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
 
         # 持仓
         lines.append("## 持仓状态")
@@ -169,8 +170,11 @@ class ReportGenerator:
 
         # 今日交易
         filled = self._events.query(event_type="order.filled")
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_fills = [e for e in filled if e.get("occurred_at", "")[:10] == today]
+        start_utc, end_utc = local_date_bounds_utc()
+        today_fills = [
+            e for e in filled
+            if start_utc <= e.get("occurred_at", "") < end_utc
+        ]
         if today_fills:
             lines.append("## 今日成交")
             lines.append("")
@@ -184,7 +188,10 @@ class ReportGenerator:
 
         # 风控事件
         risk_events = self._events.query(stream_type="risk")
-        today_risks = [e for e in risk_events if e.get("occurred_at", "")[:10] == today]
+        today_risks = [
+            e for e in risk_events
+            if start_utc <= e.get("occurred_at", "") < end_utc
+        ]
         if today_risks:
             lines.append("## 风控事件")
             lines.append("")
@@ -199,9 +206,9 @@ class ReportGenerator:
     def generate_weekly_report(self, week: str = "") -> str:
         """周报：从本周事件汇总生成。"""
         if not week:
-            week = datetime.now(timezone.utc).strftime("%Y-W%W")
+            week = local_today().strftime("%Y-W%W")
 
-        lines = ["# 周报", "", f"> {week}", f"> 生成时间: {_now_iso()[:19]}", ""]
+        lines = ["# 周报", "", f"> {week}", f"> 生成时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
 
         # 本周交易
         filled = self._events.query(event_type="order.filled")
