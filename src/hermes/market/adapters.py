@@ -93,7 +93,11 @@ class AkShareMarketAdapter:
     """AkShare 行情 adapter（仅 A 股）。"""
 
     async def get_realtime(self, codes: list[str]) -> dict[str, StockQuote]:
-        return await asyncio.to_thread(self._get_realtime_sync, codes)
+        # 港股代码不处理（避免把 09927 当成 A 股 601127）
+        cn_codes = [c for c in codes if not is_hk_code(c)]
+        if not cn_codes:
+            return {}
+        return await asyncio.to_thread(self._get_realtime_sync, cn_codes)
 
     async def get_kline(self, code: str, period: str = "daily", count: int = 120) -> Optional[pd.DataFrame]:
         if is_hk_code(code):

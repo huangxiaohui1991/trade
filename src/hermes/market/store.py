@@ -87,8 +87,11 @@ class MarketStore:
             return None
         # 校验字段完整性：旧缓存（kind='quote' 只存了 close/name）不完整，拒绝复用
         if kind == "quote":
-            required = {"code", "name", "price", "open", "high", "low", "volume", "amount", "change_pct"}
-            if not required.issubset(data.keys()):
+            from dataclasses import fields as dc_fields
+            from hermes.market.models import StockQuote
+            stored_keys = set(data.keys())
+            required_keys = {f.name for f in dc_fields(StockQuote)}
+            if not required_keys.issubset(stored_keys):
                 return None
         return data
 

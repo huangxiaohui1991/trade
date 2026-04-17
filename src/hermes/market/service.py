@@ -20,6 +20,7 @@ from hermes.market.models import (
 )
 from hermes.market.store import MarketStore
 from hermes.market.indicators import compute_technical_indicators
+from hermes.market.adapters import is_hk_code
 from hermes.strategy.models import MarketState
 
 _logger = logging.getLogger(__name__)
