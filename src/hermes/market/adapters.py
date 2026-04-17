@@ -814,23 +814,39 @@ class MXMarketAdapter:
             for name, code in code_map.items():
                 daily_df = daily_map.get(code)
                 if name in result:
-                    # MX 已返回数据，用日线补充价格（如果 MX 价格无效）和 MA
+                    # MX 已返回数据，用日线补充/替换价格（如果 MX 价格无效）和 MA
+                    # 注意：IndexQuote 是 frozen dataclass，不能原地修改，需重建对象
                     existing = result[name]
+                    price = existing.price
+                    change_pct = existing.change_pct
+                    ma20 = existing.ma20
+                    ma60 = existing.ma60
+                    above_ma20 = existing.above_ma20
+                    below_ma60_days = existing.below_ma60_days
                     if daily_df is not None and not daily_df.empty:
                         latest_close = float(daily_df["close"].iloc[-1])
                         prev_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else latest_close
-                        if (existing.price or 0) <= 0 or existing.price != latest_close:
-                            existing.price = latest_close
+                        if (price or 0) <= 0 or price != latest_close:
+                            price = latest_close
                         daily_chg = ((latest_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
-                        if abs(existing.change_pct) < 0.01 and abs(daily_chg) > 0.01:
-                            existing.change_pct = daily_chg
+                        if abs(change_pct) < 0.01 and abs(daily_chg) > 0.01:
+                            change_pct = daily_chg
                     # 补全 MA（如果 MX 没有的话）
-                    if not existing.ma20 and not existing.ma60:
+                    if not ma20 and not ma60:
                         ma20, ma60, above_ma20, below_days = _compute_ma(code)
-                        existing.ma20 = ma20
-                        existing.ma60 = ma60
-                        existing.above_ma20 = above_ma20
-                        existing.below_ma60_days = below_days
+                        below_ma60_days = below_days
+                    # 重建 IndexQuote（替换整个对象）
+                    result[name] = IndexQuote(
+                        symbol=existing.symbol,
+                        name=name,
+                        price=price,
+                        change_pct=change_pct,
+                        ma20=ma20,
+                        ma60=ma60,
+                        above_ma20=above_ma20,
+                        below_ma60_days=below_ma60_days,
+                        timestamp=existing.timestamp,
+                    )
                 else:
                     # 完全没有数据，用日线构建完整记录
                     price_val = 0.0
