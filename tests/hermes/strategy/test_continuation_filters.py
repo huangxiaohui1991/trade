@@ -60,3 +60,36 @@ def test_qualifier_rejects_deep_intraday_retrace():
 
     assert result.qualified is False
     assert "intraday_retrace" in result.reasons
+
+
+def test_qualifier_rejects_when_quote_or_technical_is_missing():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+
+    missing_quote = qualifier.qualify(_make_snapshot(quote=None))
+    missing_technical = qualifier.qualify(_make_snapshot(technical=None))
+
+    assert missing_quote.qualified is False
+    assert missing_quote.reasons == ["missing_quote_or_technical"]
+    assert missing_technical.qualified is False
+    assert missing_technical.reasons == ["missing_quote_or_technical"]
+
+
+def test_qualifier_rejects_long_upper_shadow_when_enabled():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    quote = StockQuote(
+        code="002138",
+        name="双环传动",
+        price=14.8,
+        open=14.7,
+        high=15.3,
+        low=14.6,
+        close=14.8,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=3.5,
+    )
+
+    result = qualifier.qualify(_make_snapshot(quote=quote))
+
+    assert result.qualified is False
+    assert "long_upper_shadow" in result.reasons
