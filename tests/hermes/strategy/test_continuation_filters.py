@@ -93,3 +93,44 @@ def test_qualifier_rejects_long_upper_shadow_when_enabled():
 
     assert result.qualified is False
     assert "long_upper_shadow" in result.reasons
+
+
+def test_qualifier_rejects_limit_up_locked_for_chinext_threshold():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    quote = StockQuote(
+        code="300750",
+        name="宁德时代",
+        price=24.0,
+        open=24.0,
+        high=24.0,
+        low=24.0,
+        close=24.0,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=20.0,
+    )
+
+    result = qualifier.qualify(_make_snapshot(code="300750", name="宁德时代", quote=quote))
+
+    assert result.qualified is False
+    assert "limit_up_locked" in result.reasons
+
+
+def test_qualifier_does_not_reject_beijing_board_below_30pct_lock():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    quote = StockQuote(
+        code="830001",
+        name="北交示例",
+        price=24.0,
+        open=24.0,
+        high=24.0,
+        low=24.0,
+        close=24.0,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=20.0,
+    )
+
+    result = qualifier.qualify(_make_snapshot(code="830001", name="北交示例", quote=quote))
+
+    assert "limit_up_locked" not in result.reasons

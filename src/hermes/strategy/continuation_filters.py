@@ -4,6 +4,14 @@ from hermes.market.models import StockSnapshot
 from hermes.strategy.continuation_models import ContinuationFilterConfig, ContinuationFilterResult
 
 
+def _limit_up_threshold(code: str) -> float:
+    if code.startswith("8"):
+        return 29.9
+    if code.startswith(("300", "301", "688")):
+        return 19.9
+    return 9.9
+
+
 class ContinuationQualifier:
     def __init__(self, config: ContinuationFilterConfig):
         self.config = config
@@ -31,7 +39,7 @@ class ContinuationQualifier:
         if self.config.require_above_ma5 and q.close < t.ma5:
             reasons.append("above_ma5")
         if self.config.exclude_limit_up_locked:
-            threshold = 19.9 if q.code.startswith("688") else 9.9
+            threshold = _limit_up_threshold(q.code)
             if abs(q.change_pct) >= threshold and q.open == q.high == q.low == q.close:
                 reasons.append("limit_up_locked")
         if self.config.exclude_long_upper_shadow:
