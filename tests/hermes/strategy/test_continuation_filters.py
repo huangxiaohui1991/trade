@@ -133,4 +133,26 @@ def test_qualifier_does_not_reject_beijing_board_below_30pct_lock():
 
     result = qualifier.qualify(_make_snapshot(code="830001", name="北交示例", quote=quote))
 
+    assert result.qualified is True
+    assert "limit_up_locked" not in result.reasons
+
+
+def test_qualifier_can_allow_locked_bar_when_flag_disabled():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig(exclude_limit_up_locked=False))
+    quote = StockQuote(
+        code="300750",
+        name="宁德时代",
+        price=24.0,
+        open=24.0,
+        high=24.0,
+        low=24.0,
+        close=24.0,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=20.0,
+    )
+
+    result = qualifier.qualify(_make_snapshot(code="300750", name="宁德时代", quote=quote))
+
+    assert result.qualified is True
     assert "limit_up_locked" not in result.reasons

@@ -68,6 +68,9 @@ continuation:
     overheat_change_pct: 8.0
     overheat_volume_ratio: 4.0
     overheat_deviation_rate: 8.0
+  validation:
+    bucket_count: 5
+    execution_modes: ["open", "vwap_30m", "open_not_chase"]
 
 # ---------------------------------------------------------------------------
 # 第三步：股票风格判定

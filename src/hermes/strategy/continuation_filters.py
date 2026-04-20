@@ -22,7 +22,14 @@ class ContinuationQualifier:
 
         q = snapshot.quote
         t = snapshot.technical
-        close_near_high = 0.0 if q.high <= q.low else (q.close - q.low) / (q.high - q.low)
+        if q.high < q.low:
+            close_near_high = 0.0
+        elif q.high == q.low:
+            # A one-price bar closes at its high by definition; let the dedicated
+            # `limit_up_locked` filter decide whether that structure is allowed.
+            close_near_high = 1.0
+        else:
+            close_near_high = (q.close - q.low) / (q.high - q.low)
         intraday_retrace = 0.0 if q.high <= 0 else max(0.0, (q.high - q.close) / q.high)
         reasons: list[str] = []
 

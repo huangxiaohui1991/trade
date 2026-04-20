@@ -23,6 +23,8 @@
 - `bin/trade run-pipeline auto_trade`：执行模拟盘自动交易
 - `bin/trade fetch-history 600036 --count 500`：拉取历史 K 线
 - `bin/trade backtest 600036,000001 2025-01-01 2025-12-31`：运行回测
+- `bin/trade continuation-validate 600036,000001 --start 2026-01-01 --end 2026-03-31 --json`：运行短线续涨验证
+- `bin/trade continuation-backtest 600036,000001 2026-01-01 2026-03-31 --hold-days 2 --top-n 3`：运行短线续涨回测
 - `bin/trade mcp`：启动 MCP Server
 
 `trade-vault/` 结构示例：

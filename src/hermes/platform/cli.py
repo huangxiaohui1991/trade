@@ -384,6 +384,66 @@ def run_backtest_cmd(
         typer.echo(f"  持仓中: {result['positions_open']} 只")
 
 
+@app.command("continuation-validate")
+def continuation_validate_cmd(
+    codes: str = typer.Argument(..., help="逗号分隔股票代码"),
+    start: str = typer.Option(..., help="验证开始日期 YYYY-MM-DD"),
+    end: str = typer.Option(..., help="验证结束日期 YYYY-MM-DD"),
+    top_n: int = typer.Option(3, help="每日保留 Top N"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """运行短线续涨评分验证并输出分层和 Top N 报告。"""
+    from hermes.research.continuation_validation import run_continuation_validation
+
+    result = run_continuation_validation(
+        codes=[c.strip() for c in codes.split(",") if c.strip()],
+        start=start,
+        end=end,
+        top_n=top_n,
+    )
+
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    typer.echo(f"短线续涨验证 {start} ~ {end}")
+    typer.echo(f"  Top N: {result['top_n']}")
+    typer.echo(f"  Buckets: {len(result['score_bucket_report'])}")
+    typer.echo(f"  Execution modes: {len(result['execution_report'])}")
+
+
+@app.command("continuation-backtest")
+def continuation_backtest_cmd(
+    codes: str = typer.Argument(..., help="逗号分隔股票代码"),
+    start: str = typer.Argument(..., help="回测开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
+    hold_days: int = typer.Option(2, help="持有天数"),
+    top_n: int = typer.Option(3, help="每日保留 Top N"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """运行短线续涨 Top N 回测。"""
+    from hermes.backtest.continuation_backtest import run_continuation_backtest
+
+    result = run_continuation_backtest(
+        codes=[c.strip() for c in codes.split(",") if c.strip()],
+        start=start,
+        end=end,
+        hold_days=hold_days,
+        top_n=top_n,
+    )
+
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    typer.echo(f"短线续涨回测 {start} ~ {end}")
+    typer.echo(f"  Hold days: {result['hold_days']}  Top N: {result['top_n']}")
+    typer.echo(
+        f"  Total return: {result['total_return_pct']:.2f}%  Win rate: {result['win_rate_pct']:.2f}%"
+    )
+    typer.echo(f"  Trades: {len(result['trades'])}")
+
+
 @app.command("score")
 def score_stock(
     code: str = typer.Argument(..., help="股票代码"),
