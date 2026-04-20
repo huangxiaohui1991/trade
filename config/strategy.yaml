@@ -65,9 +65,23 @@ continuation:
     stability_weight: 0.7
     top_n: 3
     hold_days: [1, 2, 3]
+    strength_change_floor: 2.0
+    strength_change_full: 7.0
+    strength_close_near_high_floor: 0.75
+    strength_close_near_high_full: 0.95
+    continuity_momentum_floor: 2.0
+    continuity_momentum_full: 8.0
+    quality_retrace_good: 0.015
+    quality_retrace_bad: 0.06
+    quality_body_ratio_floor: 0.3
+    quality_body_ratio_full: 0.7
+    flow_inflow_full: 500000000
+    stability_rsi_ceiling: 72.0
+    stability_rsi_fail: 82.0
     overheat_change_pct: 8.0
     overheat_volume_ratio: 4.0
     overheat_deviation_rate: 8.0
+    overheat_rsi: 78.0
   validation:
     bucket_count: 5
     execution_modes: ["open", "vwap_30m", "open_not_chase"]

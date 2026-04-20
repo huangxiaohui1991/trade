@@ -25,9 +25,23 @@ class ContinuationScoreConfig:
     stability_weight: float = 0.7
     top_n: int = 3
     hold_days: tuple[int, int, int] = (1, 2, 3)
+    strength_change_floor: float = 2.0
+    strength_change_full: float = 7.0
+    strength_close_near_high_floor: float = 0.75
+    strength_close_near_high_full: float = 0.95
+    continuity_momentum_floor: float = 2.0
+    continuity_momentum_full: float = 8.0
+    quality_retrace_good: float = 0.015
+    quality_retrace_bad: float = 0.06
+    quality_body_ratio_floor: float = 0.3
+    quality_body_ratio_full: float = 0.7
+    flow_inflow_full: float = 5e8
+    stability_rsi_ceiling: float = 72.0
+    stability_rsi_fail: float = 82.0
     overheat_change_pct: float = 8.0
     overheat_volume_ratio: float = 4.0
     overheat_deviation_rate: float = 8.0
+    overheat_rsi: float = 78.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "hold_days", tuple(self.hold_days))

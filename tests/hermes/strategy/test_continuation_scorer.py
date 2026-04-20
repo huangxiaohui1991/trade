@@ -109,3 +109,94 @@ def test_scorer_applies_overheat_penalty_to_extended_candidate():
 
     assert result.overheat_penalty > 0
     assert "overheat" in " ".join(result.notes)
+
+
+def test_scorer_prefers_tighter_stronger_candle_structure():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    scorer = ContinuationScorer(ContinuationScoreConfig())
+
+    strong = _make_snapshot(
+        quote=StockQuote(
+            code="002138",
+            name="双环传动",
+            price=15.3,
+            open=14.9,
+            high=15.35,
+            low=14.85,
+            close=15.3,
+            volume=5_000_000,
+            amount=4.5e8,
+            change_pct=5.1,
+        ),
+        technical=TechnicalIndicators(
+            ma5=14.8,
+            ma10=14.4,
+            ma20=14.0,
+            ma60=13.1,
+            above_ma20=True,
+            volume_ratio=2.0,
+            rsi=66.0,
+            golden_cross=False,
+            momentum_5d=7.0,
+            deviation_rate=4.2,
+            change_pct=5.1,
+        ),
+    )
+    weak = _make_snapshot(
+        quote=StockQuote(
+            code="002138",
+            name="双环传动",
+            price=15.1,
+            open=14.95,
+            high=15.4,
+            low=14.85,
+            close=15.1,
+            volume=5_000_000,
+            amount=4.2e8,
+            change_pct=4.0,
+        ),
+        technical=TechnicalIndicators(
+            ma5=14.8,
+            ma10=14.4,
+            ma20=14.0,
+            ma60=13.1,
+            above_ma20=True,
+            volume_ratio=2.0,
+            rsi=66.0,
+            golden_cross=False,
+            momentum_5d=4.0,
+            deviation_rate=4.2,
+            change_pct=4.0,
+        ),
+    )
+
+    strong_result = scorer.score(strong, qualifier.qualify(strong))
+    weak_result = scorer.score(weak, qualifier.qualify(weak))
+
+    assert strong_result.total_score > weak_result.total_score
+    assert strong_result.quality_score > weak_result.quality_score
+
+
+def test_scorer_applies_rsi_penalty_when_overheated():
+    snapshot = _make_snapshot(
+        technical=TechnicalIndicators(
+            ma5=14.7,
+            ma10=14.3,
+            ma20=13.9,
+            ma60=13.1,
+            above_ma20=True,
+            volume_ratio=2.2,
+            rsi=80.0,
+            golden_cross=False,
+            momentum_5d=7.5,
+            deviation_rate=6.0,
+            change_pct=6.2,
+        ),
+    )
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    scorer = ContinuationScorer(ContinuationScoreConfig())
+
+    result = scorer.score(snapshot, qualifier.qualify(snapshot))
+
+    assert result.overheat_penalty > 0
+    assert "overheat:rsi" in result.notes
