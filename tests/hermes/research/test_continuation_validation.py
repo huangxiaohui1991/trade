@@ -93,6 +93,7 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
     assert "score_bucket_report" in result
     assert "top_n_report" in result
     assert "execution_report" in result
+    assert "top_candidates" in result
 
 
 def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
@@ -140,3 +141,52 @@ def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
     assert result["score_bucket_report"]
     assert result["top_n_report"]
     assert result["ranked_returns"]
+    assert result["top_candidates"]
+
+
+def test_run_continuation_validation_uses_config_defaults_when_top_n_not_given(tmp_path):
+    ranked = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-01-01",
+                "code": "600036",
+                "rank": 1,
+                "score": 5.2,
+                "t1_return": 0.02,
+                "open_t1_return": 0.02,
+                "vwap_30m_t1_return": 0.018,
+                "open_not_chase_t1_return": 0.015,
+            }
+        ]
+    )
+    forward = pd.DataFrame(
+        [{"code": "600036", "trade_date": "2026-01-01", "t1_return": 0.02, "t2_return": 0.03, "t3_return": 0.01}]
+    )
+    results = [
+        {
+            "code": "600036",
+            "name": "招商银行",
+            "qualified": True,
+            "trade_date": "2026-01-01",
+            "strength_score": 1.8,
+            "continuity_score": 1.0,
+            "quality_score": 1.2,
+            "flow_score": 0.4,
+            "stability_score": 0.7,
+            "overheat_penalty": 0.0,
+            "notes": [],
+        }
+    ]
+    ranked.to_csv(tmp_path / "ranked_returns.csv", index=False)
+    forward.to_csv(tmp_path / "forward_returns.csv", index=False)
+    (tmp_path / "results.json").write_text(json.dumps(results), encoding="utf-8")
+
+    result = run_continuation_validation(
+        codes=["600036"],
+        start="2026-01-01",
+        end="2026-02-28",
+        data_dir=tmp_path,
+    )
+
+    assert result["top_n"] == 3
+    assert result["top_candidates"][0]["code"] == "600036"

@@ -389,7 +389,7 @@ def continuation_validate_cmd(
     codes: str = typer.Argument(..., help="逗号分隔股票代码"),
     start: str = typer.Option(..., help="验证开始日期 YYYY-MM-DD"),
     end: str = typer.Option(..., help="验证结束日期 YYYY-MM-DD"),
-    top_n: int = typer.Option(3, help="每日保留 Top N"),
+    top_n: Optional[int] = typer.Option(None, help="每日保留 Top N（默认读 continuation.scoring.top_n）"),
     db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
@@ -412,6 +412,13 @@ def continuation_validate_cmd(
     typer.echo(f"  Top N: {result['top_n']}")
     typer.echo(f"  Buckets: {len(result['score_bucket_report'])}")
     typer.echo(f"  Execution modes: {len(result['execution_report'])}")
+    if result["top_candidates"]:
+        typer.echo("  Top candidates:")
+        for row in result["top_candidates"][: min(5, len(result["top_candidates"]))]:
+            typer.echo(
+                f"    {row['trade_date']} #{row['rank']} {row['code']} "
+                f"score={row['score']:.1f} t1={row.get('t1_return', 0):.2%}"
+            )
 
 
 @app.command("continuation-backtest")

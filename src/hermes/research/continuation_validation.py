@@ -9,6 +9,7 @@ import pandas as pd
 from hermes.market.indicators import compute_technical_indicators
 from hermes.market.models import StockQuote, StockSnapshot
 from hermes.market.store import MarketStore
+from hermes.platform.config import ConfigRegistry
 from hermes.platform.db import connect
 from hermes.strategy.continuation_filters import ContinuationQualifier
 from hermes.strategy.continuation_models import (
@@ -19,12 +20,14 @@ from hermes.strategy.continuation_models import (
 from hermes.strategy.continuation_scorer import ContinuationScorer
 
 
-def build_execution_report(ranked_returns: pd.DataFrame) -> list[dict]:
+def build_execution_report(
+    ranked_returns: pd.DataFrame, execution_modes: tuple[str, ...] = ("open", "vwap_30m", "open_not_chase")
+) -> list[dict]:
     rows: list[dict] = []
     if ranked_returns.empty:
         return rows
 
-    for mode in ("open", "vwap_30m", "open_not_chase"):
+    for mode in execution_modes:
         col = f"{mode}_t1_return"
         if col not in ranked_returns.columns:
             continue
@@ -120,31 +123,41 @@ def run_continuation_validation(
     codes: list[str],
     start: str,
     end: str,
-    top_n: int = 3,
+    top_n: int | None = None,
     data_dir: str | Path | None = None,
     db_path: str | Path | None = None,
 ) -> dict:
+    filter_cfg, score_cfg, validation_cfg = _load_continuation_settings()
+    effective_top_n = top_n or score_cfg.top_n
     payload = _load_ranked_forward_returns(
         codes=codes,
         start=start,
         end=end,
         data_dir=data_dir,
         db_path=db_path,
+        filter_cfg=filter_cfg,
+        score_cfg=score_cfg,
     )
-    top_ns = tuple(dict.fromkeys((1, min(2, top_n), top_n)))
+    top_ns = tuple(dict.fromkeys((1, min(2, effective_top_n), effective_top_n)))
+    ranked_returns = payload["ranked_returns"]
+    top_candidates = _build_top_candidates(ranked_returns, effective_top_n)
     return {
         "codes": list(codes),
         "start": start,
         "end": end,
-        "top_n": top_n,
-        "ranked_returns": payload["ranked_returns"].to_dict(orient="records"),
+        "top_n": effective_top_n,
+        "ranked_returns": ranked_returns.to_dict(orient="records"),
+        "top_candidates": top_candidates,
         "score_bucket_report": build_score_bucket_report(
             payload["results"],
             payload["forward_returns"],
-            bucket_count=5,
+            bucket_count=int(validation_cfg.get("bucket_count", 5)),
         ),
-        "top_n_report": build_top_n_report(payload["ranked_returns"], top_ns=top_ns),
-        "execution_report": build_execution_report(payload["ranked_returns"]),
+        "top_n_report": build_top_n_report(ranked_returns, top_ns=top_ns),
+        "execution_report": build_execution_report(
+            ranked_returns,
+            execution_modes=tuple(validation_cfg.get("execution_modes", ["open", "vwap_30m", "open_not_chase"])),
+        ),
     }
 
 
@@ -154,6 +167,8 @@ def _load_ranked_forward_returns(
     end: str,
     data_dir: str | Path | None = None,
     db_path: str | Path | None = None,
+    filter_cfg: ContinuationFilterConfig | None = None,
+    score_cfg: ContinuationScoreConfig | None = None,
 ) -> dict:
     if data_dir is not None:
         base = Path(data_dir)
@@ -171,7 +186,14 @@ def _load_ranked_forward_returns(
                 "results": results,
             }
 
-    payload = _load_from_market_bars(codes=codes, start=start, end=end, db_path=db_path)
+    payload = _load_from_market_bars(
+        codes=codes,
+        start=start,
+        end=end,
+        db_path=db_path,
+        filter_cfg=filter_cfg or ContinuationFilterConfig(),
+        score_cfg=score_cfg or ContinuationScoreConfig(),
+    )
     if payload["results"]:
         return payload
 
@@ -217,12 +239,19 @@ def _load_ranked_forward_returns(
     }
 
 
-def _load_from_market_bars(codes: list[str], start: str, end: str, db_path: str | Path | None = None) -> dict:
+def _load_from_market_bars(
+    codes: list[str],
+    start: str,
+    end: str,
+    db_path: str | Path | None = None,
+    filter_cfg: ContinuationFilterConfig | None = None,
+    score_cfg: ContinuationScoreConfig | None = None,
+) -> dict:
     conn = connect(Path(db_path) if db_path else None)
     try:
         store = MarketStore(conn)
-        qualifier = ContinuationQualifier(ContinuationFilterConfig())
-        scorer = ContinuationScorer(ContinuationScoreConfig())
+        qualifier = ContinuationQualifier(filter_cfg or ContinuationFilterConfig())
+        scorer = ContinuationScorer(score_cfg or ContinuationScoreConfig())
         start_ts = pd.Timestamp(start)
         end_ts = pd.Timestamp(end)
         lookback_start = (start_ts - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
@@ -339,3 +368,30 @@ def _load_from_market_bars(codes: list[str], start: str, end: str, db_path: str 
         }
     finally:
         conn.close()
+
+
+def _load_continuation_settings() -> tuple[ContinuationFilterConfig, ContinuationScoreConfig, dict]:
+    registry = ConfigRegistry()
+    data, _ = registry.load_and_validate()
+    continuation_cfg = data.get("strategy", {}).get("continuation", {})
+    filter_cfg = ContinuationFilterConfig(**continuation_cfg.get("filters", {}))
+    score_cfg = ContinuationScoreConfig(**continuation_cfg.get("scoring", {}))
+    validation_cfg = continuation_cfg.get("validation", {})
+    return filter_cfg, score_cfg, validation_cfg
+
+
+def _build_top_candidates(ranked_returns: pd.DataFrame, top_n: int) -> list[dict]:
+    if ranked_returns.empty:
+        return []
+    cols = [
+        "trade_date",
+        "code",
+        "rank",
+        "score",
+        "t1_return",
+        "t2_return",
+        "t3_return",
+    ]
+    available_cols = [col for col in cols if col in ranked_returns.columns]
+    filtered = ranked_returns[ranked_returns["rank"] <= top_n][available_cols].copy()
+    return filtered.sort_values(["trade_date", "rank", "code"]).to_dict(orient="records")
