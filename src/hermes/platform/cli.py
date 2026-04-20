@@ -40,6 +40,15 @@ def _format_metric(value: object, fmt: str, fallback: str = "n/a") -> str:
         return fallback
 
 
+def _parse_int_csv(value: str) -> tuple[int, ...]:
+    parsed = tuple(dict.fromkeys(int(part.strip()) for part in value.split(",") if part.strip()))
+    if not parsed:
+        raise typer.BadParameter("至少提供一个正整数")
+    if any(item <= 0 for item in parsed):
+        raise typer.BadParameter("只支持正整数")
+    return parsed
+
+
 def _resolve_vault_path() -> Optional[Path]:
     paths_file = Path(__file__).resolve().parent.parent.parent.parent / "config" / "paths.yaml"
     if not paths_file.exists():
@@ -491,6 +500,54 @@ def continuation_backtest_cmd(
         f"  Total return: {result['total_return_pct']:.2f}%  Win rate: {result['win_rate_pct']:.2f}%"
     )
     typer.echo(f"  Trades: {len(result['trades'])}")
+
+
+@app.command("continuation-study")
+def continuation_study_cmd(
+    codes: str = typer.Argument(..., help="逗号分隔股票代码"),
+    start: str = typer.Option(..., help="研究开始日期 YYYY-MM-DD"),
+    end: str = typer.Option(..., help="研究结束日期 YYYY-MM-DD"),
+    top_ns: str = typer.Option("1,2,3", help="需要比较的 Top N 组合，如 1,2,3"),
+    hold_days: str = typer.Option("1,2,3", help="需要比较的持有天数，如 1,2,3"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """运行短线续涨收益研究，比较 Top N 与持有天数组合。"""
+    from hermes.research.continuation_study import run_continuation_study
+
+    result = run_continuation_study(
+        codes=[c.strip() for c in codes.split(",") if c.strip()],
+        start=start,
+        end=end,
+        top_ns=_parse_int_csv(top_ns),
+        hold_days_list=_parse_int_csv(hold_days),
+        db_path=db_path,
+    )
+
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    typer.echo(f"短线续涨收益研究 {start} ~ {end}")
+    typer.echo(f"  Top Ns: {','.join(str(v) for v in result['top_ns'])}")
+    typer.echo(f"  Hold days: {','.join(str(v) for v in result['hold_days_list'])}")
+    best = result.get("best_setup")
+    if best:
+        typer.echo(
+            f"  Best: Top{best['top_n']} / 持有{best['hold_days']}天 "
+            f"total={best['total_return_pct']:.2f}% "
+            f"win={best['win_rate_pct']:.2f}% "
+            f"avg={best['avg_trade_return_pct']:.2f}%"
+        )
+    typer.echo("  Comparison:")
+    for row in result["comparison_report"]:
+        typer.echo(
+            f"    Top{row['top_n']} / 持有{row['hold_days']}天 "
+            f"trades={row['trade_count']} days={row['trading_days']} "
+            f"total={row['total_return_pct']:.2f}% "
+            f"win={row['win_rate_pct']:.2f}% "
+            f"avg={row['avg_trade_return_pct']:.2f}%"
+        )
 
 
 @app.command("score")

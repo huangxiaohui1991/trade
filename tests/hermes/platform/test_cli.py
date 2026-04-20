@@ -58,3 +58,19 @@ def test_continuation_backtest_help_via_bin_trade():
 
     assert "--hold-days" in result.stdout
     assert "--top-n" in result.stdout
+
+
+def test_continuation_study_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "continuation-study", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--top-ns" in result.stdout
+    assert "--hold-days" in result.stdout
