@@ -44,6 +44,32 @@ entry_signal:
     require_bullish_candle: true  # 次日阳线
 
 # ---------------------------------------------------------------------------
+# 短续接力策略
+# ---------------------------------------------------------------------------
+continuation:
+  filters:
+    amount_min: 200000000
+    change_pct_min: 2.0
+    close_near_high_min: 0.75
+    max_intraday_retrace: 0.04
+    volume_ratio_min: 1.2
+    volume_ratio_max: 3.5
+    require_above_ma5: true
+    exclude_long_upper_shadow: true
+    exclude_limit_up_locked: true
+  scoring:
+    strength_weight: 1.0
+    continuity_weight: 1.0
+    quality_weight: 1.0
+    flow_weight: 0.5
+    stability_weight: 0.7
+    top_n: 3
+    hold_days: [1, 2, 3]
+    overheat_change_pct: 8.0
+    overheat_volume_ratio: 4.0
+    overheat_deviation_rate: 8.0
+
+# ---------------------------------------------------------------------------
 # 第三步：股票风格判定
 # ---------------------------------------------------------------------------
 style_classifier:
