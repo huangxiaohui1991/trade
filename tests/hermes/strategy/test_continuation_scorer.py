@@ -30,3 +30,10 @@ def test_continuation_score_result_computes_total_after_penalty():
     )
 
     assert result.total_score == 4.6
+
+
+def test_continuation_score_config_normalizes_hold_days_to_tuple():
+    score_cfg = ContinuationScoreConfig(hold_days=[1, 2, 3])
+
+    assert score_cfg.hold_days == (1, 2, 3)
+    assert isinstance(score_cfg.hold_days, tuple)

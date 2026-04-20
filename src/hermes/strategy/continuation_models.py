@@ -29,6 +29,9 @@ class ContinuationScoreConfig:
     overheat_volume_ratio: float = 4.0
     overheat_deviation_rate: float = 8.0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hold_days", tuple(self.hold_days))
+
 
 @dataclass(frozen=True)
 class ContinuationFilterResult:
