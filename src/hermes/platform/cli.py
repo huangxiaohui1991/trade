@@ -419,6 +419,15 @@ def continuation_validate_cmd(
                 f"    {row['trade_date']} #{row['rank']} {row['code']} "
                 f"score={row['score']:.1f} t1={row.get('t1_return', 0):.2%}"
             )
+            typer.echo(
+                "      "
+                f"S={row.get('strength_score', 0):.2f} "
+                f"C={row.get('continuity_score', 0):.2f} "
+                f"Q={row.get('quality_score', 0):.2f} "
+                f"F={row.get('flow_score', 0):.2f} "
+                f"St={row.get('stability_score', 0):.2f} "
+                f"P={row.get('overheat_penalty', 0):.2f}"
+            )
 
 
 @app.command("continuation-backtest")

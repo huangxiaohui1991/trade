@@ -67,6 +67,7 @@ class ContinuationScoreResult:
     flow_score: float = 0.0
     stability_score: float = 0.0
     overheat_penalty: float = 0.0
+    component_breakdown: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property

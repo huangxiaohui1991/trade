@@ -140,7 +140,7 @@ def run_continuation_validation(
     )
     top_ns = tuple(dict.fromkeys((1, min(2, effective_top_n), effective_top_n)))
     ranked_returns = payload["ranked_returns"]
-    top_candidates = _build_top_candidates(ranked_returns, effective_top_n)
+    top_candidates = _build_top_candidates(ranked_returns, payload["results"], effective_top_n)
     return {
         "codes": list(codes),
         "start": start,
@@ -380,9 +380,39 @@ def _load_continuation_settings() -> tuple[ContinuationFilterConfig, Continuatio
     return filter_cfg, score_cfg, validation_cfg
 
 
-def _build_top_candidates(ranked_returns: pd.DataFrame, top_n: int) -> list[dict]:
+def _build_top_candidates(
+    ranked_returns: pd.DataFrame, results: Iterable[ContinuationScoreResult], top_n: int
+) -> list[dict]:
     if ranked_returns.empty:
         return []
+    detail_map = {
+        (r.trade_date, r.code): {
+            "strength_score": r.strength_score,
+            "continuity_score": r.continuity_score,
+            "quality_score": r.quality_score,
+            "flow_score": r.flow_score,
+            "stability_score": r.stability_score,
+            "overheat_penalty": r.overheat_penalty,
+            "component_breakdown": r.component_breakdown,
+            "notes": list(r.notes),
+        }
+        for r in results
+        if r.qualified
+    }
+    detail_by_code = {
+        r.code: {
+            "strength_score": r.strength_score,
+            "continuity_score": r.continuity_score,
+            "quality_score": r.quality_score,
+            "flow_score": r.flow_score,
+            "stability_score": r.stability_score,
+            "overheat_penalty": r.overheat_penalty,
+            "component_breakdown": r.component_breakdown,
+            "notes": list(r.notes),
+        }
+        for r in results
+        if r.qualified
+    }
     cols = [
         "trade_date",
         "code",
@@ -394,4 +424,8 @@ def _build_top_candidates(ranked_returns: pd.DataFrame, top_n: int) -> list[dict
     ]
     available_cols = [col for col in cols if col in ranked_returns.columns]
     filtered = ranked_returns[ranked_returns["rank"] <= top_n][available_cols].copy()
-    return filtered.sort_values(["trade_date", "rank", "code"]).to_dict(orient="records")
+    rows = filtered.sort_values(["trade_date", "rank", "code"]).to_dict(orient="records")
+    for row in rows:
+        detail = detail_map.get((row["trade_date"], row["code"])) or detail_by_code.get(row["code"], {})
+        row.update(detail)
+    return rows

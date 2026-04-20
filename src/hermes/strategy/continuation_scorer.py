@@ -99,6 +99,18 @@ class ContinuationScorer:
             penalty += 0.5
             notes.append("overheat:rsi")
 
+        breakdown = {
+            "change_pct": round(q.change_pct, 2),
+            "close_near_high": round(filter_result.close_near_high, 4),
+            "momentum_5d": round(t.momentum_5d, 2),
+            "intraday_retrace": round(filter_result.intraday_retrace, 4),
+            "body_ratio": round(body_ratio, 4),
+            "net_inflow_1d": round(inflow, 2),
+            "rsi": round(t.rsi, 2),
+            "volume_ratio": round(t.volume_ratio, 2),
+            "deviation_rate": round(t.deviation_rate, 2),
+        }
+
         return ContinuationScoreResult(
             code=snapshot.code,
             name=snapshot.name,
@@ -110,6 +122,7 @@ class ContinuationScorer:
             flow_score=round(flow_score, 2),
             stability_score=round(stability, 2),
             overheat_penalty=round(penalty, 2),
+            component_breakdown=breakdown,
             notes=notes,
         )
 

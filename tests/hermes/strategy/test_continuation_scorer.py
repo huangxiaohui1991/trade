@@ -29,6 +29,7 @@ def test_continuation_score_result_computes_total_after_penalty():
         flow_score=0.5,
         stability_score=0.8,
         overheat_penalty=1.2,
+        component_breakdown={"change_pct": 5.0},
         notes=["close_near_high=0.91"],
     )
 
@@ -84,6 +85,8 @@ def test_scorer_returns_positive_total_for_qualified_candidate():
     assert result.qualified is True
     assert result.total_score > 0
     assert result.overheat_penalty == 0
+    assert result.component_breakdown["change_pct"] == 3.2
+    assert "body_ratio" in result.component_breakdown
 
 
 def test_scorer_applies_overheat_penalty_to_extended_candidate():

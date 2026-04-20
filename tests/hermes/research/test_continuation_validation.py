@@ -94,6 +94,8 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
     assert "top_n_report" in result
     assert "execution_report" in result
     assert "top_candidates" in result
+    assert "strength_score" in result["top_candidates"][0]
+    assert "component_breakdown" in result["top_candidates"][0]
 
 
 def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
@@ -142,6 +144,7 @@ def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
     assert result["top_n_report"]
     assert result["ranked_returns"]
     assert result["top_candidates"]
+    assert "component_breakdown" in result["top_candidates"][0]
 
 
 def test_run_continuation_validation_uses_config_defaults_when_top_n_not_given(tmp_path):
