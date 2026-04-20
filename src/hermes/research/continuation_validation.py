@@ -141,6 +141,7 @@ def run_continuation_validation(
     top_ns = tuple(dict.fromkeys((1, min(2, effective_top_n), effective_top_n)))
     ranked_returns = payload["ranked_returns"]
     top_candidates = _build_top_candidates(ranked_returns, payload["results"], effective_top_n)
+    candidate_report = _build_candidate_report(top_candidates)
     return {
         "codes": list(codes),
         "start": start,
@@ -148,6 +149,7 @@ def run_continuation_validation(
         "top_n": effective_top_n,
         "ranked_returns": ranked_returns.to_dict(orient="records"),
         "top_candidates": top_candidates,
+        "candidate_report": candidate_report,
         "score_bucket_report": build_score_bucket_report(
             payload["results"],
             payload["forward_returns"],
@@ -428,4 +430,54 @@ def _build_top_candidates(
     for row in rows:
         detail = detail_map.get((row["trade_date"], row["code"])) or detail_by_code.get(row["code"], {})
         row.update(detail)
+    return rows
+
+
+def _build_candidate_report(top_candidates: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in top_candidates:
+        breakdown = row.get("component_breakdown", {})
+        score = row.get("score")
+        if score is None:
+            score = (
+                float(row.get("strength_score", 0.0))
+                + float(row.get("continuity_score", 0.0))
+                + float(row.get("quality_score", 0.0))
+                + float(row.get("flow_score", 0.0))
+                + float(row.get("stability_score", 0.0))
+                - float(row.get("overheat_penalty", 0.0))
+            )
+        rows.append(
+            {
+                "trade_date": row["trade_date"],
+                "code": row["code"],
+                "rank": row["rank"],
+                "score": float(score),
+                "scores": {
+                    "strength": row.get("strength_score", 0.0),
+                    "continuity": row.get("continuity_score", 0.0),
+                    "quality": row.get("quality_score", 0.0),
+                    "flow": row.get("flow_score", 0.0),
+                    "stability": row.get("stability_score", 0.0),
+                    "penalty": row.get("overheat_penalty", 0.0),
+                },
+                "metrics": {
+                    "change_pct": breakdown.get("change_pct"),
+                    "close_near_high": breakdown.get("close_near_high"),
+                    "momentum_5d": breakdown.get("momentum_5d"),
+                    "intraday_retrace": breakdown.get("intraday_retrace"),
+                    "body_ratio": breakdown.get("body_ratio"),
+                    "net_inflow_1d": breakdown.get("net_inflow_1d"),
+                    "rsi": breakdown.get("rsi"),
+                    "volume_ratio": breakdown.get("volume_ratio"),
+                    "deviation_rate": breakdown.get("deviation_rate"),
+                },
+                "flags": list(row.get("notes", [])),
+                "forward_returns": {
+                    "t1": row.get("t1_return"),
+                    "t2": row.get("t2_return"),
+                    "t3": row.get("t3_return"),
+                },
+            }
+        )
     return rows

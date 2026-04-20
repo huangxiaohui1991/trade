@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from hermes.research.continuation_validation import (
     build_score_bucket_report,
@@ -94,8 +95,12 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
     assert "top_n_report" in result
     assert "execution_report" in result
     assert "top_candidates" in result
+    assert "candidate_report" in result
     assert "strength_score" in result["top_candidates"][0]
     assert "component_breakdown" in result["top_candidates"][0]
+    assert "scores" in result["candidate_report"][0]
+    assert "metrics" in result["candidate_report"][0]
+    assert result["candidate_report"][0]["score"] == pytest.approx(5.1)
 
 
 def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
@@ -193,3 +198,4 @@ def test_run_continuation_validation_uses_config_defaults_when_top_n_not_given(t
 
     assert result["top_n"] == 3
     assert result["top_candidates"][0]["code"] == "600036"
+    assert result["candidate_report"][0]["code"] == "600036"

@@ -31,6 +31,15 @@ app.add_typer(runs_app)
 app.add_typer(events_app)
 
 
+def _format_metric(value: object, fmt: str, fallback: str = "n/a") -> str:
+    if value is None:
+        return fallback
+    try:
+        return format(value, fmt)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _resolve_vault_path() -> Optional[Path]:
     paths_file = Path(__file__).resolve().parent.parent.parent.parent / "config" / "paths.yaml"
     if not paths_file.exists():
@@ -414,20 +423,40 @@ def continuation_validate_cmd(
     typer.echo(f"  Execution modes: {len(result['execution_report'])}")
     if result["top_candidates"]:
         typer.echo("  Top candidates:")
-        for row in result["top_candidates"][: min(5, len(result["top_candidates"]))]:
+        report_rows = result.get("candidate_report", result["top_candidates"])
+        for row in report_rows[: min(5, len(report_rows))]:
+            scores = row.get("scores", {})
+            metrics = row.get("metrics", {})
+            forward = row.get("forward_returns", {})
+            score_text = _format_metric(row.get("score"), ".1f")
+            t1_text = _format_metric(forward.get("t1", row.get("t1_return")), ".2%")
             typer.echo(
                 f"    {row['trade_date']} #{row['rank']} {row['code']} "
-                f"score={row['score']:.1f} t1={row.get('t1_return', 0):.2%}"
+                f"score={score_text} "
+                f"t1={t1_text}"
             )
             typer.echo(
                 "      "
-                f"S={row.get('strength_score', 0):.2f} "
-                f"C={row.get('continuity_score', 0):.2f} "
-                f"Q={row.get('quality_score', 0):.2f} "
-                f"F={row.get('flow_score', 0):.2f} "
-                f"St={row.get('stability_score', 0):.2f} "
-                f"P={row.get('overheat_penalty', 0):.2f}"
+                f"S={_format_metric(scores.get('strength', row.get('strength_score')), '.2f', '0.00')} "
+                f"C={_format_metric(scores.get('continuity', row.get('continuity_score')), '.2f', '0.00')} "
+                f"Q={_format_metric(scores.get('quality', row.get('quality_score')), '.2f', '0.00')} "
+                f"F={_format_metric(scores.get('flow', row.get('flow_score')), '.2f', '0.00')} "
+                f"St={_format_metric(scores.get('stability', row.get('stability_score')), '.2f', '0.00')} "
+                f"P={_format_metric(scores.get('penalty', row.get('overheat_penalty')), '.2f', '0.00')}"
             )
+            typer.echo(
+                "      "
+                f"chg={_format_metric(metrics.get('change_pct'), '.2f')}% "
+                f"cnh={_format_metric(metrics.get('close_near_high'), '.2f')} "
+                f"mom5={_format_metric(metrics.get('momentum_5d'), '.2f')} "
+                f"ret={_format_metric(metrics.get('intraday_retrace'), '.2%')} "
+                f"body={_format_metric(metrics.get('body_ratio'), '.2f')} "
+                f"rsi={_format_metric(metrics.get('rsi'), '.1f')} "
+                f"vr={_format_metric(metrics.get('volume_ratio'), '.2f')}"
+            )
+            flags = row.get("flags", row.get("notes", []))
+            if flags:
+                typer.echo(f"      flags={','.join(flags)}")
 
 
 @app.command("continuation-backtest")
