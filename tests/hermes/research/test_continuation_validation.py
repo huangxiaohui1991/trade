@@ -7,6 +7,8 @@ from hermes.research.continuation_validation import (
     build_top_n_report,
     run_continuation_validation,
 )
+from hermes.market.store import MarketStore
+from hermes.platform.db import connect, init_db
 from hermes.strategy.continuation_models import ContinuationScoreResult
 
 
@@ -91,3 +93,50 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
     assert "score_bucket_report" in result
     assert "top_n_report" in result
     assert "execution_report" in result
+
+
+def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
+    db_path = tmp_path / "hermes.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        dates = [f"2026-01-0{i}" for i in range(1, 9)]
+        strong = pd.DataFrame(
+            {
+                "日期": dates,
+                "开盘": [10.0, 10.05, 10.12, 10.2, 10.4, 10.7, 10.95, 11.15],
+                "最高": [10.08, 10.15, 10.25, 10.38, 10.72, 11.0, 11.25, 11.45],
+                "最低": [9.96, 10.0, 10.08, 10.16, 10.35, 10.62, 10.9, 11.08],
+                "收盘": [10.04, 10.12, 10.22, 10.34, 10.68, 10.95, 11.2, 11.38],
+                "成交量": [80_000_000, 82_000_000, 85_000_000, 88_000_000, 150_000_000, 160_000_000, 170_000_000, 175_000_000],
+                "成交额": [8.0e8, 8.3e8, 8.7e8, 9.1e8, 1.6e9, 1.75e9, 1.9e9, 2.0e9],
+            }
+        )
+        weak = pd.DataFrame(
+            {
+                "日期": dates,
+                "开盘": [10.0, 10.0, 10.01, 10.02, 10.02, 10.03, 10.03, 10.04],
+                "最高": [10.02, 10.03, 10.04, 10.05, 10.06, 10.06, 10.07, 10.08],
+                "最低": [9.98, 9.99, 10.0, 10.01, 10.01, 10.02, 10.02, 10.03],
+                "收盘": [10.0, 10.01, 10.02, 10.03, 10.04, 10.05, 10.06, 10.07],
+                "成交量": [40_000_000] * 8,
+                "成交额": [4.0e8] * 8,
+            }
+        )
+        store.save_bars("600036", strong, source="test")
+        store.save_bars("000001", weak, source="test")
+    finally:
+        conn.close()
+
+    result = run_continuation_validation(
+        codes=["600036", "000001"],
+        start="2026-01-05",
+        end="2026-01-06",
+        top_n=2,
+        db_path=db_path,
+    )
+
+    assert result["score_bucket_report"]
+    assert result["top_n_report"]
+    assert result["ranked_returns"]

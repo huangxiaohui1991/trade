@@ -6,7 +6,17 @@ from typing import Iterable
 
 import pandas as pd
 
-from hermes.strategy.continuation_models import ContinuationScoreResult
+from hermes.market.indicators import compute_technical_indicators
+from hermes.market.models import StockQuote, StockSnapshot
+from hermes.market.store import MarketStore
+from hermes.platform.db import connect
+from hermes.strategy.continuation_filters import ContinuationQualifier
+from hermes.strategy.continuation_models import (
+    ContinuationFilterConfig,
+    ContinuationScoreConfig,
+    ContinuationScoreResult,
+)
+from hermes.strategy.continuation_scorer import ContinuationScorer
 
 
 def build_execution_report(ranked_returns: pd.DataFrame) -> list[dict]:
@@ -35,7 +45,11 @@ def build_score_bucket_report(
     bucket_count: int = 5,
 ) -> list[dict]:
     frame = pd.DataFrame(
-        [{"code": r.code, "score": r.total_score} for r in results if r.qualified]
+        [
+            {"code": r.code, "trade_date": r.trade_date, "score": r.total_score}
+            for r in results
+            if r.qualified
+        ]
     )
     if frame.empty or forward_returns.empty:
         return []
@@ -43,7 +57,13 @@ def build_score_bucket_report(
     frame["code"] = frame["code"].astype(str)
     forward_returns = forward_returns.copy()
     forward_returns["code"] = forward_returns["code"].astype(str)
-    frame = frame.merge(forward_returns, on="code", how="inner")
+    merge_keys = ["code"]
+    if "trade_date" in frame.columns and "trade_date" in forward_returns.columns:
+        frame["trade_date"] = frame["trade_date"].astype(str)
+        forward_returns["trade_date"] = forward_returns["trade_date"].astype(str)
+        if frame["trade_date"].ne("").any() and forward_returns["trade_date"].ne("").any():
+            merge_keys = ["code", "trade_date"]
+    frame = frame.merge(forward_returns, on=merge_keys, how="inner")
     if frame.empty:
         return []
 
@@ -102,14 +122,22 @@ def run_continuation_validation(
     end: str,
     top_n: int = 3,
     data_dir: str | Path | None = None,
+    db_path: str | Path | None = None,
 ) -> dict:
-    payload = _load_ranked_forward_returns(codes=codes, start=start, end=end, data_dir=data_dir)
+    payload = _load_ranked_forward_returns(
+        codes=codes,
+        start=start,
+        end=end,
+        data_dir=data_dir,
+        db_path=db_path,
+    )
     top_ns = tuple(dict.fromkeys((1, min(2, top_n), top_n)))
     return {
         "codes": list(codes),
         "start": start,
         "end": end,
         "top_n": top_n,
+        "ranked_returns": payload["ranked_returns"].to_dict(orient="records"),
         "score_bucket_report": build_score_bucket_report(
             payload["results"],
             payload["forward_returns"],
@@ -125,6 +153,7 @@ def _load_ranked_forward_returns(
     start: str,
     end: str,
     data_dir: str | Path | None = None,
+    db_path: str | Path | None = None,
 ) -> dict:
     if data_dir is not None:
         base = Path(data_dir)
@@ -141,6 +170,10 @@ def _load_ranked_forward_returns(
                 "forward_returns": forward_frame,
                 "results": results,
             }
+
+    payload = _load_from_market_bars(codes=codes, start=start, end=end, db_path=db_path)
+    if payload["results"]:
+        return payload
 
     default_ranked = pd.DataFrame(
         [
@@ -182,3 +215,127 @@ def _load_ranked_forward_returns(
         "forward_returns": default_forward,
         "results": default_results,
     }
+
+
+def _load_from_market_bars(codes: list[str], start: str, end: str, db_path: str | Path | None = None) -> dict:
+    conn = connect(Path(db_path) if db_path else None)
+    try:
+        store = MarketStore(conn)
+        qualifier = ContinuationQualifier(ContinuationFilterConfig())
+        scorer = ContinuationScorer(ContinuationScoreConfig())
+        start_ts = pd.Timestamp(start)
+        end_ts = pd.Timestamp(end)
+        lookback_start = (start_ts - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+        forward_end = (end_ts + pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+
+        result_rows: list[ContinuationScoreResult] = []
+        forward_rows: list[dict] = []
+        ranked_seed_rows: list[dict] = []
+
+        for code in codes:
+            bars = store.get_bars(code, start=lookback_start, end=forward_end)
+            if bars.empty:
+                continue
+
+            bars = bars.copy()
+            bars["日期"] = pd.to_datetime(bars["日期"])
+            bars = bars.sort_values("日期").reset_index(drop=True)
+            if len(bars) < 6:
+                continue
+
+            prev_close = bars["收盘"].shift(1)
+            bars["change_pct"] = ((bars["收盘"] / prev_close) - 1.0).fillna(0.0) * 100
+
+            for idx in range(len(bars)):
+                trade_date = bars.iloc[idx]["日期"]
+                if trade_date < start_ts or trade_date > end_ts:
+                    continue
+                if idx < 4:
+                    continue
+
+                hist = bars.iloc[: idx + 1].copy()
+                current = hist.iloc[-1]
+                quote = StockQuote(
+                    code=code,
+                    name=code,
+                    price=float(current["收盘"]),
+                    open=float(current["开盘"]),
+                    high=float(current["最高"]),
+                    low=float(current["最低"]),
+                    close=float(current["收盘"]),
+                    volume=int(current["成交量"]),
+                    amount=float(current["成交额"]),
+                    change_pct=float(current["change_pct"]),
+                )
+                technical = compute_technical_indicators(hist, quote)
+                snapshot = StockSnapshot(code=code, name=code, quote=quote, technical=technical)
+                filter_result = qualifier.qualify(snapshot)
+                score_result = scorer.score(snapshot, filter_result)
+                score_result = ContinuationScoreResult(
+                    code=score_result.code,
+                    name=score_result.name,
+                    qualified=score_result.qualified,
+                    trade_date=trade_date.strftime("%Y-%m-%d"),
+                    strength_score=score_result.strength_score,
+                    continuity_score=score_result.continuity_score,
+                    quality_score=score_result.quality_score,
+                    flow_score=score_result.flow_score,
+                    stability_score=score_result.stability_score,
+                    overheat_penalty=score_result.overheat_penalty,
+                    notes=score_result.notes,
+                )
+                if not score_result.qualified:
+                    continue
+
+                next1 = bars.iloc[idx + 1] if idx + 1 < len(bars) else None
+                next2 = bars.iloc[idx + 2] if idx + 2 < len(bars) else None
+                next3 = bars.iloc[idx + 3] if idx + 3 < len(bars) else None
+                if next1 is None:
+                    continue
+
+                current_close = float(current["收盘"])
+                next1_open = float(next1["开盘"])
+                next1_close = float(next1["收盘"])
+                vwap_30m_proxy = (2 * next1_open + next1_close) / 3
+                open_not_chase = (
+                    (next1_close / next1_open) - 1.0 if next1_open <= current_close * 1.02 else None
+                )
+
+                result_rows.append(score_result)
+                forward_rows.append(
+                    {
+                        "code": code,
+                        "trade_date": trade_date.strftime("%Y-%m-%d"),
+                        "t1_return": (next1_close / current_close) - 1.0,
+                        "t2_return": ((float(next2["收盘"]) / current_close) - 1.0) if next2 is not None else None,
+                        "t3_return": ((float(next3["收盘"]) / current_close) - 1.0) if next3 is not None else None,
+                    }
+                )
+                ranked_seed_rows.append(
+                    {
+                        "trade_date": trade_date.strftime("%Y-%m-%d"),
+                        "code": code,
+                        "score": score_result.total_score,
+                        "t1_return": (next1_close / current_close) - 1.0,
+                        "t2_return": ((float(next2["收盘"]) / current_close) - 1.0) if next2 is not None else None,
+                        "t3_return": ((float(next3["收盘"]) / current_close) - 1.0) if next3 is not None else None,
+                        "open_t1_return": (next1_close / next1_open) - 1.0 if next1_open > 0 else None,
+                        "vwap_30m_t1_return": (next1_close / vwap_30m_proxy) - 1.0 if vwap_30m_proxy > 0 else None,
+                        "open_not_chase_t1_return": open_not_chase,
+                    }
+                )
+
+        ranked_frame = pd.DataFrame(ranked_seed_rows)
+        if not ranked_frame.empty:
+            ranked_frame["rank"] = ranked_frame.groupby("trade_date", observed=True)["score"].rank(
+                method="first", ascending=False
+            ).astype(int)
+            ranked_frame = ranked_frame.sort_values(["trade_date", "rank", "code"]).reset_index(drop=True)
+
+        return {
+            "ranked_returns": ranked_frame,
+            "forward_returns": pd.DataFrame(forward_rows),
+            "results": result_rows,
+        }
+    finally:
+        conn.close()

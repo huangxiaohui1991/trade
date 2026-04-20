@@ -390,6 +390,7 @@ def continuation_validate_cmd(
     start: str = typer.Option(..., help="验证开始日期 YYYY-MM-DD"),
     end: str = typer.Option(..., help="验证结束日期 YYYY-MM-DD"),
     top_n: int = typer.Option(3, help="每日保留 Top N"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """运行短线续涨评分验证并输出分层和 Top N 报告。"""
@@ -400,6 +401,7 @@ def continuation_validate_cmd(
         start=start,
         end=end,
         top_n=top_n,
+        db_path=db_path,
     )
 
     if as_json:
@@ -419,6 +421,7 @@ def continuation_backtest_cmd(
     end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
     hold_days: int = typer.Option(2, help="持有天数"),
     top_n: int = typer.Option(3, help="每日保留 Top N"),
+    db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """运行短线续涨 Top N 回测。"""
@@ -430,6 +433,7 @@ def continuation_backtest_cmd(
         end=end,
         hold_days=hold_days,
         top_n=top_n,
+        db_path=db_path,
     )
 
     if as_json:

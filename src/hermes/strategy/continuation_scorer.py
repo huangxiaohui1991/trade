@@ -47,6 +47,7 @@ class ContinuationScorer:
             code=snapshot.code,
             name=snapshot.name,
             qualified=True,
+            trade_date="",
             strength_score=round(strength, 2),
             continuity_score=round(continuity, 2),
             quality_score=round(quality, 2),

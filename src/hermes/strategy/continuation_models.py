@@ -46,6 +46,7 @@ class ContinuationScoreResult:
     code: str
     name: str
     qualified: bool
+    trade_date: str = ""
     strength_score: float = 0.0
     continuity_score: float = 0.0
     quality_score: float = 0.0
