@@ -1,0 +1,62 @@
+from hermes.market.models import StockQuote, StockSnapshot, TechnicalIndicators
+from hermes.strategy.continuation_filters import ContinuationQualifier
+from hermes.strategy.continuation_models import ContinuationFilterConfig
+
+
+def _make_snapshot(**overrides):
+    quote = StockQuote(
+        code="002138",
+        name="双环传动",
+        price=15.0,
+        open=14.5,
+        high=15.2,
+        low=14.4,
+        close=15.0,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=3.5,
+    )
+    technical = TechnicalIndicators(
+        ma5=14.6,
+        ma10=14.3,
+        ma20=13.9,
+        ma60=13.0,
+        above_ma20=True,
+        volume_ratio=1.8,
+        rsi=62.0,
+        golden_cross=False,
+        deviation_rate=2.8,
+        change_pct=3.5,
+    )
+    payload = dict(code="002138", name="双环传动", quote=quote, technical=technical)
+    payload.update(overrides)
+    return StockSnapshot(**payload)
+
+
+def test_qualifier_accepts_clean_short_continuation_candidate():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    result = qualifier.qualify(_make_snapshot())
+
+    assert result.qualified is True
+    assert result.reasons == []
+
+
+def test_qualifier_rejects_deep_intraday_retrace():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig(max_intraday_retrace=0.03))
+    quote = StockQuote(
+        code="002138",
+        name="双环传动",
+        price=15.03,
+        open=14.5,
+        high=15.5,
+        low=13.6,
+        close=15.03,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=3.5,
+    )
+
+    result = qualifier.qualify(_make_snapshot(quote=quote))
+
+    assert result.qualified is False
+    assert "intraday_retrace" in result.reasons
