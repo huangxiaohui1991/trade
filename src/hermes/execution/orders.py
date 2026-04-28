@@ -125,9 +125,9 @@ class OrderManager:
         )
 
         # 同步更新余额
-        trade_amount = fill_price_cents * row["shares"] + fee_cents
         if row["side"] == "buy":
-            # 现金减少，总资产不变（现金→持仓）
+            # 买入：现金减少（付出 gross + fee）
+            trade_amount = fill_price_cents * row["shares"] + fee_cents
             self._conn.execute(
                 """UPDATE projection_balances
                    SET cash_cents = cash_cents - ?,
@@ -136,7 +136,8 @@ class OrderManager:
                 (trade_amount, now),
             )
         else:  # sell
-            # 现金增加，总资产不变（持仓→现金）
+            # 卖出：现金增加（收到 proceeds - fee）
+            trade_amount = fill_price_cents * row["shares"] - fee_cents
             self._conn.execute(
                 """UPDATE projection_balances
                    SET cash_cents = cash_cents + ?,

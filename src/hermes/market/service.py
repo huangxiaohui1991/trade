@@ -45,8 +45,15 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
 
             last = df.iloc[-1]
             price = float(last["price"])
-            prev = float(last["prev_price"]) if last["prev_price"] else price
-            change_pct = ((price - prev) / prev * 100) if prev > 0 else 0.0
+
+            # prev_price 是分时前一笔价格，不能当昨收价用
+            # 正确做法：用日K线获取昨收价来计算涨跌幅
+            try:
+                daily = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+                prev_close = float(daily["close"].iloc[-2]) if len(daily) >= 2 else price
+            except Exception:
+                prev_close = price  # fallback
+            change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
 
             name = code
             if "name" in df.columns and len(df) > 0:

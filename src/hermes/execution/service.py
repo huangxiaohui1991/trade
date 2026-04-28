@@ -13,6 +13,7 @@ from hermes.execution.models import Balance, Order, OrderSide, Position
 from hermes.execution.orders import OrderManager
 from hermes.execution.positions import PositionManager, PositionProjector
 from hermes.platform.events import EventStore
+from hermes.platform.time import utc_now_iso
 
 
 @runtime_checkable
@@ -206,6 +207,132 @@ class ExecutionService:
             })
         else:
             self._orders.cancel_order(order.order_id, "broker_rejected", run_id)
+
+        return order
+
+    def record_sell(
+        self,
+        code: str,
+        shares: int,
+        price_cents: int,
+        fee_cents: int = 0,
+        reason: str = "",
+        run_id: str = "",
+    ) -> Order:
+        """
+        手动录入已成交的卖出记录（绕过 broker）。
+        走事件化流程：order.created → order.filled → position.closed。
+        fill_order 会同步更新现金（gross - fee）。
+        """
+        if run_id:
+            rid = run_id
+        else:
+            import uuid
+            rid = f"manual_sell_{code}_{uuid.uuid4().hex[:8]}"
+
+        pos = self._positions.get_position(code)
+        name = pos.name if pos else code
+
+        if pos is None:
+            raise ValueError(f"持仓不存在：{code}")
+
+        if shares != pos.shares:
+            raise ValueError(
+                f"部分卖出暂不支持。当前持仓 {pos.shares} 股，传入了 {shares} 股。"
+                f"请传入 shares={pos.shares}（全仓）来卖出。"
+            )
+
+        if shares <= 0:
+            raise ValueError(f"shares 必须 > 0，当前为 {shares}")
+
+        if price_cents <= 0:
+            raise ValueError(f"price_cents 必须 > 0，当前为 {price_cents}")
+
+        order = self._orders.create_order(
+            code=code, name=name, side=OrderSide.SELL,
+            shares=shares, price_cents=price_cents,
+            run_id=rid, broker="manual",
+        )
+
+        # 成交录入（fill_order 会更新现金）
+        self._orders.fill_order(
+            order.order_id,
+            fill_price_cents=price_cents,
+            fee_cents=fee_cents,
+            run_id=rid,
+        )
+
+        # 清仓
+        self._positions.close_position(
+            code=code, shares=shares,
+            sell_price_cents=price_cents,
+            run_id=rid, reason=reason or "manual",
+        )
+
+        self._notify_trade({
+            "side": "sell", "code": code, "name": name,
+            "shares": shares, "price_cents": price_cents,
+            "reason": reason or "manual", "run_id": rid, "order_id": order.order_id,
+        })
+
+        return order
+
+    def record_buy(
+        self,
+        code: str,
+        shares: int,
+        price_cents: int,
+        fee_cents: int = 0,
+        reason: str = "",
+        run_id: str = "",
+    ) -> Order:
+        """
+        手动录入已成交的买入记录（绕过 broker）。
+        走事件化流程：order.created → order.filled → position.opened。
+        fill_order 会同步更新现金（gross + fee）。
+        """
+        if run_id:
+            rid = run_id
+        else:
+            import uuid
+            rid = f"manual_buy_{code}_{uuid.uuid4().hex[:8]}"
+
+        if shares <= 0:
+            raise ValueError(f"shares 必须 > 0，当前为 {shares}")
+
+        if price_cents <= 0:
+            raise ValueError(f"price_cents 必须 > 0，当前为 {price_cents}")
+
+        from hermes.strategy.models import Style
+        style = Style.GROWTH.value
+
+        order = self._orders.create_order(
+            code=code, name=code, side=OrderSide.BUY,
+            shares=shares, price_cents=price_cents,
+            run_id=rid, broker="manual",
+        )
+
+        # 成交录入（fill_order 会更新现金）
+        self._orders.fill_order(
+            order.order_id,
+            fill_price_cents=price_cents,
+            fee_cents=fee_cents,
+            run_id=rid,
+        )
+
+        # 开仓
+        self._positions.open_position(
+            code=code, name=code, shares=shares,
+            avg_cost_cents=price_cents,
+            style=style,
+            run_id=rid,
+        )
+
+        self._notify_trade({
+            "side": "buy", "code": code, "name": code,
+            "shares": shares, "price_cents": price_cents,
+            "reason": reason or "manual", "run_id": rid, "order_id": order.order_id,
+        })
 
         return order
 
