@@ -24,6 +24,52 @@ from hermes.market.indicators import compute_technical_indicators
 from hermes.market.adapters import is_hk_code
 from hermes.strategy.models import MarketState
 
+def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
+    """
+    新浪分时单股批量抓取（同步版，供 asyncio.to_thread 调用）。
+
+    每个代码单独请求，不拉全市场。总耗时 ~1s * N只股票（并发）。
+    """
+    from datetime import date as _date
+    import akshare as ak
+
+    today = _date.today().strftime("%Y%m%d")
+    result: dict[str, Optional[StockQuote]] = {code: None for code in codes}
+
+    for code in codes:
+        try:
+            symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
+            df = ak.stock_intraday_sina(symbol=symbol, date=today)
+            if df is None or df.empty:
+                continue
+
+            last = df.iloc[-1]
+            price = float(last["price"])
+            prev = float(last["prev_price"]) if last["prev_price"] else price
+            change_pct = ((price - prev) / prev * 100) if prev > 0 else 0.0
+
+            name = code
+            if "name" in df.columns and len(df) > 0:
+                name = str(df.iloc[0]["name"])
+
+            result[code] = StockQuote(
+                code=code,
+                name=name,
+                price=price,
+                open=0.0,
+                high=float(df["price"].max()),
+                low=float(df["price"].min()),
+                close=price,
+                volume=int(df["volume"].sum()) if "volume" in df.columns else 0,
+                amount=float(last["volume"]) * price if "volume" in df.columns else 0.0,
+                change_pct=round(change_pct, 2),
+            )
+        except Exception:
+            continue
+
+    return result
+
+
 _logger = logging.getLogger(__name__)
 
 
@@ -151,8 +197,12 @@ class MarketService:
         """
         盘中持仓监控专用轻量抓取。
 
-        只获取实时行情和 MA 技术指标，不抓财务、资金流、舆情等评分维度。
+        只获取实时行情（价格+涨跌幅+MA），不走全市场拉取。
+        优先用新浪单股分时（~1s/只），次选东财单码，第三选日K线收盘价。
         """
+        import asyncio
+        import pandas as pd
+
         quotes: dict[str, StockQuote] = {}
         missing: list[str] = []
         names_by_code = {item["code"]: item.get("name", item["code"]) for item in codes}
@@ -165,47 +215,90 @@ class MarketService:
             else:
                 missing.append(code)
 
-        for provider in self._market:
-            if not missing:
-                break
-            try:
-                provider_quotes = await provider.get_realtime(missing)
-            except Exception as e:
-                _logger.info(f"[intraday] realtime provider failed: {e}")
-                continue
+        if missing:
+            # 方案A：新浪单股分时（最轻量，不拉全市场）
+            sina_results = await asyncio.to_thread(_fetch_sina_intraday, missing)
+            for code, quote in sina_results.items():
+                if quote is not None:
+                    quotes[code] = quote
+                    missing.remove(code)
 
-            for code in list(missing):
-                quote = provider_quotes.get(code)
-                if quote is None:
-                    continue
-                quotes[code] = quote
-                missing.remove(code)
-
-        for code in list(missing):
-            for provider in self._iter_kline_providers(code):
+        if missing:
+            # 方案B：东财全量快照过滤（可能很慢，跳过 tqdm 输出）
+            for provider in self._market:
+                if not missing:
+                    break
                 try:
-                    kline = await provider.get_kline(code, "daily", 2)
-                    quote = self._quote_from_kline(code, kline)
-                    if quote is not None:
-                        quotes[code] = quote
-                        missing.remove(code)
-                        break
-                except Exception as e:
-                    _logger.info(f"[intraday] {code} kline quote fallback failed: {e}")
-                    continue
+                    import akshare as ak
+                    df = ak.stock_zh_a_spot_em()
+                    code_set = set(missing)
+                    for _, row in df.iterrows():
+                        code = str(row.get("代码", "")).strip()
+                        if code not in code_set:
+                            continue
+                        code_set.discard(code)
+                        quotes[code] = StockQuote(
+                            code=code,
+                            name=str(row.get("名称", "")),
+                            price=float(row.get("最新价", 0) or 0),
+                            open=float(row.get("今开", 0) or 0),
+                            high=float(row.get("最高", 0) or 0),
+                            low=float(row.get("最低", 0) or 0),
+                            close=float(row.get("最新价", 0) or 0),
+                            volume=int(row.get("成交量", 0) or 0),
+                            amount=float(row.get("成交额", 0) or 0),
+                            change_pct=float(row.get("涨跌幅", 0) or 0),
+                        )
+                        if code in missing:
+                            missing.remove(code)
+                except Exception:
+                    pass
 
-        technical_results = await asyncio.gather(
-            *(self._get_technical(item["code"], quotes.get(item["code"])) for item in codes),
-            return_exceptions=True,
-        )
+        if missing:
+            # 方案C：日K线收盘价（仅能拿到收盘价，日内涨跌幅为0）
+            for code in list(missing):
+                for provider in self._iter_kline_providers(code):
+                    try:
+                        kline = await provider.get_kline(code, "daily", 2)
+                        quote = self._quote_from_kline(code, kline)
+                        if quote is not None:
+                            quotes[code] = quote
+                            missing.remove(code)
+                            break
+                    except Exception:
+                        continue
+
+        # 技术指标：MA20/60 用日K计算（并发，避免走 compute_technical_indicators 的慢路径）
+        async def _tech_for(code: str) -> tuple[str, Optional[TechnicalIndicators]]:
+            try:
+                for provider in self._iter_kline_providers(code):
+                    try:
+                        kline = await provider.get_kline(code, "daily", 120)
+                        if kline is None or kline.empty:
+                            continue
+                        closes = kline["close"].astype(float).tolist()
+                        ma20 = float(pd.Series(closes).rolling(20).mean().iloc[-1]) if len(closes) >= 20 else 0.0
+                        ma60 = float(pd.Series(closes).rolling(60).mean().iloc[-1]) if len(closes) >= 60 else 0.0
+                        return code, TechnicalIndicators(
+                            ma5=0, ma10=0, ma20=ma20, ma60=ma60,
+                            ma120=0, ma250=0, rsi14=0, rsi28=0,
+                            golden_cross=False, dead_cross=False,
+                            volume_ratio=0, trend="",
+                        )
+                    except Exception:
+                        continue
+                return code, None
+            except Exception:
+                return code, None
+
+        tech_results = await asyncio.gather(*[_tech_for(item["code"]) for item in codes])
+        tech_by_code = {code: tech for code, tech in tech_results}
 
         snapshots: list[StockSnapshot] = []
-        for item, technical in zip(codes, technical_results):
+        for item in codes:
             code = item["code"]
             quote = quotes.get(code)
-            if isinstance(technical, Exception):
-                _logger.info(f"[intraday] {code} technical failed: {technical}")
-                technical = None
+            technical = tech_by_code.get(code)
 
             if self._store and quote is not None:
                 payload = asdict(quote)
