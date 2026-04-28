@@ -223,43 +223,43 @@ class MarketService:
                 missing.append(code)
 
         if missing:
-            # 方案A：新浪单股分时（最轻量，不拉全市场）
-            sina_results = await asyncio.to_thread(_fetch_sina_intraday, missing)
-            for code, quote in sina_results.items():
-                if quote is not None:
-                    quotes[code] = quote
-                    missing.remove(code)
-
-        if missing:
-            # 方案B：东财全量快照过滤（可能很慢，跳过 tqdm 输出）
+            # 方案A：优先通过注入的 provider 批量获取（支持 mock）
             for provider in self._market:
                 if not missing:
                     break
                 try:
-                    import akshare as ak
-                    df = ak.stock_zh_a_spot_em()
-                    code_set = set(missing)
-                    for _, row in df.iterrows():
-                        code = str(row.get("代码", "")).strip()
-                        if code not in code_set:
-                            continue
-                        code_set.discard(code)
-                        quotes[code] = StockQuote(
-                            code=code,
-                            name=str(row.get("名称", "")),
-                            price=float(row.get("最新价", 0) or 0),
-                            open=float(row.get("今开", 0) or 0),
-                            high=float(row.get("最高", 0) or 0),
-                            low=float(row.get("最低", 0) or 0),
-                            close=float(row.get("最新价", 0) or 0),
-                            volume=int(row.get("成交量", 0) or 0),
-                            amount=float(row.get("成交额", 0) or 0),
-                            change_pct=float(row.get("涨跌幅", 0) or 0),
-                        )
-                        if code in missing:
+                    results = await provider.get_realtime(missing)
+                    for code, quote in results.items():
+                        if quote is not None:
+                            quotes[code] = quote
                             missing.remove(code)
                 except Exception:
                     pass
+
+        if missing:
+            # 方案B：回退到 AkShare 全量快照（仅当没有注入 provider 时才用）
+            import akshare as ak
+            df = ak.stock_zh_a_spot_em()
+            code_set = set(missing)
+            for _, row in df.iterrows():
+                code = str(row.get("代码", "")).strip()
+                if code not in code_set:
+                    continue
+                code_set.discard(code)
+                quotes[code] = StockQuote(
+                    code=code,
+                    name=str(row.get("名称", "")),
+                    price=float(row.get("最新价", 0) or 0),
+                    open=float(row.get("今开", 0) or 0),
+                    high=float(row.get("最高", 0) or 0),
+                    low=float(row.get("最低", 0) or 0),
+                    close=float(row.get("最新价", 0) or 0),
+                    volume=int(row.get("成交量", 0) or 0),
+                    amount=float(row.get("成交额", 0) or 0),
+                    change_pct=float(row.get("涨跌幅", 0) or 0),
+                )
+                if code in missing:
+                    missing.remove(code)
 
         if missing:
             # 方案C：日K线收盘价（仅能拿到收盘价，日内涨跌幅为0）

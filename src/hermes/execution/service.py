@@ -285,6 +285,8 @@ class ExecutionService:
         fee_cents: int = 0,
         reason: str = "",
         run_id: str = "",
+        name: str = "",
+        style: str = "",
     ) -> Order:
         """
         手动录入已成交的买入记录（绕过 broker）。
@@ -304,10 +306,11 @@ class ExecutionService:
             raise ValueError(f"price_cents 必须 > 0，当前为 {price_cents}")
 
         from hermes.strategy.models import Style
-        style = Style.GROWTH.value
+        _style_map = {"growth": Style.MOMENTUM, "slow_bull": Style.SLOW_BULL, "momentum": Style.MOMENTUM}
+        style_enum = _style_map.get(style.lower(), Style.UNKNOWN) if style else Style.UNKNOWN
 
         order = self._orders.create_order(
-            code=code, name=code, side=OrderSide.BUY,
+            code=code, name=name or code, side=OrderSide.BUY,
             shares=shares, price_cents=price_cents,
             run_id=rid, broker="manual",
         )
@@ -322,14 +325,14 @@ class ExecutionService:
 
         # 开仓
         self._positions.open_position(
-            code=code, name=code, shares=shares,
+            code=code, name=name or code, shares=shares,
             avg_cost_cents=price_cents,
-            style=style,
+            style=style_enum,
             run_id=rid,
         )
 
         self._notify_trade({
-            "side": "buy", "code": code, "name": code,
+            "side": "buy", "code": code, "name": name or code,
             "shares": shares, "price_cents": price_cents,
             "reason": reason or "manual", "run_id": rid, "order_id": order.order_id,
         })

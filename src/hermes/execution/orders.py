@@ -124,27 +124,24 @@ class OrderManager:
             (now, now, order_id),
         )
 
-        # 同步更新余额
+        # 同步更新余额（UPSERT，防止 scope='main' 行不存在时静默失败）
         if row["side"] == "buy":
             # 买入：现金减少（付出 gross + fee）
             trade_amount = fill_price_cents * row["shares"] + fee_cents
-            self._conn.execute(
-                """UPDATE projection_balances
-                   SET cash_cents = cash_cents - ?,
-                       updated_at = ?
-                   WHERE scope = 'main'""",
-                (trade_amount, now),
-            )
-        else:  # sell
+            sign = -1
+        else:
             # 卖出：现金增加（收到 proceeds - fee）
             trade_amount = fill_price_cents * row["shares"] - fee_cents
-            self._conn.execute(
-                """UPDATE projection_balances
-                   SET cash_cents = cash_cents + ?,
-                       updated_at = ?
-                   WHERE scope = 'main'""",
-                (trade_amount, now),
-            )
+            sign = 1
+
+        self._conn.execute(
+            """INSERT INTO projection_balances (scope, cash_cents, updated_at)
+               VALUES ('main', ?, ?)
+               ON CONFLICT(scope) DO UPDATE SET
+                   cash_cents = cash_cents + excluded.cash_cents,
+                   updated_at = excluded.updated_at""",
+            (sign * trade_amount, now),
+        )
 
     def cancel_order(
         self,

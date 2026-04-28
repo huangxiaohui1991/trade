@@ -748,6 +748,8 @@ def record_buy(
             price_cents=price_cents,
             fee_cents=fee_cents,
             reason=reason,
+            name=name,
+            style=style,
         )
 
         conn.commit()
