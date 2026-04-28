@@ -156,6 +156,37 @@ class FailingProvider:
 # ---------------------------------------------------------------------------
 
 class TestMarketService:
+    def test_collect_intraday_batch_skips_scoring_dimensions(self, store):
+        quote = StockQuote(
+            code="002138", name="双环传动", price=15.0,
+            open=14.8, high=15.2, low=14.7, close=15.0,
+            volume=5000000, amount=7.5e8, change_pct=-1.5,
+        )
+        financial = MockFinancialProvider({"002138": FinancialReport(roe=12.0)})
+        flow = MockFlowProvider({"002138": FundFlow(net_inflow_1d=6e8)})
+        sentiment = MockSentimentProvider()
+        svc = MarketService(
+            market_providers=[MockMarketProvider({"002138": quote})],
+            financial_providers=[financial],
+            flow_providers=[flow],
+            sentiment_providers=[sentiment],
+            store=store,
+        )
+
+        loop = asyncio.new_event_loop()
+        try:
+            snap = loop.run_until_complete(
+                svc.collect_intraday_batch([{"code": "002138", "name": "双环传动"}], run_id="run_intraday")
+            )[0]
+        finally:
+            loop.close()
+
+        assert snap.quote is not None
+        assert snap.quote.price == 15.0
+        assert snap.financial is None
+        assert snap.flow is None
+        assert snap.sentiment is None
+
     def test_collect_snapshot(self, store):
         quote = StockQuote(
             code="002138", name="双环传动", price=15.0,

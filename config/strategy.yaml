@@ -133,6 +133,8 @@ risk:
     max_single_position_warn_pct: 0.25
     max_sector_exposure_warn_pct: 0.40
     max_correlation_group_exposure_warn_pct: 0.50
+  intraday_monitor:
+    daily_loss_alert_pct: 0.05      # 盘中单票当日跌幅 >= 5% 立即告警
   position:
     total_max: 0.60
     single_max: 0.20

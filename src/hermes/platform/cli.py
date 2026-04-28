@@ -641,7 +641,7 @@ def run_mcp():
 
 @app.command("run-pipeline")
 def run_pipeline(
-    pipeline_type: str = typer.Argument(..., help="morning | noon | evening | scoring | weekly"),
+    pipeline_type: str = typer.Argument(..., help="morning | noon | intraday_monitor | evening | scoring | weekly"),
     db_path: Optional[Path] = typer.Option(None, help="数据库路径"),
 ):
     """运行指定 pipeline（完整流程，带幂等检查）"""
@@ -649,7 +649,8 @@ def run_pipeline(
 
     ctx = build_context(db_path)
     try:
-        if ctx.run_journal.is_completed_today(pipeline_type):
+        multi_run_pipelines = {"sentiment", "intraday_monitor"}
+        if pipeline_type not in multi_run_pipelines and ctx.run_journal.is_completed_today(pipeline_type):
             typer.echo(f"⏭️  {pipeline_type} 今日已完成，跳过")
             return
 
@@ -666,6 +667,14 @@ def run_pipeline(
                 from hermes.pipeline.noon import run
                 result = run(ctx, run_id)
                 typer.echo(f"  大盘={result['signal']} 持仓={result['positions']} 风控={len(result['alerts'])}条")
+
+            elif pipeline_type == "intraday_monitor":
+                from hermes.pipeline.intraday_monitor import run
+                result = run(ctx, run_id)
+                typer.echo(
+                    f"  持仓={result['positions']} "
+                    f"新告警={len(result['alerts'])}条 去重={result['deduped']}条"
+                )
 
             elif pipeline_type == "scoring":
                 from hermes.pipeline.scoring import run
