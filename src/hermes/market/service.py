@@ -238,28 +238,31 @@ class MarketService:
 
         if missing:
             # 方案B：回退到 AkShare 全量快照（仅当没有注入 provider 时才用）
-            import akshare as ak
-            df = ak.stock_zh_a_spot_em()
-            code_set = set(missing)
-            for _, row in df.iterrows():
-                code = str(row.get("代码", "")).strip()
-                if code not in code_set:
-                    continue
-                code_set.discard(code)
-                quotes[code] = StockQuote(
-                    code=code,
-                    name=str(row.get("名称", "")),
-                    price=float(row.get("最新价", 0) or 0),
-                    open=float(row.get("今开", 0) or 0),
-                    high=float(row.get("最高", 0) or 0),
-                    low=float(row.get("最低", 0) or 0),
-                    close=float(row.get("最新价", 0) or 0),
-                    volume=int(row.get("成交量", 0) or 0),
-                    amount=float(row.get("成交额", 0) or 0),
-                    change_pct=float(row.get("涨跌幅", 0) or 0),
-                )
-                if code in missing:
-                    missing.remove(code)
+            try:
+                import akshare as ak
+                df = ak.stock_zh_a_spot_em()
+                code_set = set(missing)
+                for _, row in df.iterrows():
+                    code = str(row.get("代码", "")).strip()
+                    if code not in code_set:
+                        continue
+                    code_set.discard(code)
+                    quotes[code] = StockQuote(
+                        code=code,
+                        name=str(row.get("名称", "")),
+                        price=float(row.get("最新价", 0) or 0),
+                        open=float(row.get("今开", 0) or 0),
+                        high=float(row.get("最高", 0) or 0),
+                        low=float(row.get("最低", 0) or 0),
+                        close=float(row.get("最新价", 0) or 0),
+                        volume=int(row.get("成交量", 0) or 0),
+                        amount=float(row.get("成交额", 0) or 0),
+                        change_pct=float(row.get("涨跌幅", 0) or 0),
+                    )
+                    if code in missing:
+                        missing.remove(code)
+            except Exception:
+                pass
 
         if missing:
             # 方案C：日K线收盘价（仅能拿到收盘价，日内涨跌幅为0）

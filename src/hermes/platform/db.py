@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS projection_orders (
 CREATE TABLE IF NOT EXISTS projection_balances (
     scope           TEXT PRIMARY KEY,
     cash_cents      INTEGER NOT NULL,
-    total_asset_cents INTEGER NOT NULL,
+    total_asset_cents INTEGER,  -- NULL: 待 rebuild_all() 从 cash+市值 重算
     weekly_buy_count INTEGER NOT NULL DEFAULT 0,
     daily_pnl_cents INTEGER NOT NULL DEFAULT 0,
     consecutive_loss_days INTEGER NOT NULL DEFAULT 0,

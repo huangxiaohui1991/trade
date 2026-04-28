@@ -125,23 +125,21 @@ class OrderManager:
         )
 
         # 同步更新余额（UPSERT，防止 scope='main' 行不存在时静默失败）
+        # total_asset_cents 由 rebuild_all() 从 (现金+持仓市值) 重建，此处只动 cash
         if row["side"] == "buy":
-            # 买入：现金减少（付出 gross + fee）
-            trade_amount = fill_price_cents * row["shares"] + fee_cents
-            sign = -1
+            cash_change = -(fill_price_cents * row["shares"] + fee_cents)  # 负数
         else:
-            # 卖出：现金增加（收到 proceeds - fee）
-            trade_amount = fill_price_cents * row["shares"] - fee_cents
-            sign = 1
+            cash_change = fill_price_cents * row["shares"] - fee_cents     # 正数
 
+        # INSERT 时 total_asset_cents = cash（建账初期=全现金，rebuild_all 会重算）
+        # UPDATE 时只动 cash，不动 total_asset_cents（由 rebuild_all 从 cash+市值 重算）
         self._conn.execute(
             """INSERT INTO projection_balances (scope, cash_cents, total_asset_cents, updated_at)
                VALUES ('main', ?, ?, ?)
                ON CONFLICT(scope) DO UPDATE SET
                    cash_cents = cash_cents + excluded.cash_cents,
-                   total_asset_cents = total_asset_cents + excluded.cash_cents,
                    updated_at = excluded.updated_at""",
-            (sign * trade_amount, sign * trade_amount, now),
+            (cash_change, cash_change, now),
         )
 
     def cancel_order(
