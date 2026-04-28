@@ -135,12 +135,13 @@ class OrderManager:
             sign = 1
 
         self._conn.execute(
-            """INSERT INTO projection_balances (scope, cash_cents, updated_at)
-               VALUES ('main', ?, ?)
+            """INSERT INTO projection_balances (scope, cash_cents, total_asset_cents, updated_at)
+               VALUES ('main', ?, ?, ?)
                ON CONFLICT(scope) DO UPDATE SET
                    cash_cents = cash_cents + excluded.cash_cents,
+                   total_asset_cents = total_asset_cents + excluded.cash_cents,
                    updated_at = excluded.updated_at""",
-            (sign * trade_amount, now),
+            (sign * trade_amount, sign * trade_amount, now),
         )
 
     def cancel_order(

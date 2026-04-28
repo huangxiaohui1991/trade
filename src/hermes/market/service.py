@@ -287,10 +287,11 @@ class MarketService:
                         ma20 = float(pd.Series(closes).rolling(20).mean().iloc[-1]) if len(closes) >= 20 else 0.0
                         ma60 = float(pd.Series(closes).rolling(60).mean().iloc[-1]) if len(closes) >= 60 else 0.0
                         return code, TechnicalIndicators(
-                            ma5=0, ma10=0, ma20=ma20, ma60=ma60,
-                            ma120=0, ma250=0, rsi14=0, rsi28=0,
-                            golden_cross=False, dead_cross=False,
-                            volume_ratio=0, trend="",
+                            ma5=0.0, ma10=0.0, ma20=ma20, ma60=ma60,
+                            above_ma20=False, volume_ratio=1.0, rsi=50.0,
+                            golden_cross=False, ma20_slope=0.0,
+                            momentum_5d=0.0, daily_volatility=0.0,
+                            deviation_rate=0.0, change_pct=0.0,
                         )
                     except Exception:
                         continue
