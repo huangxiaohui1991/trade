@@ -34,6 +34,7 @@ SIGNAL_TYPE_CN = {
     "trailing_stop": "移动止盈",
     "time_stop": "时间止损",
     "ma_exit": "MA 跌破离场",
+    "daily_loss": "单日浮亏",
     "style_switch": "风格切换",
 }
 URGENCY_CN = {
@@ -297,6 +298,55 @@ def format_combined_stop_alert_embed(signals: list[dict]) -> dict:
         color=COLORS["stop_alert"],
         fields=fields,
         footer="Hermes · risk_alert",
+    )
+
+
+def format_intraday_monitor_embed(data: dict) -> dict:
+    """盘中持仓风控轮巡 → Discord embed dict。"""
+    time_str = data.get("time", local_now_str())
+    alerts = data.get("alerts", [])
+    positions = data.get("positions", [])
+
+    title_map = {
+        "daily_loss": "🔴 单日浮亏",
+        "stop_loss": "🔴 止损触发",
+        "trailing_stop": "🟠 移动止盈",
+        "ma_exit": "📉 MA 离场",
+    }
+
+    fields = []
+    for alert in alerts[:MAX_EMBED_FIELDS - 1]:
+        signal_type = alert.get("signal_type", "")
+        label = title_map.get(signal_type, f"⚠️ {signal_type}")
+        code = alert.get("code", "")
+        name = alert.get("name", code)
+        current = alert.get("current_price", 0)
+        desc = alert.get("description", "")
+        fields.append(_field(
+            f"{label} · {name}({code})",
+            f"现价 {current:.2f}\n{desc}",
+            inline=False,
+        ))
+
+    if len(alerts) > MAX_EMBED_FIELDS - 1:
+        fields.append(_field(
+            "其余告警",
+            f"还有 **{len(alerts) - (MAX_EMBED_FIELDS - 1)}** 条未展开。",
+            inline=False,
+        ))
+
+    if not fields and positions:
+        summary = []
+        for p in positions[:8]:
+            summary.append(f"{p['name']}({p['code']}) {p['price']:.2f} / {p['change_pct']:+.2f}%")
+        fields.append(_field("持仓快照", "\n".join(summary), inline=False))
+
+    return _embed(
+        title=f"⚠️ 盘中风控监控 — {time_str}",
+        description=f"触发 {len(alerts)} 条告警",
+        color=COLORS["stop_alert"] if alerts else COLORS["info"],
+        fields=fields,
+        footer="Hermes · intraday_monitor",
     )
 
 

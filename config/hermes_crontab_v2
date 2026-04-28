@@ -13,6 +13,13 @@ LOG_DIR="$REPO_ROOT/data"
 # 午休检查 11:55
 55 11 * * 1-5 $TRADE run-pipeline noon >> $LOG_DIR/cron_noon.log 2>&1
 
+# 盘中持仓风控轮巡：09:35-11:30、13:00-14:55，每 5 分钟
+35-55/5 9 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+*/5 10 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+0-30/5 11 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+*/5 13-14 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+55 14 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+
 # 收盘报告 15:35
 35 15 * * 1-5 $TRADE run-pipeline evening >> $LOG_DIR/cron_evening.log 2>&1
 

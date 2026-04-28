@@ -746,8 +746,9 @@ def trade_backtest(
 @_safe
 def trade_run_pipeline(pipeline_type: str) -> str:
     """运行指定 pipeline（完整流程，带幂等检查）。"""
-    # sentiment 每30分钟跑一次，不做幂等检查
-    if pipeline_type != "sentiment" and _run_journal.is_completed_today(pipeline_type):
+    # 盘中轮巡类 pipeline 一天会运行多次，不做日级幂等检查。
+    multi_run_pipelines = {"sentiment", "intraday_monitor"}
+    if pipeline_type not in multi_run_pipelines and _run_journal.is_completed_today(pipeline_type):
         return json.dumps({"status": "skipped", "reason": f"{pipeline_type} 今日已完成"}, ensure_ascii=False)
 
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
@@ -769,6 +770,8 @@ def trade_run_pipeline(pipeline_type: str) -> str:
             from hermes.pipeline.morning import run
         elif pipeline_type == "noon":
             from hermes.pipeline.noon import run
+        elif pipeline_type == "intraday_monitor":
+            from hermes.pipeline.intraday_monitor import run
         elif pipeline_type == "scoring":
             from hermes.pipeline.scoring import run
         elif pipeline_type == "evening":
