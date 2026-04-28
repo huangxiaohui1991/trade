@@ -125,6 +125,16 @@ def format_morning_embed(data: dict) -> dict:
             decision_lines.extend([f"⚠️ {a}" for a in alerts])
         fields.append(_field("📋 今日决策", f"**{action_label}**\n" + "\n".join(decision_lines), inline=False))
 
+    # 止损挂单提醒：从风控信号中提取止损触发价，明确提示用户挂单
+    stop_loss_reminders = data.get("stop_loss_reminders", [])
+    if stop_loss_reminders:
+        reminder_lines = []
+        for r in stop_loss_reminders:
+            reminder_lines.append(
+                f"• {r['name']}({r['code']}): 立即挂 **卖出** 止损单 `@ {r['trigger_price']:.2f}`"
+            )
+        fields.append(_field("🔴 止损挂单提醒", "\n".join(reminder_lines), inline=False))
+
     # 核心池
     core = data.get("core_pool", [])
     if core:

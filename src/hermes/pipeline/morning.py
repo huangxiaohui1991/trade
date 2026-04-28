@@ -46,6 +46,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     positions = ctx.exec_svc.get_positions()
     risk_results = check_position_risks(ctx, positions, run_id)
     risk_alerts = []
+    stop_loss_reminders = []
     # 区分 immediate 和 advisory 级别的风控信号
     has_immediate_risk = False
     for pos, signals in risk_results:
@@ -53,6 +54,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             risk_alerts.append(f"⚠️ {pos.name}({pos.code}): {s.description} [{s.urgency}]")
             if s.urgency == "immediate":
                 has_immediate_risk = True
+            # 提取止损挂单提醒
+            if s.signal_type in ("stop_loss", "ma_exit", "trailing_stop"):
+                stop_loss_reminders.append({
+                    "name": pos.name,
+                    "code": pos.code,
+                    "signal_type": s.signal_type,
+                    "trigger_price": s.trigger_price,
+                    "description": s.description,
+                })
 
     # 3. 核心池
     pool_rows = ctx.conn.execute(
@@ -138,6 +148,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "holding_count": len(positions),
             "risk_alerts": risk_alerts,
         },
+        "stop_loss_reminders": stop_loss_reminders,
     }
     embed = format_morning_embed(discord_data)
 
