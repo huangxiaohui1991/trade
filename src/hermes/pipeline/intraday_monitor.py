@@ -113,7 +113,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     threshold = _daily_loss_threshold(ctx)
     stock_list = [{"code": p.code, "name": p.name} for p in positions]
-    snapshots = asyncio.run(ctx.market_svc.collect_batch(stock_list, run_id))
+    snapshots = asyncio.run(ctx.market_svc.collect_intraday_batch(stock_list, run_id))
     snapshots_by_code = {s.code: s for s in snapshots}
 
     risk_cfg = _risk_cfg(ctx)

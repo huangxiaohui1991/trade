@@ -8,6 +8,7 @@ market/service.py — 市场数据服务
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import logging
 from typing import Optional
 
@@ -139,6 +140,91 @@ class MarketService:
                 ))
             else:
                 snapshots.append(r)
+
+        return snapshots
+
+    async def collect_intraday_batch(
+        self,
+        codes: list[dict],
+        run_id: Optional[str] = None,
+    ) -> list[StockSnapshot]:
+        """
+        盘中持仓监控专用轻量抓取。
+
+        只获取实时行情和 MA 技术指标，不抓财务、资金流、舆情等评分维度。
+        """
+        quotes: dict[str, StockQuote] = {}
+        missing: list[str] = []
+        names_by_code = {item["code"]: item.get("name", item["code"]) for item in codes}
+
+        for item in codes:
+            code = item["code"]
+            cached = self._store.get_cached(code, "quote") if self._store else None
+            if cached:
+                quotes[code] = StockQuote(**cached)
+            else:
+                missing.append(code)
+
+        for provider in self._market:
+            if not missing:
+                break
+            try:
+                provider_quotes = await provider.get_realtime(missing)
+            except Exception as e:
+                _logger.info(f"[intraday] realtime provider failed: {e}")
+                continue
+
+            for code in list(missing):
+                quote = provider_quotes.get(code)
+                if quote is None:
+                    continue
+                quotes[code] = quote
+                missing.remove(code)
+
+        for code in list(missing):
+            for provider in self._iter_kline_providers(code):
+                try:
+                    kline = await provider.get_kline(code, "daily", 2)
+                    quote = self._quote_from_kline(code, kline)
+                    if quote is not None:
+                        quotes[code] = quote
+                        missing.remove(code)
+                        break
+                except Exception as e:
+                    _logger.info(f"[intraday] {code} kline quote fallback failed: {e}")
+                    continue
+
+        technical_results = await asyncio.gather(
+            *(self._get_technical(item["code"], quotes.get(item["code"])) for item in codes),
+            return_exceptions=True,
+        )
+
+        snapshots: list[StockSnapshot] = []
+        for item, technical in zip(codes, technical_results):
+            code = item["code"]
+            quote = quotes.get(code)
+            if isinstance(technical, Exception):
+                _logger.info(f"[intraday] {code} technical failed: {technical}")
+                technical = None
+
+            if self._store and quote is not None:
+                payload = asdict(quote)
+                if payload.get("timestamp") is not None:
+                    payload["timestamp"] = payload["timestamp"].isoformat()
+                self._store.save_observation(
+                    source="market_service",
+                    kind="quote",
+                    symbol=code,
+                    payload=payload,
+                    run_id=run_id,
+                )
+
+            snapshots.append(StockSnapshot(
+                code=code,
+                name=names_by_code.get(code, quote.name if quote else code),
+                quote=quote,
+                technical=technical,
+            ))
 
         return snapshots
 

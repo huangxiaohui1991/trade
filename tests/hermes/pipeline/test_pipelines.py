@@ -26,8 +26,10 @@ class MockIntradayProvider:
     def __init__(self, quotes=None, klines=None):
         self._quotes = quotes or {}
         self._klines = klines or {}
+        self.realtime_calls = []
 
     async def get_realtime(self, codes):
+        self.realtime_calls.append(list(codes))
         return {c: self._quotes[c] for c in codes if c in self._quotes}
 
     async def get_kline(self, code, period="daily", count=120):
@@ -35,6 +37,33 @@ class MockIntradayProvider:
 
     async def get_index(self, symbols):
         return {}
+
+
+class CountingFinancialProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def get_financial(self, code):
+        self.calls.append(code)
+        return None
+
+
+class CountingFlowProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def get_fund_flow(self, code, days=5):
+        self.calls.append(code)
+        return None
+
+
+class CountingSentimentProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def search_news(self, query):
+        self.calls.append(query)
+        return None
 
 
 @pytest.fixture
@@ -165,6 +194,58 @@ class TestIntradayMonitorPipeline:
 
         assert result["positions"] == 1
         assert [a["signal_type"] for a in result["alerts"]] == ["ma_exit"]
+
+    def test_does_not_collect_scoring_dimensions(self, ctx, monkeypatch):
+        monkeypatch.setattr("hermes.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+        ctx.exec_svc.execute_buy("002261", "拓维信息", 100, 10000, "momentum", "seed")
+        quote = StockQuote(
+            code="002261", name="拓维信息", price=100.0,
+            open=100.0, high=100.0, low=100.0, close=100.0,
+            volume=1000000, amount=100000000, change_pct=0.0,
+        )
+        financial = CountingFinancialProvider()
+        flow = CountingFlowProvider()
+        sentiment = CountingSentimentProvider()
+        ctx.market_svc = MarketService(
+            market_providers=[MockIntradayProvider(quotes={"002261": quote})],
+            financial_providers=[financial],
+            flow_providers=[flow],
+            sentiment_providers=[sentiment],
+            store=MarketStore(ctx.conn),
+        )
+
+        from hermes.pipeline.intraday_monitor import run
+
+        run(ctx, "run_intraday_lightweight")
+
+        assert financial.calls == []
+        assert flow.calls == []
+        assert sentiment.calls == []
+
+    def test_batches_realtime_quotes_for_positions_only(self, ctx, monkeypatch):
+        monkeypatch.setattr("hermes.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+        codes = ["002261", "002138", "000001", "600000"]
+        for code in codes:
+            ctx.exec_svc.execute_buy(code, code, 100, 10000, "momentum", f"seed_{code}")
+        quotes = {
+            code: StockQuote(
+                code=code, name=code, price=100.0,
+                open=100.0, high=100.0, low=100.0, close=100.0,
+                volume=1000000, amount=100000000, change_pct=0.0,
+            )
+            for code in codes
+        }
+        provider = MockIntradayProvider(quotes=quotes)
+        ctx.market_svc = MarketService(
+            market_providers=[provider],
+            store=MarketStore(ctx.conn),
+        )
+
+        from hermes.pipeline.intraday_monitor import run
+
+        run(ctx, "run_intraday_positions_only")
+
+        assert provider.realtime_calls == [codes]
 
 
 class TestWeeklyPipeline:
