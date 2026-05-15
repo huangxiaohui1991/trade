@@ -4,9 +4,9 @@
 
 **Goal:** Build a parallel `short_continuation_v1` research and backtest path that ranks A-share short-term continuation candidates for `T+1` to `T+3` without changing the existing production scorer or auto-trade flow.
 
-**Architecture:** Add a dedicated continuation strategy slice under `src/hermes/strategy/` for qualification filters and scoring, then add a `src/hermes/research/` validation module and a dedicated continuation backtest entry. Keep the feature isolated behind new config keys and a new CLI command so existing scoring, pipelines, and paper trading remain unchanged until validation passes.
+**Architecture:** Add a dedicated continuation strategy slice under `src/astock_trading/strategy/` for qualification filters and scoring, then add a `src/astock_trading/research/` validation module and a dedicated continuation backtest entry. Keep the feature isolated behind new config keys and a new CLI command so existing scoring, pipelines, and paper trading remain unchanged until validation passes.
 
-**Tech Stack:** Python 3.12, pandas, Typer, pytest, existing Hermes market/backtest/config modules
+**Tech Stack:** Python 3.12, pandas, Typer, pytest, existing A-Stock Trading market/backtest/config modules
 
 ---
 
@@ -14,41 +14,41 @@
 
 ### New Files
 
-- `src/hermes/research/__init__.py`
+- `src/astock_trading/research/__init__.py`
   Package marker for research-only modules.
-- `src/hermes/research/continuation_validation.py`
+- `src/astock_trading/research/continuation_validation.py`
   Loads historical bars/snapshots, computes continuation factor metrics, scores candidates, and emits validation reports.
-- `src/hermes/strategy/continuation_models.py`
+- `src/astock_trading/strategy/continuation_models.py`
   Dataclasses for filter config, filter result, factor metrics, score breakdown, and report rows.
-- `src/hermes/strategy/continuation_filters.py`
+- `src/astock_trading/strategy/continuation_filters.py`
   Pure qualification filters for `qualified=true/false`.
-- `src/hermes/strategy/continuation_scorer.py`
+- `src/astock_trading/strategy/continuation_scorer.py`
   Pure factor scorer and overheat penalty calculator for qualified samples.
-- `src/hermes/backtest/continuation_backtest.py`
+- `src/astock_trading/backtest/continuation_backtest.py`
   Runs `Top N` continuation trades with fixed hold windows and execution assumptions.
-- `tests/hermes/strategy/test_continuation_filters.py`
+- `tests/astock_trading/strategy/test_continuation_filters.py`
   Unit tests for qualification and hard filters.
-- `tests/hermes/strategy/test_continuation_scorer.py`
+- `tests/astock_trading/strategy/test_continuation_scorer.py`
   Unit tests for factor scoring and penalty behavior.
-- `tests/hermes/research/test_continuation_validation.py`
+- `tests/astock_trading/research/test_continuation_validation.py`
   Integration-style tests for score buckets, `Top N`, and execution variants.
-- `tests/hermes/backtest/test_continuation_backtest.py`
+- `tests/astock_trading/backtest/test_continuation_backtest.py`
   Backtest behavior tests for hold windows, ranking, and execution assumptions.
 
 ### Modified Files
 
 - `config/strategy.yaml`
   Add `continuation` config for filters, scoring weights, penalty thresholds, validation windows, and backtest defaults.
-- `src/hermes/platform/cli.py`
+- `src/astock_trading/platform/cli.py`
   Add `continuation-validate` and `continuation-backtest` commands.
-- `tests/hermes/platform/test_cli.py`
+- `tests/astock_trading/platform/test_cli.py`
   Add smoke coverage for the new CLI commands.
 - `README.md`
   Document the new research and backtest commands after implementation is complete.
 
 ## Plan Notes
 
-- Do not modify `src/hermes/strategy/scorer.py` or `src/hermes/pipeline/auto_trade.py` in this plan.
+- Do not modify `src/astock_trading/strategy/scorer.py` or `src/astock_trading/pipeline/auto_trade.py` in this plan.
 - Reuse `StockSnapshot` and historical bar structures where possible. Do not fork market models unless a continuation-only view object is clearly simpler.
 - Use TDD for each module. Each implementation task starts from a failing test and ends with the narrowest passing code plus a commit.
 - Keep continuation logic pure and deterministic. The CLI layer is the only place that should handle formatting and user-facing output.
@@ -56,14 +56,14 @@
 ### Task 1: Add continuation config and core dataclasses
 
 **Files:**
-- Create: `src/hermes/strategy/continuation_models.py`
+- Create: `src/astock_trading/strategy/continuation_models.py`
 - Modify: `config/strategy.yaml`
-- Test: `tests/hermes/strategy/test_continuation_scorer.py`
+- Test: `tests/astock_trading/strategy/test_continuation_scorer.py`
 
 - [ ] **Step 1: Write the failing dataclass/config test**
 
 ```python
-from hermes.strategy.continuation_models import (
+from astock_trading.strategy.continuation_models import (
     ContinuationFilterConfig,
     ContinuationScoreConfig,
     ContinuationScoreResult,
@@ -99,13 +99,13 @@ def test_continuation_score_result_computes_total_after_penalty():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/strategy/test_continuation_scorer.py::test_continuation_configs_expose_expected_defaults tests/hermes/strategy/test_continuation_scorer.py::test_continuation_score_result_computes_total_after_penalty -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'hermes.strategy.continuation_models'`
+Run: `pytest tests/astock_trading/strategy/test_continuation_scorer.py::test_continuation_configs_expose_expected_defaults tests/astock_trading/strategy/test_continuation_scorer.py::test_continuation_score_result_computes_total_after_penalty -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'astock_trading.strategy.continuation_models'`
 
 - [ ] **Step 3: Write minimal implementation and config stanza**
 
 ```python
-# src/hermes/strategy/continuation_models.py
+# src/astock_trading/strategy/continuation_models.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -199,28 +199,28 @@ continuation:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/strategy/test_continuation_scorer.py::test_continuation_configs_expose_expected_defaults tests/hermes/strategy/test_continuation_scorer.py::test_continuation_score_result_computes_total_after_penalty -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_scorer.py::test_continuation_configs_expose_expected_defaults tests/astock_trading/strategy/test_continuation_scorer.py::test_continuation_score_result_computes_total_after_penalty -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add config/strategy.yaml src/hermes/strategy/continuation_models.py tests/hermes/strategy/test_continuation_scorer.py
+git add config/strategy.yaml src/astock_trading/strategy/continuation_models.py tests/astock_trading/strategy/test_continuation_scorer.py
 git commit -m "feat: add continuation strategy config models"
 ```
 
 ### Task 2: Implement qualification filters
 
 **Files:**
-- Create: `src/hermes/strategy/continuation_filters.py`
-- Test: `tests/hermes/strategy/test_continuation_filters.py`
+- Create: `src/astock_trading/strategy/continuation_filters.py`
+- Test: `tests/astock_trading/strategy/test_continuation_filters.py`
 
 - [ ] **Step 1: Write the failing filter tests**
 
 ```python
-from hermes.market.models import StockQuote, StockSnapshot, TechnicalIndicators
-from hermes.strategy.continuation_filters import ContinuationQualifier
-from hermes.strategy.continuation_models import ContinuationFilterConfig
+from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
+from astock_trading.strategy.continuation_filters import ContinuationQualifier
+from astock_trading.strategy.continuation_models import ContinuationFilterConfig
 
 
 def _make_snapshot(**overrides):
@@ -284,17 +284,17 @@ def test_qualifier_rejects_deep_intraday_retrace():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/strategy/test_continuation_filters.py -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_filters.py -v`
 Expected: FAIL with `ModuleNotFoundError` or missing `ContinuationQualifier`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/hermes/strategy/continuation_filters.py
+# src/astock_trading/strategy/continuation_filters.py
 from __future__ import annotations
 
-from hermes.market.models import StockSnapshot
-from hermes.strategy.continuation_models import ContinuationFilterConfig, ContinuationFilterResult
+from astock_trading.market.models import StockSnapshot
+from astock_trading.strategy.continuation_models import ContinuationFilterConfig, ContinuationFilterResult
 
 
 class ContinuationQualifier:
@@ -334,30 +334,30 @@ class ContinuationQualifier:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/strategy/test_continuation_filters.py -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_filters.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hermes/strategy/continuation_filters.py tests/hermes/strategy/test_continuation_filters.py
+git add src/astock_trading/strategy/continuation_filters.py tests/astock_trading/strategy/test_continuation_filters.py
 git commit -m "feat: add continuation qualification filters"
 ```
 
 ### Task 3: Implement continuation factor scoring
 
 **Files:**
-- Create: `src/hermes/strategy/continuation_scorer.py`
-- Modify: `src/hermes/strategy/continuation_models.py`
-- Test: `tests/hermes/strategy/test_continuation_scorer.py`
+- Create: `src/astock_trading/strategy/continuation_scorer.py`
+- Modify: `src/astock_trading/strategy/continuation_models.py`
+- Test: `tests/astock_trading/strategy/test_continuation_scorer.py`
 
 - [ ] **Step 1: Write the failing scorer tests**
 
 ```python
-from hermes.market.models import FundFlow, StockQuote, StockSnapshot, TechnicalIndicators
-from hermes.strategy.continuation_models import ContinuationFilterConfig, ContinuationScoreConfig
-from hermes.strategy.continuation_filters import ContinuationQualifier
-from hermes.strategy.continuation_scorer import ContinuationScorer
+from astock_trading.market.models import FundFlow, StockQuote, StockSnapshot, TechnicalIndicators
+from astock_trading.strategy.continuation_models import ContinuationFilterConfig, ContinuationScoreConfig
+from astock_trading.strategy.continuation_filters import ContinuationQualifier
+from astock_trading.strategy.continuation_scorer import ContinuationScorer
 
 
 def _make_snapshot(**overrides):
@@ -431,17 +431,17 @@ def test_scorer_applies_overheat_penalty_to_extended_candidate():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/strategy/test_continuation_scorer.py -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_scorer.py -v`
 Expected: FAIL with missing `ContinuationScorer`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/hermes/strategy/continuation_scorer.py
+# src/astock_trading/strategy/continuation_scorer.py
 from __future__ import annotations
 
-from hermes.market.models import StockSnapshot
-from hermes.strategy.continuation_models import (
+from astock_trading.market.models import StockSnapshot
+from astock_trading.strategy.continuation_models import (
     ContinuationFilterResult,
     ContinuationScoreConfig,
     ContinuationScoreResult,
@@ -492,33 +492,33 @@ class ContinuationScorer:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/strategy/test_continuation_scorer.py -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_scorer.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hermes/strategy/continuation_models.py src/hermes/strategy/continuation_scorer.py tests/hermes/strategy/test_continuation_scorer.py
+git add src/astock_trading/strategy/continuation_models.py src/astock_trading/strategy/continuation_scorer.py tests/astock_trading/strategy/test_continuation_scorer.py
 git commit -m "feat: add continuation factor scorer"
 ```
 
 ### Task 4: Implement research validation reports
 
 **Files:**
-- Create: `src/hermes/research/__init__.py`
-- Create: `src/hermes/research/continuation_validation.py`
-- Test: `tests/hermes/research/test_continuation_validation.py`
+- Create: `src/astock_trading/research/__init__.py`
+- Create: `src/astock_trading/research/continuation_validation.py`
+- Test: `tests/astock_trading/research/test_continuation_validation.py`
 
 - [ ] **Step 1: Write the failing validation tests**
 
 ```python
 import pandas as pd
 
-from hermes.research.continuation_validation import (
+from astock_trading.research.continuation_validation import (
     build_score_bucket_report,
     build_top_n_report,
 )
-from hermes.strategy.continuation_models import ContinuationScoreResult
+from astock_trading.strategy.continuation_models import ContinuationScoreResult
 
 
 def test_score_bucket_report_groups_candidates_by_score():
@@ -557,13 +557,13 @@ def test_top_n_report_aggregates_daily_ranked_returns():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/research/test_continuation_validation.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'hermes.research'`
+Run: `pytest tests/astock_trading/research/test_continuation_validation.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'astock_trading.research'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/hermes/research/continuation_validation.py
+# src/astock_trading/research/continuation_validation.py
 from __future__ import annotations
 
 import pandas as pd
@@ -654,22 +654,22 @@ def run_continuation_validation(codes, start: str, end: str, top_n: int = 3, dat
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/research/test_continuation_validation.py -v`
+Run: `pytest tests/astock_trading/research/test_continuation_validation.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hermes/research/__init__.py src/hermes/research/continuation_validation.py tests/hermes/research/test_continuation_validation.py
+git add src/astock_trading/research/__init__.py src/astock_trading/research/continuation_validation.py tests/astock_trading/research/test_continuation_validation.py
 git commit -m "feat: add continuation validation reports"
 ```
 
 ### Task 5: Add CLI entrypoint for validation
 
 **Files:**
-- Modify: `src/hermes/platform/cli.py`
+- Modify: `src/astock_trading/platform/cli.py`
 - Modify: `config/strategy.yaml`
-- Modify: `tests/hermes/platform/test_cli.py`
+- Modify: `tests/astock_trading/platform/test_cli.py`
 
 - [ ] **Step 1: Write the failing CLI smoke test**
 
@@ -693,13 +693,13 @@ def test_continuation_validate_help_via_bin_trade():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/platform/test_cli.py::test_continuation_validate_help_via_bin_trade -v`
+Run: `pytest tests/astock_trading/platform/test_cli.py::test_continuation_validate_help_via_bin_trade -v`
 Expected: FAIL with `No such command 'continuation-validate'`
 
 - [ ] **Step 3: Write minimal CLI implementation**
 
 ```python
-# src/hermes/platform/cli.py
+# src/astock_trading/platform/cli.py
 @app.command("continuation-validate")
 def continuation_validate_cmd(
     codes: str = typer.Argument(..., help="逗号分隔股票代码"),
@@ -709,7 +709,7 @@ def continuation_validate_cmd(
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """运行短线续涨评分验证并输出分层和 Top N 报告。"""
-    from hermes.research.continuation_validation import run_continuation_validation
+    from astock_trading.research.continuation_validation import run_continuation_validation
 
     result = run_continuation_validation(
         codes=[c.strip() for c in codes.split(",") if c.strip()],
@@ -737,23 +737,23 @@ continuation:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/platform/test_cli.py::test_continuation_validate_help_via_bin_trade -v`
+Run: `pytest tests/astock_trading/platform/test_cli.py::test_continuation_validate_help_via_bin_trade -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add config/strategy.yaml src/hermes/platform/cli.py tests/hermes/platform/test_cli.py
+git add config/strategy.yaml src/astock_trading/platform/cli.py tests/astock_trading/platform/test_cli.py
 git commit -m "feat: add continuation validation cli"
 ```
 
 ### Task 6: Implement executable validation workflow
 
 **Files:**
-- Modify: `src/hermes/research/continuation_validation.py`
-- Modify: `src/hermes/strategy/continuation_filters.py`
-- Modify: `src/hermes/strategy/continuation_scorer.py`
-- Test: `tests/hermes/research/test_continuation_validation.py`
+- Modify: `src/astock_trading/research/continuation_validation.py`
+- Modify: `src/astock_trading/strategy/continuation_filters.py`
+- Modify: `src/astock_trading/strategy/continuation_scorer.py`
+- Test: `tests/astock_trading/research/test_continuation_validation.py`
 
 - [ ] **Step 1: Write the failing workflow test**
 
@@ -775,7 +775,7 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/research/test_continuation_validation.py::test_run_continuation_validation_returns_bucket_and_top_n_sections -v`
+Run: `pytest tests/astock_trading/research/test_continuation_validation.py::test_run_continuation_validation_returns_bucket_and_top_n_sections -v`
 Expected: FAIL with `NameError: run_continuation_validation is not defined`
 
 - [ ] **Step 3: Write minimal workflow implementation**
@@ -853,27 +853,27 @@ def _load_ranked_forward_returns(codes, start: str, end: str, data_dir=None) -> 
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/research/test_continuation_validation.py -v`
+Run: `pytest tests/astock_trading/research/test_continuation_validation.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hermes/research/continuation_validation.py src/hermes/strategy/continuation_filters.py src/hermes/strategy/continuation_scorer.py tests/hermes/research/test_continuation_validation.py
+git add src/astock_trading/research/continuation_validation.py src/astock_trading/strategy/continuation_filters.py src/astock_trading/strategy/continuation_scorer.py tests/astock_trading/research/test_continuation_validation.py
 git commit -m "feat: wire continuation validation workflow"
 ```
 
 ### Task 7: Add continuation backtest module
 
 **Files:**
-- Create: `src/hermes/backtest/continuation_backtest.py`
-- Modify: `src/hermes/platform/cli.py`
-- Test: `tests/hermes/backtest/test_continuation_backtest.py`
+- Create: `src/astock_trading/backtest/continuation_backtest.py`
+- Modify: `src/astock_trading/platform/cli.py`
+- Test: `tests/astock_trading/backtest/test_continuation_backtest.py`
 
 - [ ] **Step 1: Write the failing backtest tests**
 
 ```python
-from hermes.backtest.continuation_backtest import run_continuation_backtest
+from astock_trading.backtest.continuation_backtest import run_continuation_backtest
 
 
 def test_continuation_backtest_returns_hold_window_metrics(tmp_path):
@@ -894,13 +894,13 @@ def test_continuation_backtest_returns_hold_window_metrics(tmp_path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/hermes/backtest/test_continuation_backtest.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'hermes.backtest.continuation_backtest'`
+Run: `pytest tests/astock_trading/backtest/test_continuation_backtest.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'astock_trading.backtest.continuation_backtest'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/hermes/backtest/continuation_backtest.py
+# src/astock_trading/backtest/continuation_backtest.py
 from __future__ import annotations
 
 
@@ -933,7 +933,7 @@ def _simulate_ranked_trades(codes, start: str, end: str, hold_days: int, top_n: 
 ```
 
 ```python
-# src/hermes/platform/cli.py
+# src/astock_trading/platform/cli.py
 @app.command("continuation-backtest")
 def continuation_backtest_cmd(
     codes: str = typer.Argument(..., help="逗号分隔股票代码"),
@@ -947,13 +947,13 @@ def continuation_backtest_cmd(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/hermes/backtest/test_continuation_backtest.py -v`
+Run: `pytest tests/astock_trading/backtest/test_continuation_backtest.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hermes/backtest/continuation_backtest.py src/hermes/platform/cli.py tests/hermes/backtest/test_continuation_backtest.py
+git add src/astock_trading/backtest/continuation_backtest.py src/astock_trading/platform/cli.py tests/astock_trading/backtest/test_continuation_backtest.py
 git commit -m "feat: add continuation backtest entrypoint"
 ```
 
@@ -961,11 +961,11 @@ git commit -m "feat: add continuation backtest entrypoint"
 
 **Files:**
 - Modify: `README.md`
-- Modify: `tests/hermes/platform/test_cli.py`
-- Modify: `tests/hermes/strategy/test_continuation_filters.py`
-- Modify: `tests/hermes/strategy/test_continuation_scorer.py`
-- Modify: `tests/hermes/research/test_continuation_validation.py`
-- Modify: `tests/hermes/backtest/test_continuation_backtest.py`
+- Modify: `tests/astock_trading/platform/test_cli.py`
+- Modify: `tests/astock_trading/strategy/test_continuation_filters.py`
+- Modify: `tests/astock_trading/strategy/test_continuation_scorer.py`
+- Modify: `tests/astock_trading/research/test_continuation_validation.py`
+- Modify: `tests/astock_trading/backtest/test_continuation_backtest.py`
 
 - [ ] **Step 1: Write the final smoke/documentation test updates**
 
@@ -994,12 +994,12 @@ def test_continuation_backtest_help_via_bin_trade():
 
 - [ ] **Step 2: Run the full targeted test suite**
 
-Run: `pytest tests/hermes/strategy/test_continuation_filters.py tests/hermes/strategy/test_continuation_scorer.py tests/hermes/research/test_continuation_validation.py tests/hermes/backtest/test_continuation_backtest.py tests/hermes/platform/test_cli.py -v`
+Run: `pytest tests/astock_trading/strategy/test_continuation_filters.py tests/astock_trading/strategy/test_continuation_scorer.py tests/astock_trading/research/test_continuation_validation.py tests/astock_trading/backtest/test_continuation_backtest.py tests/astock_trading/platform/test_cli.py -v`
 Expected: PASS
 
 - [ ] **Step 3: Run the broader regression suite**
 
-Run: `pytest tests/hermes/strategy/test_scorer.py tests/hermes/platform/test_cli.py tests/hermes/test_e2e_flow.py -v`
+Run: `pytest tests/astock_trading/strategy/test_scorer.py tests/astock_trading/platform/test_cli.py tests/astock_trading/test_e2e_flow.py -v`
 Expected: PASS and no regressions in existing scorer or CLI flows
 
 - [ ] **Step 4: Update README and verify commands manually**
@@ -1013,7 +1013,7 @@ Expected: human-readable summary containing total return, win rate, and trade co
 - [ ] **Step 5: Commit**
 
 ```bash
-git add README.md tests/hermes/platform/test_cli.py tests/hermes/strategy/test_continuation_filters.py tests/hermes/strategy/test_continuation_scorer.py tests/hermes/research/test_continuation_validation.py tests/hermes/backtest/test_continuation_backtest.py
+git add README.md tests/astock_trading/platform/test_cli.py tests/astock_trading/strategy/test_continuation_filters.py tests/astock_trading/strategy/test_continuation_scorer.py tests/astock_trading/research/test_continuation_validation.py tests/astock_trading/backtest/test_continuation_backtest.py
 git commit -m "docs: document continuation validation workflow"
 ```
 

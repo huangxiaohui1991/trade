@@ -2,7 +2,7 @@
 
 ## 1. 背景与目标
 
-当前 Hermes 的评分体系位于 [src/hermes/strategy/scorer.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/strategy/scorer.py:1)，属于面向通用候选池的四维综合评分。该体系覆盖技术面、基本面、资金流和舆情，适合中频筛选和波段风格判断，但不适合回答以下核心问题：
+当前 A-Stock Trading 的评分体系位于 `src/astock_trading/strategy/scorer.py`，属于面向通用候选池的四维综合评分。该体系覆盖技术面、基本面、资金流和舆情，适合中频筛选和波段风格判断，但不适合回答以下核心问题：
 
 - 哪些股票在 `T+1` 到 `T+3` 最可能延续强势
 - 哪些“昨天看起来很强”的股票次日其实容易分歧、回落或不可执行
@@ -40,7 +40,7 @@
 
 ### 2.3 研究先于执行
 
-第一阶段只建设研究和验证能力，不直接改写现有 [src/hermes/pipeline/scoring.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/pipeline/scoring.py:1) 或 [src/hermes/pipeline/auto_trade.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/pipeline/auto_trade.py:1)。只有在以下条件满足后，才进入交易回测和执行接入：
+第一阶段只建设研究和验证能力，不直接改写现有 `src/astock_trading/pipeline/scoring.py` 或 `src/astock_trading/pipeline/auto_trade.py`。只有在以下条件满足后，才进入交易回测和执行接入：
 
 - 高分层对 `T+1/T+2/T+3` 胜率有显著区分力
 - 每日 `Top 1-3` 明显优于更宽的 `Top 5-10`
@@ -50,7 +50,7 @@
 
 ### 3.1 当前评分与目标错位
 
-现有 [src/hermes/strategy/scorer.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/strategy/scorer.py:1) 有以下特征：
+现有 `src/astock_trading/strategy/scorer.py` 有以下特征：
 
 - 技术因子偏中频：`golden_cross`、`ma20/ma60`、`momentum_5d`
 - 基本面和舆情权重较高
@@ -61,7 +61,7 @@
 
 ### 3.2 当前决策层过于统一
 
-现有 [src/hermes/strategy/decider.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/strategy/decider.py:1) 基于统一阈值决定 `BUY/WATCH/CLEAR`。该模式默认“总分足够高即可买入”，不区分策略风格，也没有对短线过热、不可执行、过度加速等问题做专门压制，不符合胜率优先的短线续涨思路。
+现有 `src/astock_trading/strategy/decider.py` 基于统一阈值决定 `BUY/WATCH/CLEAR`。该模式默认“总分足够高即可买入”，不区分策略风格，也没有对短线过热、不可执行、过度加速等问题做专门压制，不符合胜率优先的短线续涨思路。
 
 ## 4. 目标策略结构
 
@@ -205,36 +205,36 @@
 
 ### 6.1 新增模块
 
-- `src/hermes/strategy/continuation_models.py`
+- `src/astock_trading/strategy/continuation_models.py`
   定义资格筛选结果、续涨维度分数、惩罚项、最终评分结果等模型。
 
-- `src/hermes/strategy/continuation_filters.py`
+- `src/astock_trading/strategy/continuation_filters.py`
   封装资格筛选逻辑与硬过滤规则。
 
-- `src/hermes/strategy/continuation_scorer.py`
+- `src/astock_trading/strategy/continuation_scorer.py`
   负责对合格样本计算各维度分数和总分。
 
-- `src/hermes/research/continuation_validation.py`
+- `src/astock_trading/research/continuation_validation.py`
   负责历史样本验证、分层分析、因子拆解和输出报告。
 
-- `src/hermes/backtest/continuation_backtest.py`
+- `src/astock_trading/backtest/continuation_backtest.py`
   在验证通过后，用真实可执行买入口径回测 `Top N` 样本的交易表现。
 
 ### 6.2 复用现有模块
 
 以下模块应优先复用：
 
-- [src/hermes/market/models.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/market/models.py:1)
-- [src/hermes/backtest/engine.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/backtest/engine.py:1)
-- [src/hermes/platform/config.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/platform/config.py:1)
-- [src/hermes/platform/cli.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/platform/cli.py:1)
+- `src/astock_trading/market/models.py`
+- `src/astock_trading/backtest/engine.py`
+- `src/astock_trading/platform/config.py`
+- `src/astock_trading/platform/cli.py`
 
 ### 6.3 与现有 pipeline 的关系
 
 第一阶段不直接改动：
 
-- [src/hermes/pipeline/scoring.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/pipeline/scoring.py:1)
-- [src/hermes/pipeline/auto_trade.py](/Users/huangxiaohui/Documents/workspace/trade/src/hermes/pipeline/auto_trade.py:1)
+- `src/astock_trading/pipeline/scoring.py`
+- `src/astock_trading/pipeline/auto_trade.py`
 
 接入顺序必须是：
 

@@ -9,4 +9,4 @@ if [ ! -f "$PYTHON" ]; then
     exit 1
 fi
 
-PYTHONPATH="$REPO_ROOT/src:$REPO_ROOT" exec "$PYTHON" -m hermes.platform.cli "$@"
+PYTHONPATH="$REPO_ROOT/src:$REPO_ROOT" exec "$PYTHON" -m astock_trading.platform.cli "$@"

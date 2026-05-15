@@ -1,0 +1,64 @@
+"""Typer CLI entrypoint."""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import typer
+
+from astock_trading.platform.cli.agent import register_agent_context
+from astock_trading.platform.cli.config import config_app
+from astock_trading.platform.cli.data_sources import data_sources_app, register_check_data_sources
+from astock_trading.platform.cli.db import db_app
+from astock_trading.platform.cli.events import events_app
+from astock_trading.platform.cli.health import register_health_commands
+from astock_trading.platform.cli.manual_trades import manual_trades_app
+from astock_trading.platform.cli.market_data import register_market_data_commands
+from astock_trading.platform.cli.paper import paper_app
+from astock_trading.platform.cli.pipelines import register_pipeline_commands
+from astock_trading.platform.cli.research import register_research_commands
+from astock_trading.platform.cli.runs import runs_app
+from astock_trading.platform.cli.trading import register_trading_commands
+from astock_trading.platform.database import MissingDatabaseUrl
+
+
+app = typer.Typer(name="trade", help="A-Stock Trading 交易系统 CLI")
+
+app.add_typer(db_app)
+app.add_typer(config_app)
+app.add_typer(runs_app)
+app.add_typer(events_app)
+app.add_typer(data_sources_app)
+app.add_typer(manual_trades_app)
+app.add_typer(paper_app)
+register_agent_context(app)
+register_health_commands(app)
+register_market_data_commands(app)
+register_check_data_sources(app)
+register_pipeline_commands(app)
+register_research_commands(app)
+register_trading_commands(app)
+
+
+@app.command("mcp")
+def run_mcp():
+    """启动 MCP Server（stdio transport）"""
+    from astock_trading.platform.mcp_server import main as mcp_main
+
+    mcp_main()
+
+
+def main():
+    try:
+        app(prog_name="bin/trade")
+    except MissingDatabaseUrl as exc:
+        if "--json" in sys.argv:
+            typer.echo(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            typer.secho(str(exc), fg="red")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

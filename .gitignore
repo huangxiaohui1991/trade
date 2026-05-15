@@ -11,8 +11,10 @@ __pycache__/
 miaoxiang/
 筛选结果/
 cron.log
+logs/
 data/runtime/
 data/cache/
+data/mx_output/
 data/runs/
 data/locks/
 data/ledger/
@@ -25,6 +27,7 @@ venv/
 # Obsidian config（本地配置）
 trade-vault/.obsidian/
 .obsidian/
-data/hermes.db-shm
-data/hermes.db-wal
-src/hermes_trade.egg-info/
+data/astock_trading.db-shm
+data/astock_trading.db-wal
+data/backups/
+src/astock_trading.egg-info/

@@ -9,7 +9,7 @@ CLI (typer) / MCP Server (FastMCP stdio)
 ┌────────────────────────────────────────────────────────┐
 │                    platform                             │
 │  EventStore · ConfigRegistry · RunJournal · CLI · MCP   │
-│                    SQLite Event Kernel                   │
+│                    MySQL Event Kernel                    │
 │  event_log · config_versions · run_log                  │
 └────────────────────────┬───────────────────────────────┘
                          │
@@ -48,12 +48,12 @@ CLI (typer) / MCP Server (FastMCP stdio)
 
 | Context | 职责 | IO |
 |---------|------|----|
-| platform | DB、config 版本、run lifecycle、事件分发、CLI/MCP | SQLite |
+| platform | DB、config 版本、run lifecycle、事件分发、CLI/MCP | MySQL / SQLAlchemy |
 | market | 行情/财报/资金流/舆情抓取与标准化 | AkShare/MX HTTP |
 | strategy | 评分、决策、风格分类、择时 | 无（纯函数） |
 | risk | 止损/止盈/仓位 sizing/组合风控 | 无（纯函数） |
-| execution | 订单、持仓、投影重建 | SQLite |
-| reporting | 报告生成、Obsidian/Discord 投影 | SQLite + 文件 |
+| execution | 订单、持仓、投影重建 | MySQL |
+| reporting | 报告生成、Obsidian/Discord 投影 | MySQL + 文件 |
 
 ## 核心运行链路
 
@@ -71,13 +71,15 @@ CLI (typer) / MCP Server (FastMCP stdio)
 ## 目录结构
 
 ```
-src/hermes/
+src/astock_trading/
 ├── platform/
-│   ├── db.py              # SQLite 连接、schema、WAL
+│   ├── database.py        # ASTOCK_DATABASE_URL / SQLAlchemy engine
+│   ├── schema.py          # SQLAlchemy Core schema
+│   ├── db.py              # runtime connect/init + legacy migration helpers
 │   ├── events.py          # EventStore (append-only)
 │   ├── config.py          # ConfigRegistry (版本化 freeze)
 │   ├── runs.py            # RunJournal (幂等 lifecycle)
-│   ├── cli.py             # typer CLI
+│   ├── cli/               # typer CLI command modules
 │   └── mcp_server.py      # FastMCP Server (13 tools)
 ├── market/
 │   ├── models.py          # StockQuote, TechnicalIndicators, StockSnapshot, ...
@@ -108,7 +110,7 @@ src/hermes/
     ├── obsidian.py        # ObsidianProjector (vault 投影)
     └── discord.py         # Discord embed 格式化
 
-tests/hermes/
+tests/astock_trading/
 ├── platform/              # EventStore, Config, Runs, MCP tools
 ├── strategy/              # Scorer, Decider, Classifier, Timer, StrategyService
 ├── risk/                  # Rules, Sizing, RiskService
@@ -142,3 +144,5 @@ tests/hermes/
 - 金额字段用 _cents 整数
 - 每次 run 冻结 config_version + run_id
 - reporting/ 不反写业务表
+- Runtime 只通过 `ASTOCK_DATABASE_URL` 连接 MySQL
+- SQLite 只用于测试替身和 `migrate-sqlite-to-mysql` 的历史源读取
