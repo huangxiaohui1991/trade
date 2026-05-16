@@ -1,20 +1,30 @@
 strategy:
   scoring:
+    weights:
+      technical: 4.0
+      fundamental: 2.5
+      flow: 3.0
+      sentiment: 0.5
     thresholds:
-      buy: 5.8
+      buy: 6.0
       watch: 5.0
       reject: 4.0
     decision_gates:
       require_entry_signal_for_buy: true
-      min_data_quality_for_buy: degraded
-      max_missing_fields_for_buy: 1
+      min_data_quality_for_buy: ok
+      max_missing_fields_for_buy: 0
       critical_missing_fields_for_buy: []
       min_position_pct_for_buy: 0.01
+  screening:
+    market_scan_limit: 300
   pool_management:
-    promote_min_score: 5.8
+    promote_min_score: 6.0
     promote_streak_days: 2
     watch_min_score: 5.0
     demote_max_score: 5.0
     demote_streak_days: 2
     remove_max_score: 4.0
     remove_streak_days: 2
+  auto_trade:
+    enabled: true
+    dry_run: true

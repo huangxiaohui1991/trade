@@ -83,6 +83,12 @@ def _pool_thresholds(ctx) -> dict[str, float]:
     }
 
 
+def _scan_limit(cfg: dict, explicit_limit: Optional[int]) -> int:
+    if explicit_limit is not None:
+        return explicit_limit
+    return int(cfg.get("market_scan_limit") or 30)
+
+
 def _add_watch_candidates(ctx, scores: list[dict], threshold: float, run_id: str) -> list[dict]:
     existing = {
         row["code"]
@@ -243,7 +249,7 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
 
 def _run_screener(
     query: str,
-    limit: int,
+    limit: Optional[int],
     watch_threshold: Optional[float],
     as_json: bool,
     *,
@@ -255,13 +261,14 @@ def _run_screener(
         q = query.strip() or cfg.get("mx_query", "")
         if not q:
             raise typer.BadParameter("screener run requires --query or strategy.screening.mx_query")
+        score_limit = _scan_limit(cfg, limit)
 
         raw_results = asyncio.run(MXScreenerAdapter().search_stocks(q))
         stock_list = [
             {"code": row.get("code") or row.get("代码", ""), "name": row.get("name") or row.get("名称", "")}
             for row in raw_results
             if row.get("code") or row.get("代码")
-        ][:limit]
+        ][:score_limit]
         if not stock_list:
             payload = {"query": q, "screened": len(raw_results), "scored": [], "added_to_watch": []}
             json_or_text(payload, as_json)
@@ -304,7 +311,7 @@ def _run_screener(
 @screener_app.command("run")
 def screener_run(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
-    limit: int = typer.Option(30, "--limit", help="最多评分数量"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.market_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
@@ -315,7 +322,7 @@ def screener_run(
 @screener_app.command("refresh")
 def screener_refresh(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
-    limit: int = typer.Option(30, "--limit", help="最多评分数量"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.market_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):

@@ -6,17 +6,19 @@
 # 第一步：粗筛与排雷（每日盘后）
 # ---------------------------------------------------------------------------
 screening:
-  mx_query: "站上20日均线，ROE大于8%，成交额超5000万，股价5-200元，市盈率TTM低于100，剔除ST"
+  mx_query: "站上20日均线，股价5元到200元，上市天数大于60天，非ST，今日未涨停，近20日平均成交额大于5000万元，市值大于50亿元"
   mx_select_type: "A股"
-  market_scan_limit: 30
+  market_scan_limit: 300
   candidate_cache_ttl_hours: 24
   fallback_filters:
     min_price: 5
     max_price: 200
     min_amount: 50000000       # 5000万（原1亿，放宽）
-    max_pe_ttm: 100            # PE(TTM) > 100 或负数剔除
+    min_market_cap: 5000000000 # 50亿
+    min_listed_days: 60
+    exclude_limit_up: true
     exclude_st: true
-    ma20_trend_up: true        # 新增：MA20 趋势向下的直接剔除
+    above_ma20: true
 
 # ---------------------------------------------------------------------------
 # 第二步：入场触发信号
@@ -158,20 +160,20 @@ style_switch:
 # ---------------------------------------------------------------------------
 scoring:
   weights:
-    technical: 3      # 技术信号权重提升（金叉/量比/RSI 更重要了）
-    fundamental: 2    # 基本面权重下调（粗筛已过滤）
-    flow: 2           # 资金
-    sentiment: 3      # 舆情
+    technical: 4.0    # 技术信号为主（金叉/量比/RSI/趋势确认）
+    fundamental: 2.5  # 基本面保留过滤后的质量分
+    flow: 3.0         # 资金面提高为主要确认项
+    sentiment: 0.5    # 舆情仅作置信修正，避免放大噪声
 
   thresholds:
-    buy: 5.5    # 下调：让更多候选进入核心池
+    buy: 6.0
     watch: 5
     reject: 4
 
   decision_gates:
     require_entry_signal_for_buy: true
-    min_data_quality_for_buy: degraded
-    max_missing_fields_for_buy: 1
+    min_data_quality_for_buy: ok
+    max_missing_fields_for_buy: 0
     critical_missing_fields_for_buy: []
     min_position_pct_for_buy: 0.01
 
@@ -196,7 +198,7 @@ market_timer:
 # ---------------------------------------------------------------------------
 pool_management:
   watch_min_score: 5
-  promote_min_score: 5.5   # 与 thresholds.buy: 5.5 保持一致
+  promote_min_score: 6.0   # 与 thresholds.buy 保持一致
   promote_streak_days: 2
   demote_max_score: 5
   demote_streak_days: 2
@@ -277,8 +279,8 @@ backtest_presets:
 # 模拟盘自动交易
 # ---------------------------------------------------------------------------
 auto_trade:
-  enabled: true                # 正式开启
-  dry_run: false               # 真实交易
+  enabled: true                # 自动交易流程保留开启，但默认只试运行
+  dry_run: true                # 未完成样本外验证前不触发真实交易
   max_daily_trades: 4          # 单日最大交易次数（买+卖）
   sell_urgency: immediate      # 自动卖出的风控级别（immediate / end_of_day / advisory）
   # 买入时间窗口（避免尾盘波动）

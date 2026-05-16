@@ -9,11 +9,19 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from astock_trading.platform.cli.screener import _scan_limit
+
 
 def _cli_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
     env["ASTOCK_DATABASE_URL"] = f"sqlite:///{tmp_path / 'runtime.db'}"
     return env
+
+
+def test_screener_limit_defaults_to_configured_market_scan_limit():
+    assert _scan_limit({"market_scan_limit": 300}, None) == 300
+    assert _scan_limit({"market_scan_limit": 300}, 25) == 25
+    assert _scan_limit({}, None) == 30
 
 
 def test_doctor_json_via_bin_trade(tmp_path):
