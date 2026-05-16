@@ -2,6 +2,31 @@
 
 Agents must operate this project through stable command surfaces only.
 
+## Language and presentation
+
+中文是本项目的默认面向用户语言。新增或修改代码、注释、文档、报告模板、
+Discord 推送、Obsidian 输出和 agent-facing 说明时，优先使用简体中文。
+
+Python/JSON 字段名、枚举值、数据库字段、CLI 参数、环境变量、第三方 API 名称、
+测试断言中的协议值可以保留英文；但凡是给用户或运营人员看的标题、说明、
+注释、报告正文和错误解释，应写成中文。
+
+Discord、Obsidian 和其他人读报告里不要直接展示内部信号名，除非它本身是
+协议字段。常见内部值应转义为中文展示，例如：
+
+- `BUY` → `买入意向`
+- `SELL` → `卖出意向`
+- `WATCH` → `观察`
+- `NO_TRADE` → `不操作`
+- `GREEN` → `偏强`
+- `YELLOW` → `震荡`
+- `RED` → `转弱`
+- `CLEAR` → `观望`
+- `entry_signal` → `入场信号`
+- `veto` / `hard_veto` → `否决`
+- `warning_signals` → `预警信号`
+- `data_quality` → `数据质量`
+
 Allowed entrypoints:
 
 - `atrade ...`

@@ -34,6 +34,33 @@ COLORS = {
 
 SIGNAL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}
 SIGNAL_CN = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
+ACTION_CN = {
+    "BUY": "买入意向",
+    "SELL": "卖出意向",
+    "WATCH": "观察",
+    "CLEAR": "清仓",
+    "BUY_ALLOWED": "可买入",
+    "REDUCED_BUY": "减量买入",
+    "NO_TRADE": "不操作",
+}
+STATUS_CN = {
+    "ok": "正常",
+    "warning": "警告",
+    "failed": "失败",
+    "error": "错误",
+    "running": "运行中",
+    "unknown": "未知",
+    "degraded": "降级",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+DATA_QUALITY_CN = {
+    "ok": "正常",
+    "degraded": "降级",
+    "error": "错误",
+    "-": "-",
+}
 
 SIGNAL_TYPE_CN = {
     "stop_loss": "止损",
@@ -47,6 +74,36 @@ URGENCY_CN = {
     "immediate": "立即处理",
     "end_of_day": "收盘前处理",
     "advisory": "提醒",
+}
+INTERNAL_LABEL_CN = {
+    "above_ma20": "站上 MA20",
+    "below_ma20": "跌破 MA20",
+    "limit_up_today": "当日涨停",
+    "consecutive_outflow": "连续资金流出",
+    "consecutive_outflow_warn": "连续资金流出预警",
+    "ma20_trend_down": "MA20 趋势下行",
+    "turnover_spike": "换手异常放大",
+    "requires_entry_strategy_route": "缺少有效策略路线",
+    "entry_signal": "入场信号",
+    "hard_veto": "硬否决",
+    "warning_signals": "预警信号",
+    "data_quality": "数据质量",
+    "data_missing_fields": "缺失数据字段",
+    "required_missing": "核心源缺失",
+    "optional_missing": "辅助源缺失",
+    "core_pool": "核心池",
+    "candidate_pool_freshness": "候选池新鲜度",
+    "industry_comparison": "行业对比",
+    "financial": "财务数据",
+    "announcements": "公告",
+    "research_reports": "研报",
+    "news": "新闻",
+    "hot_stocks": "热股",
+    "northbound_realtime": "北向实时资金",
+    "baidu_fund_flow": "百度资金流",
+    "review_core_pool": "复核核心池",
+    "candidate core pool is empty": "核心候选池为空",
+    "auto_trade buy-side requires fresh core candidates": "模拟买入侧需要新鲜核心候选",
 }
 MAX_EMBED_FIELDS = 25
 
@@ -80,6 +137,41 @@ def _score_emoji(score: float) -> str:
 
 def _pnl_emoji(v: float) -> str:
     return "🟢" if v >= 0 else "🔴"
+
+
+def _label_cn(value: object) -> str:
+    text = str(value or "")
+    return (
+        ACTION_CN.get(text)
+        or SIGNAL_CN.get(text)
+        or STATUS_CN.get(text)
+        or DATA_QUALITY_CN.get(text)
+        or SIGNAL_TYPE_CN.get(text)
+        or INTERNAL_LABEL_CN.get(text)
+        or text
+    )
+
+
+def _labels_cn(values: list | tuple | set) -> str:
+    return ",".join(_label_cn(item) for item in values) or "-"
+
+
+def _finding_cn(value: object) -> str:
+    text = str(value)
+    replacements = {
+        "hard veto triggered:": "触发硬否决：",
+        "warning signals:": "预警信号：",
+        "entry signal not triggered": "入场信号未触发",
+        "missing data fields:": "缺失数据字段：",
+        "market gate ok": "大盘门控通过",
+        "candidate core pool is empty": "核心候选池为空",
+        "auto_trade buy-side requires fresh core candidates": "模拟买入侧需要新鲜核心候选",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    for source, target in INTERNAL_LABEL_CN.items():
+        text = text.replace(source, target)
+    return text
 
 
 def _append_market_intel_fields(fields: list[dict], data: dict) -> None:
@@ -325,10 +417,7 @@ def _score_blocker_summary(score: dict) -> str:
     if "requires_entry_strategy_route" in note:
         blockers.add("requires_entry_strategy_route")
 
-    labels = {
-        "requires_entry_strategy_route": "缺少有效策略路线",
-    }
-    parts = [labels.get(item, item) for item in blockers]
+    parts = [_label_cn(item) for item in blockers]
     return "阻断 " + " / ".join(parts) if parts else ""
 
 
@@ -344,17 +433,19 @@ def format_manual_confirmation_embed(analysis: dict) -> dict:
     decision = analysis.get("decision", {}) or {}
 
     action = str(decision.get("action", "WATCH") or "WATCH")
+    action_cn = _label_cn(action)
     confidence = _to_float(decision.get("confidence", decision.get("score")))
     position_pct = _to_float(decision.get("position_pct"))
     market_signal = decision.get("market_signal") or (analysis.get("market", {}) or {}).get("signal", "-")
+    market_signal_cn = _label_cn(market_signal)
     total_score = _to_float(score.get("total_score", score.get("total")))
-    data_quality = score.get("data_quality", "-")
+    data_quality = _label_cn(score.get("data_quality", "-"))
 
     fields = [
         _field(
             "核心结论",
             "\n".join([
-                f"动作 `{action}` · 市场 `{market_signal}`",
+                f"动作 **{action_cn}** · 市场 **{_signal_tag(market_signal, market_signal_cn)}**",
                 f"置信度 `{confidence:.1f}` · 不自动下单",
                 "需人工确认后才允许记录成交",
             ]),
@@ -362,7 +453,7 @@ def format_manual_confirmation_embed(analysis: dict) -> dict:
         ),
         _field(
             "评分",
-            f"总分 **{total_score:.1f}** · data={data_quality}\n{_dimension_summary(score)}",
+            f"总分 **{total_score:.1f}** · 数据质量：{data_quality}\n{_dimension_summary(score)}",
             inline=False,
         ),
         _field(
@@ -402,11 +493,16 @@ def format_manual_confirmation_embed(analysis: dict) -> dict:
 
     return _embed(
         title=f"人工确认 — {local_today_str()}",
-        description=f"{label} · {action} · 不自动下单",
+        description=f"{label} · {action_cn} · 不自动下单",
         color=COLORS["manual_confirmation"],
         fields=fields,
         footer="A-Stock Trading · manual_confirmation",
     )
+
+
+def _signal_tag(raw: object, label: str) -> str:
+    emoji = SIGNAL_EMOJI.get(str(raw), "")
+    return f"{emoji} {label}".strip()
 
 
 def _to_float(value: object, default: float = 0.0) -> float:
@@ -489,16 +585,16 @@ def _trend_route_lines(score: dict, technical: dict, quote: dict) -> list[str]:
 def _risk_lines(analysis: dict, score: dict, decision: dict) -> list[str]:
     lines: list[str] = []
     for item in score.get("hard_veto", []) or []:
-        lines.append(f"硬否决: {item}")
+        lines.append(f"硬否决：{_label_cn(item)}")
     for item in decision.get("veto_reasons", []) or []:
-        lines.append(f"门控: {item}")
+        lines.append(f"门控：{_label_cn(item)}")
     for item in score.get("warning_signals", []) or []:
-        lines.append(f"预警: {item}")
+        lines.append(f"预警：{_label_cn(item)}")
     for item in analysis.get("findings", []) or []:
         if "warning" in str(item).lower() or "risk" in str(item).lower() or "veto" in str(item).lower():
-            lines.append(str(item))
+            lines.append(_finding_cn(item))
     for item in decision.get("notes", []) or []:
-        lines.append(str(item))
+        lines.append(_finding_cn(item))
     return lines[:6]
 
 
@@ -761,11 +857,14 @@ def format_propose_plan_embed(plan: dict) -> dict:
         _field("执行状态", execution_text),
         _field(
             "健康状态",
-            f"{diagnostics.get('status', 'unknown')} / data={data_sources.get('status', 'unknown')}",
+            "诊断={diagnostics} / 数据源={data_sources}".format(
+                diagnostics=_label_cn(diagnostics.get("status", "unknown")),
+                data_sources=_label_cn(data_sources.get("status", "unknown")),
+            ),
         ),
         _field(
             "候选池",
-            "total={total} core={core} watch={watch}\nlatest={latest}".format(
+            "总数={total} 核心={core} 观察={watch}\n最近评分={latest}".format(
                 total=pool.get("total", 0),
                 core=pool.get("core_count", 0),
                 watch=pool.get("watch_count", 0),
@@ -776,11 +875,11 @@ def format_propose_plan_embed(plan: dict) -> dict:
     ]
 
     if findings:
-        fields.append(_field("阻断/发现", "\n".join(f"- {item}" for item in findings[:5]), inline=False))
+        fields.append(_field("阻断/发现", "\n".join(f"- {_finding_cn(item)}" for item in findings[:5]), inline=False))
 
     if actions:
         action_lines = [
-            f"- [{item.get('priority', '-')}] {item.get('type', '-')}：{item.get('reason', '')}"
+            f"- [{_label_cn(item.get('priority', '-'))}] {_label_cn(item.get('type', '-'))}：{_finding_cn(item.get('reason', ''))}"
             for item in actions[:5]
         ]
         fields.append(_field("建议动作", "\n".join(action_lines), inline=False))
@@ -792,7 +891,7 @@ def format_propose_plan_embed(plan: dict) -> dict:
     if required_missing or optional_missing:
         fields.append(_field(
             "数据源缺口",
-            f"required={','.join(required_missing) or '-'}\noptional={','.join(optional_missing) or '-'}",
+            f"核心源={_labels_cn(required_missing)}\n辅助源={_labels_cn(optional_missing)}",
             inline=False,
         ))
 
@@ -824,30 +923,30 @@ def format_daily_inspection_embed(summary: dict) -> dict:
         _field(
             "系统状态",
             "doctor={doctor}\nhealth={health}\ndiagnose={diagnose}".format(
-                doctor=summary.get("doctor_status", "unknown"),
-                health=summary.get("health_status", "unknown"),
-                diagnose=summary.get("diagnose_health_status", "unknown"),
+                doctor=_label_cn(summary.get("doctor_status", "unknown")),
+                health=_label_cn(summary.get("health_status", "unknown")),
+                diagnose=_label_cn(summary.get("diagnose_health_status", "unknown")),
             ),
         ),
         _field(
             "运行状态",
-            "failed_runs={failed}\nrunning={running}".format(
+            "失败运行={failed}\n运行中={running}".format(
                 failed=summary.get("failed_runs_count", 0),
                 running=summary.get("running_runs_count", 0),
             ),
         ),
         _field(
             "数据源",
-            "status={status}\nrequired={required}\noptional={optional}".format(
-                status=summary.get("data_source_status", "unknown"),
-                required=",".join(required_missing) or "-",
-                optional=",".join(optional_missing) or "-",
+            "状态={status}\n核心源={required}\n辅助源={optional}".format(
+                status=_label_cn(summary.get("data_source_status", "unknown")),
+                required=_labels_cn(required_missing),
+                optional=_labels_cn(optional_missing),
             ),
             inline=False,
         ),
         _field(
             "候选池",
-            "total={total} core={core} watch={watch}".format(
+            "总数={total} 核心={core} 观察={watch}".format(
                 total=pool.get("total", pool.get("total_count", 0)),
                 core=pool.get("core_count", 0),
                 watch=pool.get("watch_count", 0),
@@ -885,7 +984,7 @@ def format_daily_inspection_embed(summary: dict) -> dict:
 
     if plan_actions:
         action_lines = [
-            f"- [{item.get('priority', '-')}] {item.get('type', '-')}"
+            f"- [{_label_cn(item.get('priority', '-'))}] {_label_cn(item.get('type', '-'))}"
             for item in plan_actions[:5]
         ]
         fields.append(_field("交易计划", "\n".join(action_lines), inline=False))
@@ -916,7 +1015,7 @@ def _manual_trade_lines(items: list[dict]) -> list[str]:
     for item in items:
         code = item.get("code", "")
         name = item.get("name") or code
-        side = item.get("side", "-")
+        side = _label_cn(item.get("side", "-"))
         score = _to_float(item.get("score", item.get("confidence")))
         position = _pct_text(item.get("position_pct", 0))
         lines.append(f"{name}({code}) {side} · 评分 {score:.1f} · 仓位 {position}")

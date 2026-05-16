@@ -94,9 +94,9 @@ def test_format_propose_plan_embed_summarizes_blocking_plan():
     assert "交易计划" in embed["title"]
     values = "\n".join(field["value"] for field in embed["fields"])
     assert "禁止自动执行" in values
-    assert "core=0" in values
-    assert "review_core_pool" in values
-    assert "candidate core pool is empty" in values
+    assert "核心=0" in values
+    assert "复核核心池" in values
+    assert "核心候选池为空" in values
 
 
 def test_format_daily_inspection_embed_summarizes_health_and_report_path():
@@ -122,10 +122,10 @@ def test_format_daily_inspection_embed_summarizes_health_and_report_path():
 
     assert "每日巡检" in embed["title"]
     values = "\n".join(field["value"] for field in embed["fields"])
-    assert "doctor=ok" in values
-    assert "health=warning" in values
+    assert "doctor=正常" in values
+    assert "health=警告" in values
     assert "health" in values
-    assert "core_pool" in values
+    assert "核心池" in values
     assert "待确认 2" in values
     assert "trade-vault/02-巡检/2026-05-16.md" in values
 
@@ -162,7 +162,7 @@ def test_format_daily_inspection_embed_expands_manual_trades_and_route_blockers(
     assert "观察池阻断" in field_names
     values = "\n".join(field["value"] for field in embed["fields"])
     assert "三安光电(600703)" in values
-    assert "BUY" in values
+    assert "买入意向" in values
     assert "6.3" in values
     assert "仓位 16%" in values
     assert "贝达药业(300558)" in values
@@ -394,12 +394,12 @@ class TestDiscordFormat:
         } <= names
         values = "\n".join(field["value"] for field in embed["fields"])
         assert "不自动下单" in values
-        assert "BUY" in values
+        assert "买入意向" in values
         assert "6.3" in values
         assert "放量突破" in values
         assert "现价 12.30" in values
         assert "建议仓位 16%" in values
-        assert "turnover_spike" in values
+        assert "换手异常放大" in values
         assert "MiniLED 订单改善" in values
         assert "确认价格/流动性/仓位/止损" in values
 
