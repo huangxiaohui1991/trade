@@ -266,6 +266,35 @@ class TestMarketService:
         assert snap.flow is not None
         assert snap.sentiment is not None
 
+    def test_get_financial_merges_partial_provider_reports(self, store):
+        valuation = MockFinancialProvider({
+            "002138": FinancialReport(pe_ttm=25.0, pb=3.2),
+        })
+        fundamentals = MockFinancialProvider({
+            "002138": FinancialReport(
+                roe=12.0,
+                revenue_growth=15.0,
+                operating_cash_flow=1e8,
+            ),
+        })
+        svc = MarketService(
+            financial_providers=[valuation, fundamentals],
+            store=store,
+        )
+
+        report = asyncio.get_event_loop().run_until_complete(svc._get_financial("002138"))
+
+        assert report is not None
+        assert report.pe_ttm == 25.0
+        assert report.pb == 3.2
+        assert report.roe == 12.0
+        assert report.revenue_growth == 15.0
+        assert report.operating_cash_flow == 1e8
+
+        cached = store.get_latest_observation("002138", "financial")
+        assert cached["pe_ttm"] == 25.0
+        assert cached["roe"] == 12.0
+
     def test_collect_batch(self, store):
         q1 = StockQuote(code="001", name="A", price=10.0, open=10, high=10, low=10, close=10, volume=1000, amount=1e7, change_pct=0)
         q2 = StockQuote(code="002", name="B", price=20.0, open=20, high=20, low=20, close=20, volume=2000, amount=2e7, change_pct=0)

@@ -8,11 +8,12 @@ market/service.py — 市场数据服务
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import logging
 from typing import Optional
 
 from astock_trading.market.models import (
+    FinancialReport,
     FundFlow,
     SentimentData,
     StockQuote,
@@ -78,6 +79,32 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
 
 
 _logger = logging.getLogger(__name__)
+
+_FINANCIAL_SCORING_FIELDS = ("roe", "revenue_growth", "operating_cash_flow")
+
+
+def _financial_from_payload(payload: dict) -> FinancialReport:
+    allowed = {field.name for field in fields(FinancialReport)}
+    return FinancialReport(**{key: value for key, value in payload.items() if key in allowed})
+
+
+def _financial_has_data(report: FinancialReport) -> bool:
+    return any(getattr(report, field.name) is not None for field in fields(FinancialReport))
+
+
+def _financial_has_scoring_fields(report: FinancialReport) -> bool:
+    return all(getattr(report, name) is not None for name in _FINANCIAL_SCORING_FIELDS)
+
+
+def _merge_financial_reports(base: Optional[FinancialReport], update: FinancialReport) -> FinancialReport:
+    values = asdict(base) if base is not None else {
+        field.name: None for field in fields(FinancialReport)
+    }
+    for field in fields(FinancialReport):
+        value = getattr(update, field.name)
+        if values.get(field.name) is None and value is not None:
+            values[field.name] = value
+    return FinancialReport(**values)
 
 
 class MarketService:
@@ -434,22 +461,42 @@ class MarketService:
         return None
 
     async def _get_financial(self, code: str) -> Optional[object]:
-        """从 financial providers 获取财务数据，自动 fallback。"""
+        """从 financial providers 获取财务数据，按字段合并多个来源。"""
+        merged: Optional[FinancialReport] = None
+        empty_fallback: Optional[FinancialReport] = None
         if self._store:
             cached = self._store.get_cached(code, "financial")
             if cached:
-                from astock_trading.market.models import FinancialReport
-                return FinancialReport(**cached)
+                merged = _financial_from_payload(cached)
+                if _financial_has_scoring_fields(merged):
+                    return merged
 
+        contributing_sources: list[str] = []
         for provider in self._financial:
             try:
                 result = await provider.get_financial(code)
                 if result is not None:
-                    return result
+                    if not _financial_has_data(result):
+                        empty_fallback = result
+                        continue
+                    before = asdict(merged) if merged is not None else None
+                    merged = _merge_financial_reports(merged, result)
+                    if before != asdict(merged):
+                        contributing_sources.append(provider.__class__.__name__)
             except Exception as e:
                 _logger.info(f"[financial] {code} provider failed: {e}")
                 continue
-        return None
+
+        if merged is not None:
+            if self._store and contributing_sources:
+                self._store.save_observation(
+                    source="+".join(contributing_sources),
+                    kind="financial",
+                    symbol=code,
+                    payload=asdict(merged),
+                )
+            return merged
+        return empty_fallback
 
     async def _get_flow(self, code: str) -> Optional[FundFlow]:
         """从 flow providers 获取资金流向，自动 fallback。"""

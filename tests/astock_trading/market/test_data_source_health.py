@@ -77,6 +77,27 @@ def test_evaluate_data_source_health_marks_empty_payload_as_degraded(tmp_path):
         conn.close()
 
 
+def test_evaluate_data_source_health_tracks_financial_observations(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_observation("MarketService", "financial", "000858", {"roe": 12.0})
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        assert result["checks"]["financial"]["status"] == "healthy"
+        assert result["checks"]["financial"]["symbol"] == "000858"
+        assert "financial" not in result["optional_missing"]
+    finally:
+        conn.close()
+
+
 def test_evaluate_data_source_health_warns_on_stale_candidate_pool(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)

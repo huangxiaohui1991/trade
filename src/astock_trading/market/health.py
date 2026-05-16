@@ -30,6 +30,7 @@ DEFAULT_EXPECTATIONS = (
     DataSourceExpectation("research_reports", ("research_reports",), 168, False),
     DataSourceExpectation("stock_news", ("stock_news",), 72, False),
     DataSourceExpectation("basic_info", ("basic_info",), 168, False),
+    DataSourceExpectation("financial", ("financial",), 168, False),
 )
 
 DEFAULT_CANDIDATE_POOL_MAX_AGE_HOURS = 24
