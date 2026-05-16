@@ -9,6 +9,13 @@ from __future__ import annotations
 
 
 from astock_trading.market.models import StockSnapshot
+from astock_trading.platform.domain_events import (
+    DECISION_SUGGESTED,
+    DomainEvent,
+    DomainEventPublisher,
+    MANUAL_TRADE_REQUESTED,
+    SCORE_CALCULATED,
+)
 from astock_trading.platform.events import EventStore
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.models import Action, DecisionIntent, MarketState, ScoreResult
@@ -27,6 +34,7 @@ class StrategyService:
         self._scorer = scorer
         self._decider = decider
         self._event_store = event_store
+        self._publisher = DomainEventPublisher(event_store)
 
     def evaluate(
         self,
@@ -55,13 +63,13 @@ class StrategyService:
 
         for score_result in results:
             # 追加评分事件
-            self._event_store.append(
+            self._publisher.publish(DomainEvent(
                 stream=f"strategy:{score_result.code}",
                 stream_type="strategy",
-                event_type="score.calculated",
+                event_type=SCORE_CALCULATED,
                 payload=score_result.to_dict(),
                 metadata=metadata,
-            )
+            ))
 
             # 决策
             decision = self._decider.decide(
@@ -73,10 +81,10 @@ class StrategyService:
             decisions.append(decision)
 
             # 追加决策事件
-            decision_event_id = self._event_store.append(
+            decision_event_id = self._publisher.publish(DomainEvent(
                 stream=f"strategy:{decision.code}",
                 stream_type="strategy",
-                event_type="decision.suggested",
+                event_type=DECISION_SUGGESTED,
                 payload={
                     "code": decision.code,
                     "name": decision.name,
@@ -90,15 +98,15 @@ class StrategyService:
                     "notes": decision.notes,
                 },
                 metadata=metadata,
-            )
+            ))
 
             if decision.action == Action.BUY:
                 snapshot = next((s for s in snapshots if s.code == decision.code), None)
                 quote = snapshot.quote if snapshot else None
-                self._event_store.append(
+                self._publisher.publish(DomainEvent(
                     stream=f"manual_trade:{decision.code}",
                     stream_type="manual_trade",
-                    event_type="manual_trade.requested",
+                    event_type=MANUAL_TRADE_REQUESTED,
                     payload={
                         "status": "pending",
                         "side": "buy",
@@ -113,7 +121,7 @@ class StrategyService:
                         "source_event_id": decision_event_id,
                     },
                     metadata={**metadata, "account": "main", "execution": "manual"},
-                )
+                ))
 
         return decisions
 
@@ -126,12 +134,12 @@ class StrategyService:
         """单股评分，结果追加到 event_log。"""
         result = self._scorer.score(snapshot)
 
-        self._event_store.append(
+        self._publisher.publish(DomainEvent(
             stream=f"strategy:{result.code}",
             stream_type="strategy",
-            event_type="score.calculated",
+            event_type=SCORE_CALCULATED,
             payload=result.to_dict(),
             metadata={"run_id": run_id, "config_version": config_version},
-        )
+        ))
 
         return result

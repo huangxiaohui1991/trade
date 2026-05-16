@@ -20,6 +20,12 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.paper_account import PaperAccount, PaperPosition, PaperBalance
+from astock_trading.platform.domain_events import (
+    AUTO_TRADE_DIAGNOSTIC,
+    AUTO_TRADE_EXECUTED,
+    AUTO_TRADE_SUMMARY,
+    DECISION_SUGGESTED,
+)
 from astock_trading.platform.time import MARKET_TZ, iso_to_local, local_date_bounds_utc, local_now
 from astock_trading.platform.time import local_now_str, local_today, local_today_str
 from astock_trading.strategy.models import MarketSignal, Style
@@ -113,7 +119,7 @@ def _candidate_pool_state(ctx: PipelineContext, now: datetime, max_age_hours: in
 def _fresh_decision_events(ctx: PipelineContext, now: datetime, max_age_hours: int) -> list[dict]:
     since = (now - timedelta(hours=max_age_hours)).isoformat()
     events = ctx.event_store.query(
-        event_type="decision.suggested",
+        event_type=DECISION_SUGGESTED,
         since=since,
         limit=100,
     )
@@ -141,7 +147,7 @@ def _record_buy_diagnostic(
     ctx.event_store.append(
         stream="paper:diagnostic",
         stream_type="paper_trade",
-        event_type="auto_trade.diagnostic",
+        event_type=AUTO_TRADE_DIAGNOSTIC,
         payload=diagnostic,
         metadata={"run_id": run_id, "account": "paper"},
     )
@@ -454,7 +460,7 @@ def _check_and_sell(
         # 获取实际买入日期（从事件日志）
         entry_date = local_today()
         paper_events = ctx.event_store.query(
-            event_type="auto_trade.executed",
+            event_type=AUTO_TRADE_EXECUTED,
             stream=f"paper:{pos.code}",
         )
         for ev in reversed(paper_events):
@@ -533,7 +539,7 @@ def _execute_sell(
     ctx.event_store.append(
         stream=f"paper:{pos.code}",
         stream_type="paper_trade",
-        event_type="auto_trade.executed",
+        event_type=AUTO_TRADE_EXECUTED,
         payload=info,
         metadata={"run_id": run_id, "account": "paper"},
     )
@@ -579,7 +585,7 @@ def _score_and_buy(
     monday = today.date() - timedelta(days=today.weekday())
     since, _ = local_date_bounds_utc(monday)
     weekly_events = ctx.event_store.query(
-        event_type="auto_trade.executed",
+        event_type=AUTO_TRADE_EXECUTED,
         since=since,
     )
     weekly_buy_count = sum(
@@ -675,7 +681,7 @@ def _get_buy_candidates(
     now = datetime.now(timezone.utc)
     since = (now - timedelta(hours=max_age_hours)).isoformat()
     recent_decisions = ctx.event_store.query(
-        event_type="decision.suggested",
+        event_type=DECISION_SUGGESTED,
         since=since,
         limit=50,
     )
@@ -765,7 +771,7 @@ def _execute_buy(
     ctx.event_store.append(
         stream=f"paper:{code}",
         stream_type="paper_trade",
-        event_type="auto_trade.executed",
+        event_type=AUTO_TRADE_EXECUTED,
         payload=info,
         metadata={"run_id": run_id, "account": "paper"},
     )
@@ -781,7 +787,7 @@ def _record_summary_event(ctx: PipelineContext, run_id: str, buys: list, sells: 
     ctx.event_store.append(
         stream="paper:summary",
         stream_type="paper_trade",
-        event_type="auto_trade.summary",
+        event_type=AUTO_TRADE_SUMMARY,
         payload={
             "date": local_today_str(),
             "dry_run": dry_run,

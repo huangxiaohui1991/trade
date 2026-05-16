@@ -39,30 +39,22 @@ except ModuleNotFoundError:
         def run(self, *_args, **_kwargs):
             raise RuntimeError("mcp package is not installed")
 
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
-from astock_trading.platform.config import ConfigRegistry
-from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
 from astock_trading.platform.runs import RunJournal
-from astock_trading.execution.service import ExecutionService
-from astock_trading.market.service import MarketService
+from astock_trading.platform import service_factory
+from astock_trading.platform.domain_events import (
+    CANDIDATE_ADDED,
+    DomainEvent,
+    DomainEventPublisher,
+    SCORE_CALCULATED,
+)
 from astock_trading.market.adapters import (
-    AkShareMarketAdapter,
-    AkShareFinancialAdapter,
-    AkShareFlowAdapter,
-    AStockSignalAdapter,
-    BaiduFundFlowAdapter,
-    MXMarketAdapter,
-    MXSentimentAdapter,
-    MXScreenerAdapter,
-    MootdxMarketAdapter,
-    OpenCliFinanceAdapter,
     BaoStockMarketAdapter,
-    TencentFinancialAdapter,
+    BaiduFundFlowAdapter,
+    MXScreenerAdapter,
 )
 from astock_trading.market.store import MarketStore
 from astock_trading.reporting.projectors import ProjectionUpdater
-from astock_trading.reporting.reports import ReportGenerator
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.risk.sizing import calc_position_size
 from astock_trading.platform.mcp_tools.agent import (
@@ -71,12 +63,9 @@ from astock_trading.platform.mcp_tools.agent import (
     explain_run_payload,
     propose_plan_payload,
 )
+from astock_trading.platform.mcp_tools.paper import register_paper_tools
 from astock_trading.platform.mcp_tools.pipeline import build_pipeline_context, run_pipeline_payload
 from astock_trading.platform.stock_analysis import analyze_stock
-from astock_trading.strategy.models import ScoringWeights
-from astock_trading.strategy.scorer import Scorer
-from astock_trading.strategy.decider import build_decider_from_config
-from astock_trading.strategy.service import StrategyService
 from astock_trading.platform.time import is_trading_day, local_now_str, local_today
 
 _logger = logging.getLogger(__name__)
@@ -90,40 +79,21 @@ mcp = FastMCP("astock_trading-trade", instructions="A-Stock Trading 量化交易
 _conn = None
 _event_store: Optional[EventStore] = None
 _run_journal: Optional[RunJournal] = None
-_exec_svc: Optional[ExecutionService] = None
-_report_gen: Optional[ReportGenerator] = None
-_market_svc: Optional[MarketService] = None
-_strategy_svc: Optional[StrategyService] = None
+_exec_svc = None
+_report_gen = None
+_market_svc = None
+_strategy_svc = None
 _config_snapshot = None
 
 
 def _build_trade_hooks(event_store, conn):
     """Build trade logger hooks if vault is configured."""
-    hooks = []
-    try:
-        from astock_trading.execution.trade_logger import TradeLogger
-        vault_path = _resolve_vault()
-        hooks.append(TradeLogger(event_store, conn, vault_path))
-    except Exception:
-        pass
-    return hooks
+    return service_factory.build_trade_hooks(event_store, conn, _resolve_vault())
 
 
 def _resolve_vault() -> Optional[str]:
     """Resolve vault path from config."""
-    try:
-        import yaml
-        config_dir = resolve_config_dir()
-        paths_file = config_dir / "paths.yaml"
-        if paths_file.exists():
-            with open(paths_file, encoding="utf-8") as f:
-                paths = yaml.safe_load(f) or {}
-            vp = paths.get("vault_path")
-            if vp:
-                return str(resolve_path_from_config(vp, config_dir))
-    except Exception:
-        pass
-    return None
+    return service_factory.resolve_vault_path()
 
 
 def _init():
@@ -134,50 +104,15 @@ def _init():
     if _conn is not None:
         return
 
-    init_db()
-    _conn = connect()
-    _event_store = EventStore(_conn)
-    _run_journal = RunJournal(_conn)
-    _exec_svc = ExecutionService(_event_store, _conn, on_trade=_build_trade_hooks(_event_store, _conn))
-    _report_gen = ReportGenerator(_event_store, _conn)
-
-    store = MarketStore(_conn)
-    _market_svc = MarketService(
-        market_providers=[
-            AStockSignalAdapter(),
-            OpenCliFinanceAdapter(),
-            MXMarketAdapter(),
-            MootdxMarketAdapter(),
-            AkShareMarketAdapter(),
-        ],
-        financial_providers=[TencentFinancialAdapter(), AkShareFinancialAdapter()],
-        flow_providers=[BaiduFundFlowAdapter(), AkShareFlowAdapter()],
-        sentiment_providers=[MXSentimentAdapter()],
-        store=store,
-    )
-
-    # Load config
-    try:
-        registry = ConfigRegistry()
-        _config_snapshot = registry.freeze(_conn)
-        cfg = _config_snapshot.data.get("strategy", {})
-    except Exception:
-        cfg = {}
-        _config_snapshot = None
-
-    weights_cfg = cfg.get("scoring", {}).get("weights", {})
-    scorer = Scorer(
-        weights=ScoringWeights(
-            technical=weights_cfg.get("technical", 3),
-            fundamental=weights_cfg.get("fundamental", 2),
-            flow=weights_cfg.get("flow", 2),
-            sentiment=weights_cfg.get("sentiment", 3),
-        ),
-        veto_rules=cfg.get("scoring", {}).get("veto", []),
-        entry_cfg=cfg.get("entry_signal", {}),
-    )
-    decider = build_decider_from_config(cfg)
-    _strategy_svc = StrategyService(scorer, decider, _event_store)
+    services = service_factory.build_runtime_services()
+    _conn = services.conn
+    _event_store = services.event_store
+    _run_journal = services.run_journal
+    _exec_svc = services.exec_svc
+    _report_gen = services.reporter
+    _market_svc = services.market_svc
+    _strategy_svc = services.strategy_svc
+    _config_snapshot = services.config_snapshot
 
 
 def _safe(fn):
@@ -191,6 +126,9 @@ def _safe(fn):
             _logger.error(f"Tool error: {e}\n{traceback.format_exc()}")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
     return wrapper
+
+
+globals().update(register_paper_tools(mcp, _safe))
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +186,7 @@ def trade_score_batch(codes: str = "") -> str:
         projector.sync_market_state(index_data)
 
     # Collect results from event_log
-    events = _event_store.query(event_type="score.calculated")
+    events = _event_store.query(event_type=SCORE_CALCULATED)
     run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
     return json.dumps({"scores": run_scores, "count": len(run_scores)}, ensure_ascii=False, default=str)
@@ -374,7 +312,7 @@ def trade_calc_position(code: str, score: float, price: float) -> str:
 @_safe
 def trade_score_history(code: str, days: int = 7) -> str:
     """查看历史评分记录。"""
-    events = _event_store.query(stream=f"strategy:{code}", event_type="score.calculated")
+    events = _event_store.query(stream=f"strategy:{code}", event_type=SCORE_CALCULATED)
     recent = events[-days:] if len(events) > days else events
     results = [{
         "date": ev.get("occurred_at", "")[:10],
@@ -465,7 +403,7 @@ def trade_screener(query: str = "") -> str:
         projector.sync_market_state(index_data)
 
     events = _event_store.query(
-        event_type="score.calculated",
+        event_type=SCORE_CALCULATED,
         metadata_filter={"run_id": run_id},
     )
     run_scores = [e["payload"] for e in events]
@@ -495,13 +433,13 @@ def trade_screener(query: str = "") -> str:
                 "note": "mcp_screener_auto_watch",
             }
             projector.sync_candidate_pool([entry])
-            _event_store.append(
+            DomainEventPublisher(_event_store).publish(DomainEvent(
                 stream=f"candidate:{code}",
                 stream_type="candidate",
-                event_type="candidate.added",
+                event_type=CANDIDATE_ADDED,
                 payload=entry,
                 metadata={"source": "mcp.trade_screener", "run_id": run_id},
-            )
+            ))
             added.append({"code": code, "name": s.get("name", ""), "score": total})
             existing.add(code)
 
@@ -644,198 +582,6 @@ def trade_f10(code: str, category: str = "最新提示") -> str:
     """查询 mootdx F10 文本资料。mootdx 未安装时返回空文本。"""
     data = asyncio.run(_market_svc.collect_f10(code, category, run_id="mcp_f10"))
     return json.dumps({"code": code, "category": category, "text": data[:12000]}, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
-# Tools — 妙想数据查询
-# ---------------------------------------------------------------------------
-
-async def _mx_call(coro_fn):
-    """在单个 event loop 中执行 MX API 调用并关闭 client。"""
-    from astock_trading.market.mx_async import MXAsyncClient
-    client = MXAsyncClient()
-    try:
-        return await coro_fn(client)
-    finally:
-        await client.close()
-
-
-@mcp.tool()
-@_safe
-def trade_mx_data(query: str) -> str:
-    """妙想金融数据查询（自然语言，如"双环传动最近3年营收"）。"""
-    result = asyncio.run(_mx_call(lambda c: c.query_data(query)))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Tools — 自选股管理
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-@_safe
-def trade_watchlist() -> str:
-    """查询东方财富自选股列表。"""
-    result = asyncio.run(_mx_call(lambda c: c.get_self_select()))
-
-    # 提取关键数据
-    data = result.get("data", {})
-    all_results = data.get("allResults", {})
-    result_data = all_results.get("result", {})
-    data_list = result_data.get("dataList", [])
-
-    stocks = []
-    for s in data_list:
-        stocks.append({
-            "code": s.get("SECURITY_CODE", ""),
-            "name": s.get("SECURITY_SHORT_NAME", ""),
-            "price": s.get("NEWEST_PRICE"),
-            "change_pct": s.get("CHG"),
-        })
-    return json.dumps({"count": len(stocks), "stocks": stocks}, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_watchlist_manage(action: str) -> str:
-    """管理自选股（自然语言，如"把贵州茅台加入自选"、"删除双环传动"）。"""
-    result = asyncio.run(_mx_call(lambda c: c.manage_self_select(action)))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Tools — 模拟盘自动交易
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-@_safe
-def trade_auto_trade(dry_run: bool = True) -> str:
-    """
-    执行模拟盘自动交易（选股→评分→风控→买卖）。
-    dry_run=True 时只记录不下单，False 时真实下单到妙想模拟盘。
-    需要先在 config/strategy.yaml 中启用 auto_trade.enabled: true。
-    """
-    from astock_trading.pipeline.context import build_context
-    ctx = build_context()
-    try:
-        # 临时覆盖 dry_run
-        if ctx.config_snapshot and ctx.config_snapshot.data.get("strategy", {}).get("auto_trade"):
-            ctx.config_snapshot.data["strategy"]["auto_trade"]["dry_run"] = dry_run
-            ctx.config_snapshot.data["strategy"]["auto_trade"]["enabled"] = True
-
-        run_id = ctx.run_journal.start_run("auto_trade", ctx.config_version)
-        from astock_trading.pipeline.auto_trade import run
-        result = run(ctx, run_id)
-        ctx.run_journal.complete_run(run_id, artifacts={"result": "ok"})
-        return json.dumps(result, ensure_ascii=False, default=str)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-    finally:
-        ctx.conn.close()
-
-
-@mcp.tool()
-@_safe
-def trade_paper_status() -> str:
-    """查询模拟盘状态（持仓 + 资金 + 最近交易记录）。"""
-    from astock_trading.pipeline.paper_account import PaperAccount
-    paper = PaperAccount()
-    positions = paper.get_positions()
-    balance = paper.get_balance()
-
-    # 最近的自动交易事件
-    from astock_trading.pipeline.context import build_context
-    ctx = build_context()
-    try:
-        recent = ctx.event_store.query(
-            event_type="auto_trade.executed",
-            limit=10,
-        )
-        trades = [ev.get("payload", {}) for ev in recent]
-    except Exception:
-        trades = []
-    finally:
-        ctx.conn.close()
-
-    return json.dumps({
-        "positions": [
-            {"code": p.code, "name": p.name, "shares": p.shares,
-             "avg_cost": p.avg_cost, "current_price": p.current_price,
-             "pnl": p.pnl, "pnl_pct": p.pnl_pct}
-            for p in positions
-        ],
-        "balance": {
-            "total_asset": balance.total_asset,
-            "available_cash": balance.available_cash,
-            "market_value": balance.market_value,
-        },
-        "recent_trades": trades,
-    }, ensure_ascii=False, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Tools — 模拟交易（手动）
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-@_safe
-def trade_mock_portfolio() -> str:
-    """查询妙想模拟盘持仓。"""
-    result = asyncio.run(_mx_call(lambda c: c.mock_positions()))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_mock_balance() -> str:
-    """查询妙想模拟盘账户资金。"""
-    result = asyncio.run(_mx_call(lambda c: c.mock_balance()))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_mock_orders() -> str:
-    """查询妙想模拟盘委托记录。"""
-    result = asyncio.run(_mx_call(lambda c: c.mock_orders()))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_mock_buy(code: str, shares: int, price: float = 0) -> str:
-    """模拟盘买入。price=0 为市价委托，shares 须为 100 的整数倍。"""
-    if shares % 100 != 0:
-        return json.dumps({"error": "shares 必须为 100 的整数倍"}, ensure_ascii=False)
-    use_market = price <= 0
-    result = asyncio.run(_mx_call(
-        lambda c: c.mock_trade("buy", code, shares, price if not use_market else None, use_market)
-    ))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_mock_sell(code: str, shares: int, price: float = 0) -> str:
-    """模拟盘卖出。price=0 为市价委托，shares 须为 100 的整数倍。"""
-    if shares % 100 != 0:
-        return json.dumps({"error": "shares 必须为 100 的整数倍"}, ensure_ascii=False)
-    use_market = price <= 0
-    result = asyncio.run(_mx_call(
-        lambda c: c.mock_trade("sell", code, shares, price if not use_market else None, use_market)
-    ))
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-@mcp.tool()
-@_safe
-def trade_mock_cancel(order_id: str = "") -> str:
-    """模拟盘撤单。order_id 留空则撤销全部未成交委托。"""
-    cancel_all = not order_id.strip()
-    result = asyncio.run(_mx_call(
-        lambda c: c.mock_cancel(order_id if not cancel_all else None, cancel_all)
-    ))
-    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
