@@ -12,6 +12,7 @@ from astock_trading.reporting.discord import (
     format_scoring_embed, format_stop_alert_embed,
     format_propose_plan_embed, format_daily_inspection_embed,
     format_manual_confirmation_embed,
+    format_llm_summary_embed,
 )
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.reporting.projectors import ProjectionUpdater
@@ -407,6 +408,32 @@ class TestDiscordFormat:
         assert "止损" in format_stop_alert_embed({
             "code": "002138", "signal_type": "stop_loss", "description": "跌破止损线", "urgency": "immediate",
         })["title"]
+
+    def test_llm_summary_embed_turns_markdown_sections_into_fields(self):
+        embed = format_llm_summary_embed("morning", """## A股盘前摘要｜2026-05-17 09:20
+
+**今日结论：观察 / 待人工复核**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 系统状态：警告
+- 数据质量：降级
+
+### 2. 今日动作
+- 默认动作：只读观察
+- 买入意向：无
+
+### 6. 今日纪律
+- 风控短句：数据降级时，信心也要降级。
+""")
+
+        assert embed["title"] == "A股盘前摘要｜2026-05-17 09:20"
+        assert embed["color"] == 0x1E88E5
+        assert "今日结论" in embed["description"]
+        field_names = [field["name"] for field in embed["fields"]]
+        assert field_names == ["系统与数据质量", "今日动作", "今日纪律"]
+        assert "数据质量：降级" in embed["fields"][0]["value"]
+        assert "买入意向：无" in embed["fields"][1]["value"]
 
 
 class TestObsidianProjector:

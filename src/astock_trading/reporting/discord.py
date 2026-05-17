@@ -7,6 +7,7 @@ reporting 不反写任何业务表。
 
 from __future__ import annotations
 
+import re
 
 from astock_trading.platform.time import local_now_iso, local_now_str, local_today_str
 from astock_trading.reporting.market_formatters import (
@@ -125,6 +126,79 @@ def _embed(
         e["footer"] = {"text": footer}
     e["timestamp"] = local_now_iso()
     return e
+
+
+def _markdown_heading_text(line: str) -> str:
+    text = re.sub(r"^#+\s*", "", line.strip()).strip()
+    return re.sub(r"^\d+[.、]\s*", "", text).strip()
+
+
+def _clean_llm_summary_line(line: str) -> str:
+    text = line.rstrip()
+    if text.strip().startswith("```"):
+        return ""
+    return text
+
+
+def _split_llm_summary_markdown(markdown: str) -> tuple[str, str, list[tuple[str, str]]]:
+    title = ""
+    description_lines: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    current_name = ""
+    current_lines: list[str] = []
+    seen_section = False
+
+    for raw_line in markdown.splitlines():
+        line = _clean_llm_summary_line(raw_line)
+        if not line and not current_name:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("# ") or stripped.startswith("## "):
+            if not title:
+                title = _markdown_heading_text(stripped)
+            continue
+        if stripped.startswith("### "):
+            if current_name:
+                sections.append((current_name, current_lines))
+            current_name = _markdown_heading_text(stripped)
+            current_lines = []
+            seen_section = True
+            continue
+        if seen_section:
+            current_lines.append(line)
+        elif stripped:
+            description_lines.append(line)
+
+    if current_name:
+        sections.append((current_name, current_lines))
+
+    compact_sections = []
+    for name, lines in sections:
+        value = "\n".join(line for line in lines if line.strip()).strip()
+        if value:
+            compact_sections.append((name, value))
+    return title, "\n".join(description_lines).strip(), compact_sections
+
+
+def format_llm_summary_embed(mode: str, markdown: str) -> dict:
+    """把 Hermes LLM Markdown 摘要转换成 Discord Rich Embed。"""
+    title, description, sections = _split_llm_summary_markdown(markdown)
+    mode_label = {"morning": "盘前摘要", "close": "收盘复盘", "weekly": "周复盘"}.get(mode, "LLM 摘要")
+    if not title:
+        title = f"A股 LLM {mode_label}"
+
+    fields = []
+    for name, value in sections[:MAX_EMBED_FIELDS]:
+        fields.append(_field(name, value, inline=False))
+
+    color = COLORS["morning"] if mode == "morning" else COLORS["evening"] if mode == "close" else COLORS["weekly"]
+    return _embed(
+        title=title,
+        description=description[:900],
+        color=color,
+        fields=fields,
+        footer=f"A-Stock Trading · LLM {mode_label} · Rich Embed",
+    )
 
 
 def _score_emoji(score: float) -> str:

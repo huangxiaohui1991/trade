@@ -389,6 +389,44 @@ def test_notify_manual_confirmation_dry_run_json(tmp_path):
     assert payload["analysis"]["resolved"]["code"] == "600703"
 
 
+def test_notify_llm_summary_card_dry_run_json(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "llm-summary.md"
+    payload_path.write_text("""## A股收盘复盘｜2026-05-17 15:55
+
+**今日闭环：部分完成**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 数据质量：降级
+
+### 4. 盘前 vs 收盘
+- 对比只用于复盘早盘判断质量，不作为自动交易依据
+""", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "llm-summary-card",
+            "--mode",
+            "close",
+            "--payload",
+            str(payload_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["embed"]["title"] == "A股收盘复盘｜2026-05-17 15:55"
+    assert payload["embed"]["fields"][0]["name"] == "系统与数据质量"
+    assert payload["notification"]["target"] == "discord"
+
+
 def test_daily_inspection_summary_keeps_pending_manual_trade_items():
     from astock_trading.platform.cli.notifications import _build_daily_inspection_summary
 

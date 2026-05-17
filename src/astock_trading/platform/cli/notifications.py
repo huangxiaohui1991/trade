@@ -13,6 +13,7 @@ from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect, init_db
 from astock_trading.reporting.discord import (
     format_daily_inspection_embed,
+    format_llm_summary_embed,
     format_manual_confirmation_embed,
     format_propose_plan_embed,
 )
@@ -197,6 +198,36 @@ def notify_daily_inspection(
         ok=ok,
         error=error,
         extra={"summary": summary},
+    )
+    json_or_text(result, as_json)
+    if not dry_run and not ok:
+        raise typer.Exit(1)
+
+
+@notify_app.command("llm-summary-card")
+def notify_llm_summary_card(
+    payload_file: Path = typer.Option(..., "--payload", help="LLM Markdown 摘要文件"),
+    mode: str = typer.Option(..., "--mode", help="morning / close / weekly"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """从 Hermes LLM Markdown 摘要生成 Discord Rich Embed。"""
+    if mode not in {"morning", "close", "weekly"}:
+        raise typer.BadParameter("--mode must be morning, close, or weekly")
+    summary = payload_file.read_text(encoding="utf-8")
+    embed = format_llm_summary_embed(mode, summary)
+    content = {
+        "morning": "A股 LLM 盘前摘要",
+        "close": "A股 LLM 收盘复盘",
+        "weekly": "A股 LLM 周复盘补充",
+    }[mode]
+    ok, error = _send_or_dry_run(embed, content, dry_run)
+    result = _notification_payload(
+        embed=embed,
+        dry_run=dry_run,
+        ok=ok,
+        error=error,
+        extra={"mode": mode},
     )
     json_or_text(result, as_json)
     if not dry_run and not ok:
