@@ -2,6 +2,11 @@
 
 Agents must operate this project through stable command surfaces only.
 
+Before changing code, read `docs/architecture/AGENT_ARCHITECTURE_CONTEXT.md`
+for the current system boundary, runtime graph, data flow, and module lookup
+rules. Use it as the lightweight architecture context instead of re-reading the
+entire repository.
+
 ## Language and presentation
 
 中文是本项目的默认面向用户语言。新增或修改代码、注释、文档、报告模板、
