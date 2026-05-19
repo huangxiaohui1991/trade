@@ -214,9 +214,10 @@
 **方案**：
 - [x] 支持多个独立策略 profile 对比（不同的评分权重 / 选股条件 / 风控参数）
 - [x] 每个策略按已有 profile 运行证据统计决策分布、复盘均值和胜率
-- [ ] 策略间资金隔离，互不影响
-- [ ] 定期对比策略表现，淘汰弱策略
+- [x] 策略间隔离资金桶建议，互不影响（建议层，不自动改真实账户）
+- [x] 定期对比策略表现，输出弱策略暂停候选
 - 2026-05-19：`atrade strategy profiles --json` 已接入；匹配 `config_versions`、`run_log`、`decision.suggested`、`trade.review.recorded`，`--record` 追加 `strategy.profile_comparison.proposed` 和 Markdown artifact；只输出建议，不自动切换 `ASTOCK_CONFIG_PROFILE`。
+- 2026-05-19：`atrade strategy allocation --json` 已接入；生成 profile 隔离资金桶、影子验证、暂停候选和人工复核建议，`--record` 追加 `strategy.capital_allocation.proposed` 和 Markdown artifact；不自动分配资金、不停用 profile。
 
 ### P6-3 深度归因分析
 

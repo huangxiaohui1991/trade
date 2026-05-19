@@ -86,6 +86,8 @@
 备注：`atrade risk adaptive --json` 从 `market_bars`、`balance.*` / 余额投影和交易复盘提取波动、回撤、连续盈亏证据，输出止损宽度、仓位上限、买入阈值建议；`--record` 追加 `risk.adaptive_suggestion.proposed` 和 Markdown artifact，不自动改配置、不自动下单。
 - [x] P6-2 多策略 profile 对比入口
 备注：`atrade strategy profiles --json` 对比 `trend_swing / short_continuation / defensive_watch` 的关键阈值、门禁、仓位参数和历史运行/复盘证据；`--record` 追加 `strategy.profile_comparison.proposed` 和 Markdown artifact，不自动切换 `ASTOCK_CONFIG_PROFILE`。
+- [x] P6-2 策略隔离资金桶和弱策略复核建议
+备注：`atrade strategy allocation --json` 基于 profile 对比生成隔离资金桶、影子验证、启用候选和暂停候选；`--record` 追加 `strategy.capital_allocation.proposed` 和 Markdown artifact，不自动分配资金、不停用 profile。
 
 ### 复盘归因深化
 

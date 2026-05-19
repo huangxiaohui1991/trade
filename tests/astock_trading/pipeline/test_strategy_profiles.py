@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 
-from astock_trading.pipeline.strategy_profiles import compare_strategy_profiles, profile_config_hash
+from astock_trading.pipeline.strategy_profiles import (
+    compare_strategy_profiles,
+    profile_config_hash,
+    propose_strategy_allocation,
+)
 from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
@@ -160,3 +164,106 @@ def test_compare_strategy_profiles_without_runs_marks_shadow_validation_needed(t
     assert payload["status"] == "needs_shadow_validation"
     assert payload["profiles"][0]["evidence_status"] == "no_profile_runs"
     assert "先做影子运行" in payload["recommendations"][0]
+
+
+def _insert_profile_version(conn, config_dir, profile: str, version: str) -> str:
+    config, _ = ConfigRegistry(config_dir=config_dir, profile=profile).load_and_validate()
+    config_hash = profile_config_hash(config)
+    conn.execute(
+        """INSERT INTO config_versions
+           (config_version, config_hash, config_json, created_at)
+           VALUES (?, ?, ?, ?)""",
+        (version, config_hash, json.dumps(config, ensure_ascii=False), "2026-05-19T00:00:00+00:00"),
+    )
+    conn.execute(
+        """INSERT INTO run_log
+           (run_id, run_type, scope, config_version, status, started_at, finished_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            f"run_{profile}",
+            "scoring",
+            "cn_a",
+            version,
+            "completed",
+            "2026-05-19T00:00:00+00:00",
+            "2026-05-19T00:01:00+00:00",
+        ),
+    )
+    return version
+
+
+def _append_reviews(store: EventStore, *, profile_version: str, profile: str, returns: list[float]) -> None:
+    for index, return_pct in enumerate(returns, start=1):
+        store.append(
+            f"trade:{profile}:order{index}",
+            "trade",
+            "trade.review.recorded",
+            {"code": f"60070{index}", "latest_return_pct": return_pct},
+            metadata={"config_version": profile_version},
+        )
+
+
+def test_propose_strategy_allocation_isolates_capital_and_flags_weak_profiles(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_profile_config(config_dir)
+    db_path = tmp_path / "allocation.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        trend_version = _insert_profile_version(conn, config_dir, "trend_swing", "v_trend")
+        short_version = _insert_profile_version(conn, config_dir, "short_continuation", "v_short")
+        _append_reviews(store, profile_version=trend_version, profile="trend", returns=[0.04, 0.03, -0.01])
+        _append_reviews(store, profile_version=short_version, profile="short", returns=[-0.03, -0.02, -0.01])
+
+        payload = propose_strategy_allocation(
+            conn,
+            config_dir=config_dir,
+            profiles=("trend_swing", "short_continuation", "defensive_watch"),
+            total_capital=500000,
+            min_samples=3,
+            record=True,
+        )
+        events = store.query(event_type="strategy.capital_allocation.proposed")
+    finally:
+        conn.close()
+
+    trend = next(item for item in payload["capital_buckets"] if item["profile"] == "trend_swing")
+    short = next(item for item in payload["capital_buckets"] if item["profile"] == "short_continuation")
+    defensive = next(item for item in payload["capital_buckets"] if item["profile"] == "defensive_watch")
+    assert payload["analysis"] == "strategy_capital_allocation"
+    assert payload["guardrails"]["auto_apply"] is False
+    assert trend["scope"] == "strategy_trend_swing"
+    assert trend["action"] == "activate_candidate"
+    assert trend["suggested_capital_cents"] > 0
+    assert short["action"] == "pause_candidate"
+    assert short["suggested_capital_cents"] == 0
+    assert defensive["action"] == "shadow_validate"
+    assert payload["weak_strategy_review"]["pause_candidates"] == ["short_continuation"]
+    assert payload["recorded_event_id"]
+    assert events[0]["payload"]["guardrails"]["auto_apply"] is False
+
+
+def test_propose_strategy_allocation_requires_shadow_data_before_allocating(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_profile_config(config_dir)
+    db_path = tmp_path / "empty_allocation.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        payload = propose_strategy_allocation(
+            conn,
+            config_dir=config_dir,
+            profiles=("trend_swing",),
+            total_capital=500000,
+            min_samples=3,
+            record=False,
+        )
+    finally:
+        conn.close()
+
+    assert payload["status"] == "needs_shadow_validation"
+    assert payload["capital_buckets"][0]["action"] == "shadow_validate"
+    assert payload["capital_buckets"][0]["suggested_capital_cents"] == 0

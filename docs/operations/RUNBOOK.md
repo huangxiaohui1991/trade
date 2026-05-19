@@ -25,6 +25,7 @@ atrade health --json
 atrade diagnose strategy --json
 atrade calibrate --json
 atrade risk adaptive --json
+atrade strategy allocation --json
 atrade strategy profiles --json
 atrade screener explain --json
 atrade screener iterate --json
@@ -158,6 +159,8 @@ P6-2 多策略 profile 对比只读运行，不自动切换执行 profile：
 ```bash
 atrade strategy profiles --json
 atrade strategy profiles --record --json
+atrade strategy allocation --json
+atrade strategy allocation --record --json
 ```
 
 该命令读取 `trend_swing`、`short_continuation`、`defensive_watch` 等配置 profile，
@@ -166,6 +169,11 @@ atrade strategy profiles --record --json
 运行与复盘证据。样本不足时返回 `needs_shadow_validation`；`--record` 会追加
 `strategy.profile_comparison.proposed` 和 Markdown artifact。执行前仍必须显式设置并确认
 `ASTOCK_CONFIG_PROFILE`，不要让 agent 自动切换。
+
+`strategy allocation` 在 profile 对比基础上生成隔离资金桶和弱策略复核建议：正收益且
+样本达标的 profile 进入启用候选，负收益或胜率不足的 profile 进入暂停候选，证据不足的
+profile 只做影子验证。`--record` 会追加 `strategy.capital_allocation.proposed` 和
+Markdown artifact。该命令不改真实账户、不分配真实资金、不停用任何 profile。
 
 模拟盘 vs 实盘逐笔对账：
 
