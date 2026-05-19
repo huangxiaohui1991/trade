@@ -7,6 +7,7 @@ from typing import Any
 
 SCORE_CALCULATED = "score.calculated"
 DECISION_SUGGESTED = "decision.suggested"
+STRATEGY_CALIBRATION_PROPOSED = "strategy.calibration.proposed"
 MANUAL_TRADE_REQUESTED = "manual_trade.requested"
 TRADE_HYPOTHESIS_RECORDED = "trade.hypothesis.recorded"
 TRADE_OUTCOME_RECORDED = "trade.outcome.recorded"

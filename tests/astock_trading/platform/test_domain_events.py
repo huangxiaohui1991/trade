@@ -11,6 +11,7 @@ def test_domain_event_names_are_stable():
 
     assert events.SCORE_CALCULATED == "score.calculated"
     assert events.DECISION_SUGGESTED == "decision.suggested"
+    assert events.STRATEGY_CALIBRATION_PROPOSED == "strategy.calibration.proposed"
     assert events.MANUAL_TRADE_REQUESTED == "manual_trade.requested"
     assert events.TRADE_HYPOTHESIS_RECORDED == "trade.hypothesis.recorded"
     assert events.TRADE_OUTCOME_RECORDED == "trade.outcome.recorded"

@@ -9,6 +9,7 @@ import sys
 import typer
 
 from astock_trading.platform.cli.agent import register_agent_context
+from astock_trading.platform.cli.calibration import register_calibration_command
 from astock_trading.platform.cli.config import config_app
 from astock_trading.platform.cli.data_sources import data_sources_app, register_check_data_sources
 from astock_trading.platform.cli.db import db_app
@@ -52,6 +53,7 @@ app.add_typer(market_intel_app)
 app.add_typer(history_app)
 app.add_typer(review_app)
 register_agent_context(app)
+register_calibration_command(app)
 register_init_command(app)
 register_diagnostics_commands(app)
 register_health_commands(app)

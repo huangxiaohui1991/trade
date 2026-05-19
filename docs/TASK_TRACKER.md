@@ -80,6 +80,8 @@
 备注：经 80 只股回测对比，选定保守验证C写入 `strategy.yaml` 主配置。
 - [x] `backtest batch` CLI 入口
 备注：`trade backtest batch --codes --start --end --preset --params-json`，统一外部调用。
+- [x] P5 参数校准闭环
+备注：`atrade calibrate --json` 从 `trade.review.recorded` 提取 MFE/MAE、持仓天数、来源评分和候选池 forward return，输出参数/权重/选股条件建议；`--record` 追加 `strategy.calibration.proposed` 和 Markdown artifact，不自动改配置。
 
 ### 复盘归因深化
 

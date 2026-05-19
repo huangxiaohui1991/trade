@@ -23,6 +23,7 @@ atrade init
 ```bash
 atrade health --json
 atrade diagnose strategy --json
+atrade calibrate --json
 atrade screener explain --json
 atrade screener iterate --json
 atrade stock analyze 600703 --json
@@ -124,6 +125,18 @@ atrade review trades --code 002138 --as-of 2026-05-18 --record --json
 
 `--record` 会追加 `trade.review.recorded`；不加 `--record` 只预览。复盘依赖
 `market_bars`，没有 K 线时会返回 `insufficient_market_bars`，不要让 LLM 自行猜测 MFE/MAE。
+
+P5 参数校准只输出建议，不自动改配置：
+
+```bash
+atrade calibrate --json
+atrade calibrate --record --json
+```
+
+校准报告读取 `trade.review.recorded`、来源 `score.calculated`、候选池事件和 `market_bars`，
+输出止盈/止损/时间止损建议、四维评分权重方向、veto/选股条件复核建议。样本不足时返回
+`insufficient_data`；`--record` 会追加 `strategy.calibration.proposed` 并落一份 Markdown
+报告 artifact。
 
 模拟盘 vs 实盘逐笔对账：
 

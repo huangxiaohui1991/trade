@@ -1,7 +1,7 @@
 # 交易系统进化路线图（P4+）
 
 > 起始日期：2026-04-11
-> 更新日期：2026-04-10
+> 更新日期：2026-05-19
 > 前置：P1-P3 全部收口，自动化闭环已打通
 > 定位：从"能跑起来"进化到"跑得好、跑得稳、跑得聪明"
 
@@ -21,7 +21,7 @@
 
 还没验证的：
 - 实盘还没真正跑过完整的买卖周期
-- 评分权重和风控参数还是初始值，没经过实盘校准
+- 评分权重和风控参数已有 P5 校准入口，仍需足够闭合交易样本验证后才能采纳建议
 - 模拟盘刚跑了 1 天（04-10），样本量不足
 - 模拟盘信号和实盘手动操作还没有逐笔对账
 
@@ -166,31 +166,34 @@
 **前置**：需要至少 20-30 笔闭合交易（约 2-3 个月实盘数据）。
 
 **方案**：
-- [ ] 新增 `pipeline/param_calibration.py`
-- [ ] 从实盘闭合交易提取真实 MFE/MAE 分布
-- [ ] 基于 MFE 分布校准止盈参数（t1_pct / t1_drawdown / t2_drawdown）
-- [ ] 基于 MAE 分布校准止损参数（stop_loss / absolute_stop）
-- [ ] 基于持仓天数分布校准时间止损（time_stop_days）
-- [ ] 输出校准建议报告，不自动修改 `strategy.yaml`
-- [ ] 每次参数建议记录版本、样本窗口、walk-forward 验证结果
-- [ ] CLI：`bin/trade calibrate --json`
+- [x] 新增 `pipeline/param_calibration.py`
+- [x] 从实盘闭合交易提取真实 MFE/MAE 分布
+- [x] 基于 MFE 分布校准止盈参数（t1_pct / t1_drawdown / t2_drawdown）
+- [x] 基于 MAE 分布校准止损参数（stop_loss / absolute_stop）
+- [x] 基于持仓天数分布校准时间止损（time_stop_days）
+- [x] 输出校准建议报告，不自动修改 `strategy.yaml`
+- [x] 每次参数建议记录版本、样本窗口、walk-forward 验证结果
+- [x] CLI：`bin/trade calibrate --json`
+- 2026-05-19：`atrade calibrate --json` 已接入；默认至少 20 笔闭合复盘才输出可执行参数建议，`--record` 追加 `strategy.calibration.proposed` 和 Markdown artifact。
 
 ### P5-2 评分权重优化
 
 **方案**：
-- [ ] 收集每笔交易的入场评分 vs 最终盈亏
-- [ ] 分析四个维度（技术/基本面/资金/舆情）哪个对盈亏的预测力最强
-- [ ] 用 walk-forward 的 sweep 结果交叉验证
-- [ ] 保留独立验证窗口，避免用同一批样本反复调参
-- [ ] 输出权重调整建议
+- [x] 收集每笔交易的入场评分 vs 最终盈亏
+- [x] 分析四个维度（技术/基本面/资金/舆情）哪个对盈亏的预测力最强
+- [x] 用 walk-forward 的 sweep 结果交叉验证
+- [x] 保留独立验证窗口，避免用同一批样本反复调参
+- [x] 输出权重调整建议
+- 2026-05-19：校准报告按来源评分事件关联 `trade.review.recorded`，输出四维相关性和 increase/decrease/hold 建议；样本不足时只报缺口。
 
 ### P5-3 选股条件优化
 
 **方案**：
-- [ ] 统计核心池股票的"入池后 N 日表现"
-- [ ] 分析哪些 veto 规则最有效（拦截了多少真正的亏损）
-- [ ] 分析哪些 veto 规则过于严格（误杀了多少盈利机会）
-- [ ] 基于数据调整 `screening.mx_query` 和 `scoring.veto` 列表
+- [x] 统计核心池股票的"入池后 N 日表现"
+- [x] 分析哪些 veto 规则最有效（拦截了多少真正的亏损）
+- [x] 分析哪些 veto 规则过于严格（误杀了多少盈利机会）
+- [x] 基于数据调整 `screening.mx_query` 和 `scoring.veto` 列表
+- 2026-05-19：校准报告统计 candidate 入池后 5 日表现、veto 触发频率和选股条件复核建议；只输出建议，不自动改 `screening.mx_query` 或 `scoring.veto`。
 
 ---
 
