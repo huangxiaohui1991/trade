@@ -53,6 +53,7 @@ Use JSON output for automation:
 - `atrade status --json`
 - `atrade screener candidates --json`
 - `atrade screener explain --json`
+- `atrade screener iterate --json`
 - `atrade screener refresh --json`
 - `atrade screener run --query "..." --json`
 - `atrade stock analyze CODE_OR_NAME --json`

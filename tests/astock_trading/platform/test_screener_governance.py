@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from astock_trading.platform.cli.screener import (
     _add_watch_candidates,
     _apply_candidate_pool_refresh,
+    _build_screener_iteration_plan,
     _build_screener_explanation,
+    _record_screener_iteration,
     _watch_threshold,
 )
 from astock_trading.platform.db import connect, init_db
@@ -186,6 +190,90 @@ def test_build_screener_explanation_returns_follow_up_candidate_layers():
         "label": "复核观察候选",
         "command": "atrade stock analyze 001 --json",
     }
+
+
+def test_build_screener_iteration_plan_keeps_guardrails_and_next_command():
+    explanation = {
+        "summary": "近期候选整体评分不足，当前不应通过降低买入线来制造交易。",
+        "scope": {"score_events": 170, "decision_events": 170},
+        "score_buckets": {
+            "buy_ready_raw": 0,
+            "near_buy": 0,
+            "watch_band": 0,
+            "reject_band": 1,
+            "below_reject": 169,
+        },
+        "follow_up_counts": {
+            "watch_candidates": 0,
+            "near_watch_candidates": 1,
+            "blocked_high_scores": 0,
+            "data_repair_candidates": 136,
+        },
+        "follow_up": {
+            "watch_candidates": [],
+            "near_watch_candidates": [{"code": "301338", "name": "凯格精机", "score": 4.3}],
+            "blocked_high_scores": [],
+            "data_repair_candidates": [{"code": "002387", "name": "维信诺", "score": 2.0}],
+        },
+        "next_actions": [
+            {
+                "type": "near_watch_review",
+                "label": "复核临界观察候选",
+                "command": "atrade stock analyze 301338 --json",
+            }
+        ],
+    }
+
+    payload = _build_screener_iteration_plan(explanation, record=True)
+
+    assert payload["diagnostic"] == "screener_iteration"
+    assert payload["status"] == "needs_action"
+    assert payload["closed_loop"]["next_command"] == "atrade stock analyze 301338 --json"
+    assert payload["iteration_plan"][0]["type"] == "near_watch_review"
+    assert payload["iteration_plan"][1]["type"] == "data_repair"
+    assert payload["guardrails"]["blocked_auto_adjustments"][0]["type"] == "lower_buy_threshold"
+    assert payload["guardrails"]["manual_confirmation_required"] is True
+
+
+def test_record_screener_iteration_appends_strategy_event(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        ctx = SimpleNamespace(event_store=store)
+        payload = {
+            "diagnostic": "screener_iteration",
+            "status": "needs_action",
+            "iteration_plan": [{"type": "refresh_scores"}],
+        }
+
+        event_id = _record_screener_iteration(ctx, payload, run_id="iter_test")
+
+        events = store.query(event_type="strategy.iteration.proposed")
+        assert events[0]["event_id"] == event_id
+        assert events[0]["stream"] == "strategy:iteration"
+        assert events[0]["payload"] == payload
+        assert events[0]["metadata"] == {"source": "cli.screener.iterate", "run_id": "iter_test"}
+    finally:
+        conn.close()
+
+
+def test_screener_iterate_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "screener", "iterate", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "生成选股自我迭代计划" in result.stdout
+    assert "--no-record" in result.stdout
+    assert "--json" in result.stdout
 
 
 def test_add_watch_candidates_records_candidate_event(tmp_path):

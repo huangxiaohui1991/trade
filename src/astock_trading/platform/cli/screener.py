@@ -441,6 +441,154 @@ def _build_screener_explanation(
     }
 
 
+def _first_follow_up(explanation: dict, group: str) -> dict:
+    items = (explanation.get("follow_up") or {}).get(group) or []
+    return items[0] if items else {}
+
+
+def _first_next_action(explanation: dict, action_type: str) -> dict:
+    for action in explanation.get("next_actions") or []:
+        if action.get("type") == action_type:
+            return action
+    return {}
+
+
+def _iteration_action(
+    action_type: str,
+    label: str,
+    command: str,
+    rationale: str,
+    *,
+    safe_to_auto_apply: bool = False,
+) -> dict:
+    return {
+        "type": action_type,
+        "label": label,
+        "command": command,
+        "rationale": rationale,
+        "safe_to_auto_apply": safe_to_auto_apply,
+    }
+
+
+def _build_screener_iteration_plan(explanation: dict, *, record: bool = True) -> dict:
+    scope = explanation.get("scope") or {}
+    score_events = int(scope.get("score_events") or 0)
+    follow_up_counts = explanation.get("follow_up_counts") or {}
+    plan: list[dict] = []
+
+    if score_events == 0:
+        plan.append(_iteration_action(
+            "refresh_scores",
+            "刷新评分证据",
+            "atrade screener refresh --json",
+            "最近没有评分事件，先生成新证据再判断策略是否过严。",
+            safe_to_auto_apply=True,
+        ))
+
+    watch_count = int(follow_up_counts.get("watch_candidates") or 0)
+    if watch_count:
+        plan.append(_iteration_action(
+            "watch_pool_refresh",
+            "刷新观察池",
+            "atrade screener refresh --json",
+            f"发现 {watch_count} 个观察候选，先进入观察池跟踪，不提升为买入意向。",
+            safe_to_auto_apply=True,
+        ))
+
+    near_watch = _first_follow_up(explanation, "near_watch_candidates")
+    if near_watch:
+        action = _first_next_action(explanation, "near_watch_review")
+        command = action.get("command") or f"atrade stock analyze {near_watch.get('code', '')} --json"
+        plan.append(_iteration_action(
+            "near_watch_review",
+            "复核临界观察候选",
+            command,
+            "分数接近观察线但还缺少入场信号或买入强度，只能复核和等待确认。",
+        ))
+
+    blocked_high = _first_follow_up(explanation, "blocked_high_scores")
+    if blocked_high:
+        action = _first_next_action(explanation, "blocked_candidate_review")
+        command = action.get("command") or f"atrade stock analyze {blocked_high.get('code', '')} --json"
+        plan.append(_iteration_action(
+            "blocked_candidate_review",
+            "复核高分被拦截候选",
+            command,
+            "分数达标但被硬门禁拦截，优先确认是风险信号还是数据异常。",
+        ))
+
+    data_repair = _first_follow_up(explanation, "data_repair_candidates")
+    data_repair_count = int(follow_up_counts.get("data_repair_candidates") or 0)
+    if data_repair:
+        action = _first_next_action(explanation, "data_repair_review")
+        command = action.get("command") or f"atrade stock analyze {data_repair.get('code', '')} --json"
+        plan.append(_iteration_action(
+            "data_repair",
+            "复核数据补齐候选",
+            command,
+            f"发现 {data_repair_count} 个数据降级或缺字段候选，先修复证据链再提高判断置信度。",
+        ))
+
+    buckets = explanation.get("score_buckets") or {}
+    if score_events and not plan and int(buckets.get("below_reject") or 0) >= max(score_events * 0.8, 1):
+        plan.append(_iteration_action(
+            "recall_expand",
+            "扩大召回后重新评分",
+            "atrade screener refresh --json",
+            "绝大多数候选低于拒绝线，优先扩大召回或补齐数据，而不是降低买入线。",
+            safe_to_auto_apply=True,
+        ))
+
+    next_command = plan[0]["command"] if plan else "atrade screener explain --json"
+    status = "needs_action" if plan else "stable_wait"
+    return {
+        "diagnostic": "screener_iteration",
+        "status": status,
+        "mode": "dry_run",
+        "summary": "已生成受控迭代计划；只允许证据刷新、观察池刷新和单股复核，不自动降低买入线。",
+        "closed_loop": {
+            "phase": "proposal",
+            "record_event": record,
+            "next_command": next_command,
+            "can_self_adjust_without_trade": any(item["safe_to_auto_apply"] for item in plan),
+        },
+        "iteration_plan": plan,
+        "guardrails": {
+            "manual_confirmation_required": True,
+            "blocked_auto_adjustments": [
+                {
+                    "type": "lower_buy_threshold",
+                    "reason": "买入线变化会改变交易风险收益，必须人工批准并通过回测/复盘验证。",
+                },
+                {
+                    "type": "switch_config_profile",
+                    "reason": "策略 profile 会改变执行语义，必须显式批准。",
+                },
+                {
+                    "type": "place_real_order",
+                    "reason": "系统没有实盘券商接口，真实交易边界是人工确认。",
+                },
+            ],
+        },
+        "source_explanation": {
+            "summary": explanation.get("summary", ""),
+            "scope": scope,
+            "score_buckets": buckets,
+            "follow_up_counts": follow_up_counts,
+        },
+    }
+
+
+def _record_screener_iteration(ctx, payload: dict, *, run_id: str) -> str:
+    return ctx.event_store.append(
+        stream="strategy:iteration",
+        stream_type="strategy",
+        event_type="strategy.iteration.proposed",
+        payload=payload,
+        metadata={"source": "cli.screener.iterate", "run_id": run_id},
+    )
+
+
 def _add_watch_candidates(ctx, scores: list[dict], threshold: float, run_id: str) -> list[dict]:
     existing = {
         row["code"]
@@ -771,6 +919,64 @@ def screener_explain(
             near_miss_margin=near_miss_margin,
             follow_up_limit=follow_up_limit,
         )
+        json_or_text(payload, as_json)
+    finally:
+        ctx.conn.close()
+
+
+@screener_app.command("iterate")
+def screener_iterate(
+    since: str = typer.Option("", "--since", help="起始时间 ISO；空值使用 --days 回推"),
+    days: int = typer.Option(7, "--days", help="未指定 --since 时回看天数"),
+    run_id: str = typer.Option("", "--run-id", help="只分析指定 run_id 的评分/决策事件"),
+    limit: int = typer.Option(1000, "--limit", help="最大读取事件数量"),
+    near_miss_margin: float = typer.Option(1.0, "--near-miss-margin", help="买入线下方多少分视为临界候选"),
+    follow_up_limit: int = typer.Option(10, "--follow-up-limit", help="每类跟进候选最多返回数量"),
+    record: bool = typer.Option(True, "--record/--no-record", help="是否写入 strategy.iteration.proposed 证据事件"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """生成选股自我迭代计划，并按受控边界记录建议事件。"""
+    if days < 1:
+        raise typer.BadParameter("--days must be >= 1")
+    if limit < 1:
+        raise typer.BadParameter("--limit must be >= 1")
+    if follow_up_limit < 1:
+        raise typer.BadParameter("--follow-up-limit must be >= 1")
+
+    ctx = build_context()
+    try:
+        since_value = since.strip() or (local_now() - timedelta(days=days)).isoformat()
+        metadata_filter = {"run_id": run_id} if run_id else None
+        score_events = ctx.event_store.query(
+            event_type="score.calculated",
+            since=since_value,
+            limit=limit,
+            metadata_filter=metadata_filter,
+        )
+        decision_events = ctx.event_store.query(
+            event_type="decision.suggested",
+            since=since_value,
+            limit=limit,
+            metadata_filter=metadata_filter,
+        )
+        thresholds = ctx.cfg.get("scoring", {}).get("thresholds", {})
+        explanation = _build_screener_explanation(
+            [event["payload"] for event in score_events],
+            [event["payload"] for event in decision_events],
+            thresholds=thresholds,
+            since=since_value,
+            run_id=run_id or None,
+            near_miss_margin=near_miss_margin,
+            follow_up_limit=follow_up_limit,
+        )
+        payload = _build_screener_iteration_plan(explanation, record=record)
+        iteration_run_id = f"screener_iterate_{local_now_str('%H%M%S')}"
+        if record:
+            payload["event_id"] = _record_screener_iteration(
+                ctx,
+                payload,
+                run_id=iteration_run_id,
+            )
         json_or_text(payload, as_json)
     finally:
         ctx.conn.close()
