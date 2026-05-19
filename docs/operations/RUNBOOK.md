@@ -116,6 +116,18 @@ atrade review trades --code 002138 --as-of 2026-05-18 --record --json
 `--record` 会追加 `trade.review.recorded`；不加 `--record` 只预览。复盘依赖
 `market_bars`，没有 K 线时会返回 `insufficient_market_bars`，不要让 LLM 自行猜测 MFE/MAE。
 
+模拟盘 vs 实盘逐笔对账：
+
+```bash
+atrade review shadow --date 2026-05-18 --json
+atrade review shadow --date 2026-05-18 --record --json
+```
+
+对账优先使用 `signal_id`，缺失时回退到 `code + side + event_date`，并在明细里保留
+`order_id`。`--record` 会把偏离写成 `rule_deviation.recorded`，偏离类型包括
+`not_executed`、`extra_real_trade`、`partial_fill`、`price_slippage` 和
+`manual_override`。
+
 ## launchd 安装
 
 模板在 `config/launchd/`。复制到 `~/Library/LaunchAgents/` 后加载：

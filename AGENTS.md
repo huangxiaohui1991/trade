@@ -74,6 +74,7 @@ Use JSON output for automation:
 - `atrade market-intel fund-flow CODE --json`
 - `atrade record-buy CODE SHARES PRICE --yes --json`
 - `atrade record-sell CODE SHARES PRICE --yes --json`
+- `atrade review shadow --json`
 - `atrade review trades --json`
 - `atrade manual-trades list --json`
 - `atrade paper status --json`

@@ -687,7 +687,18 @@ def _score_and_buy(
         if shares <= 0:
             continue
 
-        buy_info = _execute_buy(paper, code, candidate.get("name", code), shares, price, run_id, ctx, dry_run)
+        buy_info = _execute_buy(
+            paper,
+            code,
+            candidate.get("name", code),
+            shares,
+            price,
+            run_id,
+            ctx,
+            dry_run,
+            source_event_id=candidate.get("source_event_id", ""),
+            source_score_event_id=candidate.get("source_score_event_id", ""),
+        )
         if buy_info:
             buy_info["score"] = candidate.get("score", 0)
             buy_info["position_pct"] = position_pct
@@ -740,6 +751,8 @@ def _get_buy_candidates(
             "name": p.get("name", code),
             "score": p.get("score", 0),
             "position_pct": p.get("position_pct", 0),
+            "source_event_id": ev.get("event_id", ""),
+            "source_score_event_id": p.get("source_score_event_id", ""),
             "price": 0,  # 需要实时获取
         })
 
@@ -776,6 +789,8 @@ def _execute_buy(
     run_id: str,
     ctx: PipelineContext,
     dry_run: bool,
+    source_event_id: str = "",
+    source_score_event_id: str = "",
 ) -> dict | None:
     """执行模拟盘买入。"""
     info = {
@@ -786,6 +801,8 @@ def _execute_buy(
         "price": price,
         "amount": shares * price,
         "dry_run": dry_run,
+        "source_event_id": source_event_id,
+        "source_score_event_id": source_score_event_id,
     }
 
     if dry_run:

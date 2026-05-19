@@ -1086,6 +1086,57 @@ def test_record_sell_json_via_bin_trade(tmp_path):
     assert payload["position_after"] is None
 
 
+def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path):
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
+    from astock_trading.platform.events import EventStore
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        event_id = EventStore(conn).append(
+            stream="paper:002138",
+            stream_type="paper_trade",
+            event_type=AUTO_TRADE_EXECUTED,
+            payload={
+                "side": "buy",
+                "code": "002138",
+                "name": "双环传动",
+                "shares": 100,
+                "price": 10.0,
+                "status": "filled",
+                "source_score_event_id": "score_cli_1",
+            },
+            metadata={"run_id": "paper_cli", "account": "paper"},
+        )
+        conn.execute(
+            "UPDATE event_log SET occurred_at = ? WHERE event_id = ?",
+            ("2026-05-18T10:00:00+08:00", event_id),
+        )
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [str(cli), "review", "shadow", "--date", "2026-05-18", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["summary"]["paper_trades"] == 1
+    assert payload["summary"]["real_trades"] == 0
+    assert payload["summary"]["deviation_types"] == {"not_executed": 1}
+    assert payload["items"][0]["join_key"]["signal_id"] == "score_cli_1"
+    assert payload["items"][0]["rule_deviation"] == "shadow_divergence"
+
+
 def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

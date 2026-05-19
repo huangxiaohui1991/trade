@@ -85,9 +85,10 @@
 - [x] 月报增加"模拟盘 vs 实盘"对比区块（买入信号数 / 执行数 / 偏离 / 盈亏差异）
 - [ ] 收盘报告增加"模拟盘 vs 实盘"对比区块（待实盘有数据后启用）
 - [ ] 周报增加模拟盘独立 P&L 统计（待积累更多数据）
-- [ ] 建立逐笔 join 口径：`signal_id / code / side / event_date / order_id`
-- [ ] 偏离类型结构化：`not_executed / extra_real_trade / partial_fill / price_slippage / manual_override`
-- [ ] 当模拟盘信号与实盘操作不一致时，记录 `rule_deviation: shadow_divergence`
+- [x] 建立逐笔 join 口径：`signal_id / code / side / event_date / order_id`
+- [x] 偏离类型结构化：`not_executed / extra_real_trade / partial_fill / price_slippage / manual_override`
+- [x] 当模拟盘信号与实盘操作不一致时，记录 `rule_deviation: shadow_divergence`
+  - 2026-05-19：新增 `review shadow --json`，支持预览/写入模拟盘与实盘逐笔偏离；模拟盘买入事件保留来源 decision/score id。
 
 ### P4-3 月度复盘自动生成
 

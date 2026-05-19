@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from astock_trading.execution.reconciliation import TradeReconciliationService
 from astock_trading.execution.review import TradeReviewService
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect, init_db
@@ -29,6 +30,29 @@ def review_trades(
             as_of=as_of or None,
             code=code,
             record=record,
+            limit=limit,
+        )
+        json_or_text(payload, as_json)
+    finally:
+        conn.close()
+
+
+@review_app.command("shadow")
+def review_shadow(
+    date: str = typer.Option("", "--date", help="对账日期 YYYY-MM-DD，默认今天"),
+    record: bool = typer.Option(False, "--record", help="写入 rule_deviation.recorded；不传则只预览"),
+    slippage_bps: int = typer.Option(50, "--slippage-bps", help="价格偏离阈值，单位 bps"),
+    limit: int = typer.Option(1000, help="最多扫描事件数"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """模拟盘 vs 实盘逐笔对账。"""
+    init_db()
+    conn = connect()
+    try:
+        payload = TradeReconciliationService(EventStore(conn)).reconcile(
+            date=date or None,
+            record=record,
+            slippage_bps=slippage_bps,
             limit=limit,
         )
         json_or_text(payload, as_json)
