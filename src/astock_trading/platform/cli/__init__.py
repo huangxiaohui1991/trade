@@ -16,6 +16,7 @@ from astock_trading.platform.cli.diagnostics import register_diagnostics_command
 from astock_trading.platform.cli.events import events_app
 from astock_trading.platform.cli.health import register_health_commands
 from astock_trading.platform.cli.hermes import register_hermes_commands
+from astock_trading.platform.cli.history import history_app
 from astock_trading.platform.cli.init import register_init_command
 from astock_trading.platform.cli.manual_trades import manual_trades_app
 from astock_trading.platform.cli.market_intel import market_intel_app
@@ -48,6 +49,7 @@ app.add_typer(screener_app)
 app.add_typer(stock_app)
 app.add_typer(notify_app)
 app.add_typer(market_intel_app)
+app.add_typer(history_app)
 app.add_typer(review_app)
 register_agent_context(app)
 register_init_command(app)

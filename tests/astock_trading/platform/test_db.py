@@ -18,7 +18,7 @@ def test_init_db_sets_latest_schema_version(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 3
+        assert version == 4
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")
@@ -28,6 +28,19 @@ def test_init_db_sets_latest_schema_version(tmp_path):
             row["name"] for row in conn.execute("PRAGMA table_info(event_streams)")
         }
         assert {"stream", "stream_type", "next_version", "updated_at"} <= stream_columns
+        history_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(signal_history_snapshots)")
+        }
+        assert {
+            "snapshot_id",
+            "snapshot_date",
+            "history_group_id",
+            "run_id",
+            "phase",
+            "snapshot_type",
+            "payload_json",
+            "created_at",
+        } <= history_columns
     finally:
         conn.close()
 
@@ -52,7 +65,7 @@ def test_runtime_db_uses_sqlalchemy_url(monkeypatch, tmp_path):
     init_db()
     conn = connect()
     try:
-        assert get_schema_version(conn) == 3
+        assert get_schema_version(conn) == 4
         conn.execute(
             "INSERT INTO event_log "
             "(event_id, stream, stream_type, stream_version, event_type, payload_json, metadata_json, occurred_at) "
@@ -100,7 +113,7 @@ def test_init_db_migrates_v1_projection_positions(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 3
+        assert version == 4
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")
@@ -110,5 +123,9 @@ def test_init_db_migrates_v1_projection_positions(tmp_path):
             row["name"] for row in conn.execute("PRAGMA table_info(event_streams)")
         }
         assert {"stream", "stream_type", "next_version", "updated_at"} <= stream_columns
+        history_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(signal_history_snapshots)")
+        }
+        assert "history_group_id" in history_columns
     finally:
         conn.close()

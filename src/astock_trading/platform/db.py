@@ -16,7 +16,7 @@ from typing import Optional
 from astock_trading.platform.database import Database
 
 _BASE_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -212,6 +212,29 @@ CREATE TABLE IF NOT EXISTS _schema_version (
 );
 """
 
+_SCHEMA_SQL_4 = """\
+-- ═══════════════════════════════════════════════════════════════
+-- 历史信号镜像
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS signal_history_snapshots (
+    snapshot_id      TEXT PRIMARY KEY,
+    snapshot_date    TEXT NOT NULL,
+    history_group_id TEXT NOT NULL,
+    run_id           TEXT NOT NULL,
+    phase            TEXT NOT NULL,
+    snapshot_type    TEXT NOT NULL,
+    payload_json     TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    UNIQUE(history_group_id, snapshot_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_history_date
+    ON signal_history_snapshots(snapshot_date, created_at);
+CREATE INDEX IF NOT EXISTS idx_signal_history_group
+    ON signal_history_snapshots(history_group_id);
+"""
+
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -290,6 +313,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
     conn.executescript(_SCHEMA_SQL_2)
     conn.executescript(_SCHEMA_SQL_3)
+    conn.executescript(_SCHEMA_SQL_4)
     _ensure_schema_version_table(conn)
 
 
@@ -310,6 +334,10 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
                updated_at      TEXT NOT NULL
            )"""
     )
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    conn.executescript(_SCHEMA_SQL_4)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_event_streams_type "
         "ON event_streams(stream_type)"
@@ -319,6 +347,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
+    4: _migrate_to_v4,
 }
 
 

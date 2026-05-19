@@ -68,6 +68,8 @@ atrade db check --json
 - `event_streams`：事件流版本
 - `config_versions`：冻结后的规则版本
 - `run_log`：运行生命周期和 artifacts
+- `signal_history_snapshots`：历史信号镜像，按 `snapshot_date / history_group_id`
+  保留 market / pool / candidates / decision 四段运行证据
 
 市场数据表：
 
@@ -98,11 +100,12 @@ atrade db check --json
 4. `MarketService` 采集并标准化行情、财报、资金流、舆情
 5. `StrategyService.evaluate()` 写入 `score.calculated` 和 `decision.suggested`
 6. 若决策为 `BUY`，额外写入 `manual_trade.requested` 并触发人工确认通知
-7. `RiskService` 写入 `risk.*` 风控事件
-8. `ExecutionService` 记录人工买卖或模拟成交，并做一致性审计
-9. `ProjectionUpdater.rebuild_all()` 从事件重建投影
-10. `ReportGenerator`、Discord、Obsidian 输出中文报告
-11. `RunJournal.complete_run()` 或 `fail_run()` 记录运行结果
+7. `screener` / `scoring` 把 market、候选池、评分候选和决策归档为同一组历史信号镜像
+8. `RiskService` 写入 `risk.*` 风控事件
+9. `ExecutionService` 记录人工买卖或模拟成交，并做一致性审计
+10. `ProjectionUpdater.rebuild_all()` 从事件重建投影
+11. `ReportGenerator`、Discord、Obsidian 输出中文报告
+12. `RunJournal.complete_run()` 或 `fail_run()` 记录运行结果
 
 ## Pipeline 入口
 
@@ -150,6 +153,7 @@ atrade db check --json
 - pipeline：`src/astock_trading/platform/pipeline_runner.py`、`src/astock_trading/pipeline/`
 - 数据源健康：`src/astock_trading/market/health.py`、`src/astock_trading/platform/pipeline_policy.py`
 - 选股和评分：`src/astock_trading/platform/cli/screener.py`、`src/astock_trading/strategy/`
+- 历史信号镜像：`src/astock_trading/platform/history_mirror.py`、`src/astock_trading/platform/cli/history.py`
 - 人工确认：`src/astock_trading/strategy/service.py`、`src/astock_trading/platform/cli/manual_trades.py`、`src/astock_trading/platform/cli/trading.py`
 - 成交和持仓：`src/astock_trading/execution/`
 - 投影和报告：`src/astock_trading/reporting/`

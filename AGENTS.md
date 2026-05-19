@@ -58,6 +58,7 @@ Use JSON output for automation:
 - `atrade events query --json`
 - `atrade events evidence CODE --json`
 - `atrade events backfill-evidence --json`
+- `atrade history signal --date YYYY-MM-DD --code CODE --json`
 - `atrade runs list --json`
 - `atrade status --json`
 - `atrade screener candidates --json`

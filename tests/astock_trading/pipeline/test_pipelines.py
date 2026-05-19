@@ -320,6 +320,21 @@ class TestScoringPipeline:
         assert (vault / "01-状态" / "池子" / "核心池.md").exists()
         assert (vault / "01-状态" / "池子" / "观察池.md").exists()
 
+    def test_archives_signal_history_snapshot(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        from astock_trading.pipeline.scoring import run
+
+        result = run(ctx, "run_scoring_history")
+        rows = ctx.conn.execute(
+            "SELECT history_group_id, phase, snapshot_type FROM signal_history_snapshots WHERE run_id = ?",
+            ("run_scoring_history",),
+        ).fetchall()
+
+        assert result["history_group_id"].startswith("2026-")
+        assert {row["snapshot_type"] for row in rows} == {"market", "pool", "candidates", "decision"}
+        assert {row["phase"] for row in rows} == {"scoring"}
+
 
 class TestEveningPipeline:
     def test_runs_without_error(self, ctx):

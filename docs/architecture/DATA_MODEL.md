@@ -14,6 +14,9 @@ config_versions (config_version PK, config_hash UNIQUE, config_json, created_at,
 
 -- 运行记录
 run_log (run_id PK, run_type, scope, config_version, status, started_at, finished_at, error_message, artifacts_json)
+
+-- 历史信号镜像
+signal_history_snapshots (snapshot_id PK, snapshot_date, history_group_id, run_id, phase, snapshot_type, payload_json, created_at)
 ```
 
 ## 市场观察表

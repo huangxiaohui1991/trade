@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -24,6 +25,93 @@ def test_screener_limit_defaults_to_configured_market_scan_limit():
     assert _scan_limit({}, None) == 30
 
 
+def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.screener as screener_cli
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+    from astock_trading.reporting.projectors import ProjectionUpdater
+
+    class NonClosingConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, *args, **kwargs):
+            return self._conn.execute(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    class FakeObsidian:
+        def write_screening_result(self, *args, **kwargs):
+            pass
+
+    async def fake_search_stocks(self, query):
+        return [{"code": "002138", "name": "双环传动"}]
+
+    def fake_score_stock_list(ctx, stock_list, run_id):
+        ctx.event_store.append(
+            "strategy:002138",
+            "strategy",
+            "decision.suggested",
+            {
+                "code": "002138",
+                "name": "双环传动",
+                "action": "WATCH",
+                "market_signal": "YELLOW",
+                "notes": ["缺少入场信号"],
+            },
+            metadata={"run_id": run_id},
+        )
+        return [
+            {
+                "code": "002138",
+                "name": "双环传动",
+                "total_score": 5.8,
+                "entry_signal": False,
+                "data_quality": "ok",
+            }
+        ]
+
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    raw_conn = connect(db_path)
+    conn = NonClosingConn(raw_conn)
+    event_store = EventStore(conn)
+    ctx = SimpleNamespace(
+        cfg={
+            "screening": {"market_scan_limit": 1},
+            "pool_management": {"watch_min_score": 5.0},
+            "scoring": {"thresholds": {"buy": 6.5, "watch": 5.0, "reject": 4.0}},
+        },
+        conn=conn,
+        event_store=event_store,
+        projector=ProjectionUpdater(event_store, conn),
+        obsidian=FakeObsidian(),
+    )
+    monkeypatch.setattr(screener_cli, "build_context", lambda: ctx)
+    monkeypatch.setattr(screener_cli.MXScreenerAdapter, "search_stocks", fake_search_stocks)
+    monkeypatch.setattr(screener_cli, "_score_stock_list", fake_score_stock_list)
+
+    try:
+        result = CliRunner().invoke(
+            app,
+            ["screener", "run", "--query", "强势股", "--json"],
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["history_group_id"].endswith(payload["run_id"])
+        rows = raw_conn.execute(
+            "SELECT phase, snapshot_type FROM signal_history_snapshots WHERE history_group_id = ?",
+            (payload["history_group_id"],),
+        ).fetchall()
+        assert {row["snapshot_type"] for row in rows} == {"market", "pool", "candidates", "decision"}
+        assert {row["phase"] for row in rows} == {"screener"}
+    finally:
+        raw_conn.close()
+
+
 def test_doctor_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -39,7 +127,7 @@ def test_doctor_json_via_bin_trade(tmp_path):
 
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
-    assert payload["db"]["schema_version"] == 3
+    assert payload["db"]["schema_version"] == 4
     assert payload["config"]["version"].startswith("v")
     assert "installed" in payload["mcp"]
     assert payload["timezone"] == "Asia/Shanghai"
@@ -326,7 +414,59 @@ def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
     )
 
     payload = json.loads(result.stdout)
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
+
+
+def test_history_signal_json_via_bin_trade(tmp_path):
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.history_mirror import archive_signal_history
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-19",
+            history_group_id="hist_cli_1",
+            run_id="screener_cli",
+            phase="screener",
+            market={"signal": "GREEN"},
+            pool=[],
+            candidates=[{"code": "300558", "name": "贝达药业", "total_score": 5.6}],
+            decisions=[{"code": "300558", "name": "贝达药业", "action": "WATCH", "score": 5.6}],
+        )
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            str(cli),
+            "history",
+            "signal",
+            "--date",
+            "2026-05-19",
+            "--history-group-id",
+            "hist_cli_1",
+            "--code",
+            "300558",
+            "--json",
+        ],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["history_group_id"] == "hist_cli_1"
+    assert payload["sections"]["candidates"][0]["code"] == "300558"
+    assert payload["code_analysis"]["decision_action"] == "WATCH"
+    assert "观察" in payload["code_analysis"]["miss_reason"]
 
 
 def test_removed_sqlite_maintenance_commands_via_bin_trade():

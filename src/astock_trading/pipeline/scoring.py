@@ -18,6 +18,7 @@ import logging
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import get_current_exposure
+from astock_trading.platform.history_mirror import archive_from_runtime_state
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import format_scoring_embed
 
@@ -154,6 +155,18 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             metadata={"run_id": run_id},
         )
 
+    decision_events = ctx.event_store.query(
+        event_type="decision.suggested",
+        metadata_filter={"run_id": run_id},
+    )
+    history_group_id = archive_from_runtime_state(
+        ctx.conn,
+        run_id=run_id,
+        phase="scoring",
+        candidates=run_scores,
+        decisions=[event["payload"] for event in decision_events],
+    )
+
     # 6. Obsidian
     ctx.obsidian.write_scoring_report(run_id, run_scores)
     ctx.obsidian.write_core_pool()
@@ -201,5 +214,6 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "scores": run_scores,
         "demoted": demoted,
         "removed": removed,
+        "history_group_id": history_group_id,
         "discord_embed": embed,
     }

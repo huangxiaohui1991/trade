@@ -185,6 +185,22 @@ report_artifacts = Table(
     Column("created_at", String(64), nullable=False),
 )
 
+signal_history_snapshots = Table(
+    "signal_history_snapshots",
+    metadata,
+    Column("snapshot_id", String(64), primary_key=True),
+    Column("snapshot_date", String(32), nullable=False),
+    Column("history_group_id", String(128), nullable=False),
+    Column("run_id", String(128), nullable=False),
+    Column("phase", String(32), nullable=False),
+    Column("snapshot_type", String(32), nullable=False),
+    Column("payload_json", JSON, nullable=False),
+    Column("created_at", String(64), nullable=False),
+    UniqueConstraint("history_group_id", "snapshot_type", name="uq_signal_history_group_type"),
+    Index("idx_signal_history_date", "snapshot_date", "created_at"),
+    Index("idx_signal_history_group", "history_group_id"),
+)
+
 schema_version = Table(
     "_schema_version",
     metadata,

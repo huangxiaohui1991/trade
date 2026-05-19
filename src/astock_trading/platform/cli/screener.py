@@ -14,6 +14,7 @@ from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect
 from astock_trading.platform.events import EventStore
+from astock_trading.platform.history_mirror import archive_from_runtime_state
 from astock_trading.platform.time import local_now, local_now_str
 from astock_trading.reporting.projectors import ProjectionUpdater
 
@@ -837,10 +838,22 @@ def _run_screener(
             pool_changes = {}
             added = _add_watch_candidates(ctx, scores, threshold, run_id)
         ctx.obsidian.write_screening_result(run_id, q, scores, added, buy_threshold=threshold)
+        decision_events = ctx.event_store.query(
+            event_type="decision.suggested",
+            metadata_filter={"run_id": run_id},
+        )
+        history_group_id = archive_from_runtime_state(
+            ctx.conn,
+            run_id=run_id,
+            phase="screener",
+            candidates=scores,
+            decisions=[event["payload"] for event in decision_events],
+        )
 
         payload = {
             "query": q,
             "run_id": run_id,
+            "history_group_id": history_group_id,
             "screened": len(raw_results),
             "threshold": threshold,
             "scored": scores,
