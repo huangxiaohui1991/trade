@@ -71,6 +71,7 @@ Use JSON output for automation:
 - `atrade stock analyze CODE_OR_NAME --json`
 - `atrade suggest --json`
 - `atrade explain CODE --json`
+- `atrade risk adaptive --json`
 - `atrade risk check CODE --json`
 - `atrade risk portfolio --json`
 - `atrade risk position CODE SCORE PRICE --json`

@@ -24,6 +24,7 @@ atrade init
 atrade health --json
 atrade diagnose strategy --json
 atrade calibrate --json
+atrade risk adaptive --json
 atrade screener explain --json
 atrade screener iterate --json
 atrade stock analyze 600703 --json
@@ -137,6 +138,19 @@ atrade calibrate --record --json
 输出止盈/止损/时间止损建议、四维评分权重方向、veto/选股条件复核建议。样本不足时返回
 `insufficient_data`；`--record` 会追加 `strategy.calibration.proposed` 并落一份 Markdown
 报告 artifact。
+
+P6-1 自适应风控同样只输出建议，不自动改配置或下单：
+
+```bash
+atrade risk adaptive --json
+atrade risk adaptive --record --json
+```
+
+该命令读取 `market_bars`、`balance.*` 事件 / 余额投影和 `trade.review.recorded`，
+根据近期市场波动、账户回撤和连续盈亏状态输出止损宽度、仓位上限、买入阈值建议。
+样本不足时返回 `insufficient_data`；`--record` 会追加
+`risk.adaptive_suggestion.proposed` 并落一份 Markdown 报告 artifact。该建议只供人工
+复核和后续参数校准使用，不会写 `strategy.yaml`，也不会触发真实交易。
 
 模拟盘 vs 实盘逐笔对账：
 

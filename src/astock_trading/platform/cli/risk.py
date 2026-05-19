@@ -6,6 +6,8 @@ from datetime import datetime
 
 import typer
 
+from astock_trading.pipeline.adaptive_risk import run_adaptive_risk
+from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.db import connect, init_db
@@ -140,6 +142,36 @@ def risk_trial_guard(
         ],
     }
     json_or_text(payload, as_json)
+
+
+@risk_app.command("adaptive")
+def risk_adaptive(
+    lookback_days: int = typer.Option(20, "--lookback-days", help="自适应风控证据回看天数"),
+    min_market_bars: int = typer.Option(10, "--min-market-bars", help="波动率建议所需的最少 K 线样本"),
+    record: bool = typer.Option(False, "--record/--no-record", help="是否记录 risk.adaptive_suggestion.proposed 事件"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """P6-1 自适应风控建议；只读，不自动改配置或下单。"""
+    if lookback_days < 1:
+        raise typer.BadParameter("--lookback-days must be >= 1")
+    if min_market_bars < 1:
+        raise typer.BadParameter("--min-market-bars must be >= 1")
+
+    ctx = build_context()
+    try:
+        payload = run_adaptive_risk(
+            ctx.conn,
+            lookback_days=lookback_days,
+            min_market_bars=min_market_bars,
+            record=record,
+            config_version=ctx.config_version,
+        )
+        if as_json:
+            json_or_text(payload, True)
+            return
+        typer.echo(payload["report_markdown"])
+    finally:
+        ctx.conn.close()
 
 
 @risk_app.command("check")
