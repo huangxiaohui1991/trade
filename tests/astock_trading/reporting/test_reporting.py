@@ -6,6 +6,7 @@ from astock_trading.execution.models import OrderSide
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager
 from astock_trading.platform.db import init_db, connect
+from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.discord import (
     format_evening_embed, format_morning_embed,
@@ -230,6 +231,29 @@ class TestReportGenerator:
     def test_evening_report(self, event_store, db):
         _seed(event_store, db)
         assert "收盘报告" in ReportGenerator(event_store, db).generate_evening_report("run_1")
+
+    def test_evening_report_includes_shadow_reconciliation(self, event_store, db):
+        event_store.append(
+            stream="paper:002138",
+            stream_type="paper_trade",
+            event_type=AUTO_TRADE_EXECUTED,
+            payload={
+                "side": "buy",
+                "code": "002138",
+                "name": "双环传动",
+                "shares": 100,
+                "price": 10.0,
+                "status": "filled",
+                "source_score_event_id": "score_report_1",
+            },
+            metadata={"run_id": "paper_report", "account": "paper"},
+        )
+
+        report = ReportGenerator(event_store, db).generate_evening_report("run_1")
+
+        assert "模拟盘 vs 实盘对账" in report
+        assert "模拟盘 1 / 实盘 0 / 匹配 0 / 偏离 1" in report
+        assert "未执行" in report
 
     def test_weekly_report(self, event_store, db):
         assert "周报" in ReportGenerator(event_store, db).generate_weekly_report()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from astock_trading.execution.reconciliation import TradeReconciliationService
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import local_date_bounds_utc, local_now_str
 from astock_trading.platform.time import local_today, utc_now_iso
@@ -184,6 +185,8 @@ class ReportGenerator:
                 lines.append(f"| {p.get('code', '')} | {p.get('side', '')} | {p.get('shares', 0)} | {price:.2f} |")
             lines.append("")
 
+        self._append_shadow_reconciliation(lines)
+
         # 风控事件
         risk_events = self._events.query(stream_type="risk")
         today_risks = [
@@ -200,6 +203,48 @@ class ReportGenerator:
         report = "\n".join(lines) + "\n"
         self._save_artifact(run_id, "evening", "markdown", report)
         return report
+
+    def _append_shadow_reconciliation(self, lines: list[str]) -> None:
+        reconciliation = TradeReconciliationService(self._events).reconcile(date=local_today().isoformat())
+        summary = reconciliation.get("summary", {})
+        paper_count = int(summary.get("paper_trades") or 0)
+        real_count = int(summary.get("real_trades") or 0)
+        deviation_count = int(summary.get("deviation_count") or 0)
+        if paper_count == 0 and real_count == 0 and deviation_count == 0:
+            return
+
+        lines.append("## 模拟盘 vs 实盘对账")
+        lines.append("")
+        lines.append(
+            f"- 模拟盘 {paper_count} / 实盘 {real_count} / "
+            f"匹配 {summary.get('matched', 0)} / 偏离 {deviation_count}"
+        )
+        deviation_types = summary.get("deviation_types") or {}
+        if deviation_types:
+            labels = [
+                f"{_deviation_type_label(kind)} {count}"
+                for kind, count in deviation_types.items()
+            ]
+            lines.append(f"- 偏离类型：{'，'.join(labels)}")
+
+        items = [
+            item for item in reconciliation.get("items", [])
+            if item.get("deviation_type") != "matched"
+        ][:5]
+        if items:
+            lines.append("")
+            lines.append("| 类型 | 代码 | 信号 | 说明 |")
+            lines.append("|------|------|------|------|")
+            for item in items:
+                join_key = item.get("join_key") or {}
+                details = item.get("details") or {}
+                lines.append(
+                    f"| {_deviation_type_label(item.get('deviation_type', ''))} "
+                    f"| {join_key.get('code', '')} "
+                    f"| {join_key.get('signal_id', '') or '—'} "
+                    f"| {details.get('message', '') or _deviation_type_label(item.get('deviation_type', ''))} |"
+                )
+        lines.append("")
 
     def generate_weekly_report(self, week: str = "") -> str:
         """周报：从本周事件汇总生成。"""
@@ -239,3 +284,14 @@ class ReportGenerator:
         report = "\n".join(lines) + "\n"
         self._save_artifact("weekly", "weekly", "markdown", report)
         return report
+
+
+def _deviation_type_label(kind: str) -> str:
+    return {
+        "not_executed": "未执行",
+        "extra_real_trade": "实盘额外交易",
+        "partial_fill": "部分成交",
+        "price_slippage": "价格偏离",
+        "manual_override": "人工覆盖",
+        "matched": "一致",
+    }.get(kind, kind or "未知")
