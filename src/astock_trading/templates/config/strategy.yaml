@@ -140,6 +140,7 @@ risk:
   position:
     total_max: 0.60
     single_max: 0.20
+    trial_single_max_ratio: 0.50
     weekly_max: 2
     holding_max: 4
 

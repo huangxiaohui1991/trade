@@ -93,6 +93,55 @@ def risk_position(
     json_or_text(payload, as_json)
 
 
+@risk_app.command("trial-guard")
+def risk_trial_guard(
+    capital: float | None = typer.Option(None, "--capital", help="总资金；默认读取 strategy.capital"),
+    amount: float | None = typer.Option(None, "--amount", help="拟执行单笔金额，用于检查是否超过试运行上限"),
+    trial_ratio: float | None = typer.Option(None, "--trial-ratio", help="试运行比例；默认正式单票上限的一半"),
+    single_max_pct: float | None = typer.Option(None, "--single-max-pct", help="正式单票仓位上限"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """审计首轮实盘试运行护栏；只读，不执行交易。"""
+    strategy = _strategy_config()
+    position_cfg = _position_limits(strategy)
+    total_capital = capital if capital is not None else float(strategy.get("capital", 500000))
+    single_max = single_max_pct if single_max_pct is not None else float(position_cfg.get("single_max", 0.20))
+    ratio = trial_ratio if trial_ratio is not None else float(position_cfg.get("trial_single_max_ratio", 0.50))
+    cap_pct = round(single_max * ratio, 4)
+    cap_amount = round(total_capital * cap_pct, 2)
+    checked_order = None
+    status = "ok"
+    if amount is not None:
+        within_cap = amount <= cap_amount
+        checked_order = {
+            "amount": amount,
+            "within_cap": within_cap,
+            "excess_amount": round(max(amount - cap_amount, 0), 2),
+        }
+        if not within_cap:
+            status = "breached"
+
+    payload = {
+        "status": status,
+        "manual_confirmation_required": True,
+        "real_broker_integration": "disabled",
+        "real_order_auto_execution_allowed": False,
+        "trial_position_cap": {
+            "capital": total_capital,
+            "formal_single_max_pct": single_max,
+            "trial_ratio": ratio,
+            "cap_pct": cap_pct,
+            "cap_amount": cap_amount,
+        },
+        "checked_order": checked_order,
+        "instructions": [
+            "系统只生成买入意向和记录人工成交，不直连券商实盘下单。",
+            "首轮实盘单笔金额应按试运行上限人工确认；超限时先降低股数或放弃执行。",
+        ],
+    }
+    json_or_text(payload, as_json)
+
+
 @risk_app.command("check")
 def risk_check(
     code: str = typer.Argument(..., help="股票代码"),

@@ -71,6 +71,7 @@ Use JSON output for automation:
 - `atrade risk check CODE --json`
 - `atrade risk portfolio --json`
 - `atrade risk position CODE SCORE PRICE --json`
+- `atrade risk trial-guard --json`
 - `atrade market-intel brief --query "..." --json`
 - `atrade market-intel hot-stocks --json`
 - `atrade market-intel northbound --json`

@@ -718,6 +718,28 @@ def test_risk_position_json_via_bin_trade(tmp_path):
     assert payload["shares"] % 100 == 0
 
 
+def test_risk_trial_guard_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "risk", "trial-guard", "--capital", "500000", "--amount", "60000", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "breached"
+    assert payload["manual_confirmation_required"] is True
+    assert payload["real_broker_integration"] == "disabled"
+    assert payload["trial_position_cap"]["cap_pct"] == 0.1
+    assert payload["trial_position_cap"]["cap_amount"] == 50000
+    assert payload["checked_order"]["within_cap"] is False
+
+
 def test_risk_check_json_reports_missing_position_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

@@ -139,6 +139,17 @@ atrade explain 002138 --json
 这三类命令只读事件和投影：`digest` 给一句话状态，`suggest` 给下一步建议，
 `explain` 解释单只股票最近评分和决策。它们不会下单，也不会自动调低买入门槛。
 
+实盘试运行护栏审计：
+
+```bash
+atrade risk trial-guard --json
+atrade risk trial-guard --capital 500000 --amount 60000 --json
+```
+
+该命令只读配置，不执行交易。默认试运行单票上限为正式单票上限的一半
+（`risk.position.single_max * trial_single_max_ratio`），同时明确真实交易必须人工确认，
+系统没有券商实盘下单接口。
+
 ## launchd 安装
 
 模板在 `config/launchd/`。复制到 `~/Library/LaunchAgents/` 后加载：
