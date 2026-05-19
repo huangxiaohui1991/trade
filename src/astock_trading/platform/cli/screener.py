@@ -218,13 +218,15 @@ def _follow_up_candidates(
     watch_threshold: float,
     reject_threshold: float,
     limit: int = 10,
-) -> dict:
+) -> tuple[dict, dict]:
     sorted_scores = sorted(scores, key=_score_value, reverse=True)
     near_watch_floor = max(reject_threshold, watch_threshold - 1.0)
-    watch_candidates = []
-    near_watch_candidates = []
-    blocked_high_scores = []
-    data_repair_candidates = []
+    groups = {
+        "watch_candidates": [],
+        "near_watch_candidates": [],
+        "blocked_high_scores": [],
+        "data_repair_candidates": [],
+    }
 
     for score in sorted_scores:
         total = _score_value(score)
@@ -234,20 +236,18 @@ def _follow_up_candidates(
         item = _candidate_follow_up_item(score, buy_threshold)
 
         if not veto and watch_threshold <= total < buy_threshold:
-            watch_candidates.append(item)
+            groups["watch_candidates"].append(item)
         if not veto and near_watch_floor <= total < watch_threshold:
-            near_watch_candidates.append(item)
+            groups["near_watch_candidates"].append(item)
         if veto and total >= watch_threshold:
-            blocked_high_scores.append(item)
+            groups["blocked_high_scores"].append(item)
         if quality != "ok" or missing:
-            data_repair_candidates.append(item)
+            groups["data_repair_candidates"].append(item)
 
-    return {
-        "watch_candidates": watch_candidates[:limit],
-        "near_watch_candidates": near_watch_candidates[:limit],
-        "blocked_high_scores": blocked_high_scores[:limit],
-        "data_repair_candidates": data_repair_candidates[:limit],
-    }
+    return (
+        {key: values[:limit] for key, values in groups.items()},
+        {key: len(values) for key, values in groups.items()},
+    )
 
 
 def _next_actions(follow_up: dict) -> list[dict]:
@@ -303,6 +303,7 @@ def _build_screener_explanation(
     run_id: str | None = None,
     near_miss_margin: float = 1.0,
     near_miss_limit: int = 20,
+    follow_up_limit: int = 10,
 ) -> dict:
     buy_threshold = float(thresholds.get("buy") or 6.0)
     watch_threshold = float(thresholds.get("watch") or 5.0)
@@ -372,11 +373,12 @@ def _build_screener_explanation(
         }
         for score in sorted(scores, key=_score_value, reverse=True)[:10]
     ]
-    follow_up = _follow_up_candidates(
+    follow_up, follow_up_counts = _follow_up_candidates(
         scores,
         buy_threshold=buy_threshold,
         watch_threshold=watch_threshold,
         reject_threshold=reject_threshold,
+        limit=follow_up_limit,
     )
 
     recommendations = []
@@ -432,6 +434,7 @@ def _build_screener_explanation(
         },
         "near_misses": near_misses,
         "follow_up": follow_up,
+        "follow_up_counts": follow_up_counts,
         "top_scores": top_scores,
         "next_actions": _next_actions(follow_up),
         "recommendations": recommendations,
@@ -731,6 +734,7 @@ def screener_explain(
     run_id: str = typer.Option("", "--run-id", help="只分析指定 run_id 的评分/决策事件"),
     limit: int = typer.Option(1000, "--limit", help="最大读取事件数量"),
     near_miss_margin: float = typer.Option(1.0, "--near-miss-margin", help="买入线下方多少分视为临界候选"),
+    follow_up_limit: int = typer.Option(10, "--follow-up-limit", help="每类跟进候选最多返回数量"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """解释近期为什么没有合适候选，输出评分漏斗、否决原因和临界候选。"""
@@ -738,6 +742,8 @@ def screener_explain(
         raise typer.BadParameter("--days must be >= 1")
     if limit < 1:
         raise typer.BadParameter("--limit must be >= 1")
+    if follow_up_limit < 1:
+        raise typer.BadParameter("--follow-up-limit must be >= 1")
 
     ctx = build_context()
     try:
@@ -763,6 +769,7 @@ def screener_explain(
             since=since_value,
             run_id=run_id or None,
             near_miss_margin=near_miss_margin,
+            follow_up_limit=follow_up_limit,
         )
         json_or_text(payload, as_json)
     finally:

@@ -167,13 +167,20 @@ def test_build_screener_explanation_returns_follow_up_candidate_layers():
         [],
         thresholds={"buy": 6.0, "watch": 5.0, "reject": 4.0},
         since="2026-05-19T00:00:00+08:00",
+        follow_up_limit=1,
     )
 
     assert payload["follow_up"]["watch_candidates"][0]["code"] == "001"
+    assert len(payload["follow_up"]["near_watch_candidates"]) == 1
     assert payload["follow_up"]["near_watch_candidates"][0]["code"] == "004"
-    assert payload["follow_up"]["near_watch_candidates"][1]["code"] == "002"
     assert payload["follow_up"]["blocked_high_scores"][0]["code"] == "003"
     assert payload["follow_up"]["data_repair_candidates"][0]["code"] == "004"
+    assert payload["follow_up_counts"] == {
+        "watch_candidates": 1,
+        "near_watch_candidates": 2,
+        "blocked_high_scores": 1,
+        "data_repair_candidates": 1,
+    }
     assert payload["next_actions"][0] == {
         "type": "stock_analysis",
         "label": "复核观察候选",

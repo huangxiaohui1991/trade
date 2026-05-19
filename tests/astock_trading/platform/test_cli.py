@@ -146,6 +146,7 @@ def test_screener_explain_help_via_bin_trade():
 
     assert "解释近期为什么没有合适候选" in result.stdout
     assert "--near-miss-margin" in result.stdout
+    assert "--follow-up-limit" in result.stdout
     assert "--json" in result.stdout
 
 
