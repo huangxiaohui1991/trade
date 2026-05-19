@@ -86,7 +86,8 @@
 - [x] 月报增加"模拟盘 vs 实盘"对比区块（买入信号数 / 执行数 / 偏离 / 盈亏差异）
 - [x] 收盘报告增加"模拟盘 vs 实盘"对比区块（待实盘有数据后启用）
   - 2026-05-19：收盘报告复用 `review shadow` 对账结果，展示模拟盘/实盘数量、匹配数、偏离数和前 5 条偏离明细。
-- [ ] 周报增加模拟盘独立 P&L 统计（待积累更多数据）
+- [x] 周报增加模拟盘独立 P&L 统计（待积累更多数据）
+  - 2026-05-19：模拟盘卖出事件写入 `realized_pnl_cents`；周报/月报 `paper_stats` 从模拟盘事件独立汇总，缺少 realized_pnl 时明确显示暂无可用数据。
 - [x] 建立逐笔 join 口径：`signal_id / code / side / event_date / order_id`
 - [x] 偏离类型结构化：`not_executed / extra_real_trade / partial_fill / price_slippage / manual_override`
 - [x] 当模拟盘信号与实盘操作不一致时，记录 `rule_deviation: shadow_divergence`

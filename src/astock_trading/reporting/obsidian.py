@@ -1167,6 +1167,11 @@ class ObsidianProjector:
         if paper_stats:
             p = paper_stats
             paper_pnl = p.get("net_pnl_cents", 0) / 100
+            paper_pnl_text = (
+                f"¥{paper_pnl:+,.0f}"
+                if p.get("pnl_data_quality", "ok") == "ok"
+                else "暂无可用数据（缺少模拟盘 realized_pnl）"
+            )
             lines.extend([
                 "",
                 "### 模拟盘",
@@ -1175,7 +1180,7 @@ class ObsidianProjector:
                 "|------|------|",
                 f"| 买入次数 | {p.get('buy_count', 0)} 次 |",
                 f"| 卖出次数 | {p.get('sell_count', 0)} 次 |",
-                f"| 净盈亏 | ¥{paper_pnl:+,.0f} |",
+                f"| 净盈亏 | {paper_pnl_text} |",
             ])
 
         # 交易明细
@@ -1365,6 +1370,11 @@ class ObsidianProjector:
 
         if paper:
             p_pnl = paper.get("net_pnl_cents", 0) / 100
+            p_pnl_text = (
+                f"¥{p_pnl:+,.0f}"
+                if paper.get("pnl_data_quality", "ok") == "ok"
+                else "暂无可用数据（缺少模拟盘 realized_pnl）"
+            )
             lines.extend([
                 "",
                 "### 模拟盘",
@@ -1373,7 +1383,7 @@ class ObsidianProjector:
                 "|------|------|",
                 f"| 买入次数 | {paper.get('buy_count', 0)} |",
                 f"| 卖出次数 | {paper.get('sell_count', 0)} |",
-                f"| 净盈亏 | ¥{p_pnl:+,.0f} |",
+                f"| 净盈亏 | {p_pnl_text} |",
             ])
 
         # 周度汇总

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from astock_trading.market.models import StockQuote, StockSnapshot
 from astock_trading.platform.db import init_db, connect
+from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
 from astock_trading.market.service import MarketService
@@ -522,3 +523,46 @@ class TestWeeklyPipeline:
         assert result["sell_count"] == 2
         assert result["win_rate"] == 0.5
         assert result["net_pnl_cents"] == 0
+
+    def test_weekly_report_uses_paper_realized_pnl(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+        ctx.event_store.append(
+            stream="paper:002138",
+            stream_type="paper_trade",
+            event_type=AUTO_TRADE_EXECUTED,
+            payload={
+                "side": "buy",
+                "code": "002138",
+                "name": "双环传动",
+                "shares": 100,
+                "price": 10.0,
+                "status": "filled",
+            },
+            metadata={"run_id": "paper_weekly", "account": "paper"},
+        )
+        ctx.event_store.append(
+            stream="paper:002138",
+            stream_type="paper_trade",
+            event_type=AUTO_TRADE_EXECUTED,
+            payload={
+                "side": "sell",
+                "code": "002138",
+                "name": "双环传动",
+                "shares": 100,
+                "price": 11.2,
+                "status": "filled",
+                "realized_pnl_cents": 12000,
+            },
+            metadata={"run_id": "paper_weekly", "account": "paper"},
+        )
+
+        from astock_trading.pipeline.weekly import run
+
+        result = run(ctx, "run_weekly_paper_pnl")
+        week_file = next((Path(ctx.vault_path) / "03-分析" / "周复盘").glob("*.md"))
+        content = week_file.read_text(encoding="utf-8")
+
+        assert result["paper_stats"]["buy_count"] == 1
+        assert result["paper_stats"]["sell_count"] == 1
+        assert result["paper_stats"]["net_pnl_cents"] == 12000
+        assert "| 净盈亏 | ¥+120 |" in content

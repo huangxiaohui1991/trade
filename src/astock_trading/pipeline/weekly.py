@@ -142,25 +142,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
                  for r in pool_rows]
 
     # 7. 模拟盘统计（event_store 不可用时静默返回 None）
-    paper_buys = 0
-    paper_sells = 0
+    paper_stats = None
     try:
-        paper_events = ctx.event_store.query(event_type="auto_trade.executed", since=week_start_utc)
-        paper_buys = sum(1 for e in paper_events
-                         if e.get("payload", {}).get("side") == "buy"
-                         and e.get("metadata", {}).get("account") == "paper")
-        paper_sells = sum(1 for e in paper_events
-                          if e.get("payload", {}).get("side") == "sell"
-                          and e.get("metadata", {}).get("account") == "paper")
+        paper_events = ctx.event_store.query(
+            event_type="auto_trade.executed",
+            since=week_start_utc,
+            until=week_after_utc,
+        )
+        paper_stats = _paper_stats_from_events(paper_events)
     except Exception:
         pass
-    paper_stats = None
-    if paper_buys or paper_sells:
-        paper_stats = {
-            "buy_count": paper_buys,
-            "sell_count": paper_sells,
-            "net_pnl_cents": 0,  # 模拟盘盈亏需从 MX API 获取，暂用 0
-        }
 
     # 8. 周报
     week_str = now.strftime("%Y-W%W")
@@ -225,6 +216,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "buy_count": buy_count, "sell_count": sell_count,
         "win_rate": win_rate, "profit_loss_ratio": round(profit_loss_ratio, 2),
         "net_pnl_cents": net_pnl_cents,
+        "paper_stats": paper_stats,
     }
 
 
@@ -339,19 +331,7 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
 
     # 模拟盘统计
     paper_events = ctx.event_store.query(event_type="auto_trade.executed", since=month_start_utc)
-    paper_buys = sum(1 for e in paper_events
-                     if e.get("payload", {}).get("side") == "buy"
-                     and e.get("metadata", {}).get("account") == "paper")
-    paper_sells = sum(1 for e in paper_events
-                      if e.get("payload", {}).get("side") == "sell"
-                      and e.get("metadata", {}).get("account") == "paper")
-    paper_stats = None
-    if paper_buys or paper_sells:
-        paper_stats = {
-            "buy_count": paper_buys,
-            "sell_count": paper_sells,
-            "net_pnl_cents": 0,
-        }
+    paper_stats = _paper_stats_from_events(paper_events)
 
     # 风控参数
     cfg = ctx.cfg
@@ -399,3 +379,30 @@ def _generate_monthly_review(ctx: PipelineContext, run_id: str, now: datetime):
         _logger.info(f"[weekly] 月复盘已生成: {month_str}")
     except Exception as e:
         _logger.warning(f"[weekly] 月复盘生成失败: {e}")
+
+
+def _paper_stats_from_events(events: list[dict]) -> dict | None:
+    paper_events = [
+        event for event in events
+        if event.get("metadata", {}).get("account") == "paper"
+        and event.get("payload", {}).get("side") in {"buy", "sell"}
+        and event.get("payload", {}).get("status") in {"filled", "dry_run"}
+    ]
+    if not paper_events:
+        return None
+
+    buy_count = sum(1 for event in paper_events if event.get("payload", {}).get("side") == "buy")
+    sell_events = [event for event in paper_events if event.get("payload", {}).get("side") == "sell"]
+    realized_values = [
+        int(event.get("payload", {}).get("realized_pnl_cents") or 0)
+        for event in sell_events
+        if "realized_pnl_cents" in event.get("payload", {})
+    ]
+    return {
+        "buy_count": buy_count,
+        "sell_count": len(sell_events),
+        "net_pnl_cents": sum(realized_values),
+        "pnl_data_quality": (
+            "ok" if len(realized_values) == len(sell_events) else "missing_realized_pnl"
+        ),
+    }

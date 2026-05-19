@@ -552,6 +552,8 @@ def _execute_sell(
         "name": pos.name,
         "shares": pos.shares,
         "price": pos.current_price,
+        "avg_cost": pos.avg_cost,
+        "realized_pnl_cents": int(round((pos.current_price - pos.avg_cost) * pos.shares * 100)),
         "reason": reason,
         "dry_run": dry_run,
     }
